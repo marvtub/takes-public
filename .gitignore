@@ -1,0 +1,6 @@
+.build/
+build.noindex/
+build/
+build.noindex/
+.DS_Store
+__pycache__/

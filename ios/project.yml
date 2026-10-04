@@ -1,0 +1,44 @@
+name: TakesPhone
+options:
+  bundleIdPrefix: de.marvinaziz
+  deploymentTarget:
+    iOS: "18.0"
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    DEVELOPMENT_TEAM: ${TAKES_TEAM}
+    CODE_SIGN_STYLE: Automatic
+targets:
+  TakesPhone:
+    type: application
+    platform: iOS
+    sources: [TakesPhone]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: de.marvinaziz.takes.phone
+        PRODUCT_NAME: Takes
+        TARGETED_DEVICE_FAMILY: "1"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        INFOPLIST_FILE: TakesPhone/Info.plist
+        GENERATE_INFOPLIST_FILE: NO
+        MARKETING_VERSION: "1.0"
+        CURRENT_PROJECT_VERSION: "1"
+  TakesPhoneUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources: [TakesPhoneUITests]
+    dependencies:
+      - target: TakesPhone
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: de.marvinaziz.takes.phone.uitests
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_TARGET_NAME: TakesPhone
+schemes:
+  TakesPhone:
+    build:
+      targets:
+        TakesPhone: all
+        TakesPhoneUITests: [test]
+    test:
+      targets: [TakesPhoneUITests]
