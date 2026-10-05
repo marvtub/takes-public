@@ -1299,7 +1299,6 @@ struct StillReview: View {
                 }
                 .buttonStyle(.plain).help(c.text)
             }
-            if Cover.can(url) { CoverButton(image: url) }
             Button { app.commentMode.toggle() } label: {
                 HStack(spacing: 5) {
                     Image(systemName: "text.bubble")

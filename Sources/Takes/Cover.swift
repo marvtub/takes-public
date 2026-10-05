@@ -1,17 +1,21 @@
 import AVFoundation
 import Foundation
+import ImageIO
 import SwiftUI
 
 // A cover is a thumbnail baked into the video as its first frames, so the feed and the player show
 // it before the video plays (2026-10-02: The user had thumbnails but no way to get one into the video).
 //
-// "Use as cover" on an image in thumbnails/ makes the next edit version: the image for
-// `Cover.seconds`, then the post's video. The post then shows that version. The post's front
-// matter keeps the choice, so Claude can put the same cover on each later edit:
+// The Cover button on the Post tab picks one for the platform on show: each platform has its own
+// video, and its versions (Main, Short, ...) share it. Takes makes the next edit version: the
+// image for `Cover.seconds`, then that post's video. That post then shows the new version. Its
+// front matter keeps the choice, so Claude can put the same cover on each later edit:
 //
 //   cover:       thumbnails/x.png    the image
 //   cover_from:  edits/a-v7.mp4      the video without the cover
 //   cover_video: edits/a-v8.mp4      the version Takes made with it
+//
+// Before (2026-10-04), "Use as cover" sat on every thumbnail and always went to the LinkedIn post.
 
 enum Cover {
     /// How long the cover shows. Long enough to be frame 0 everywhere, short enough not to be seen.
@@ -23,16 +27,19 @@ enum Cover {
             && AppModel.session(containing: image) != nil
     }
 
-    /// The cover the session's post uses now.
-    static func current(_ session: URL) -> URL? {
-        PostFile.read(session)?.meta["cover"].map { session.appending(path: $0).standardizedFileURL }
+    /// The platforms whose post can have a cover: the ones that show a video.
+    static func platforms() -> [PostPlatform] { PostPlatform.allCases.filter { $0 != .article } }
+
+    /// The cover a platform's post uses now.
+    static func current(_ session: URL, _ p: PostPlatform = .linkedin) -> URL? {
+        PostFile.read(session, p)?.meta["cover"].map { session.appending(path: $0).standardizedFileURL }
     }
 
     /// The video to put a cover on: the post's video, but without a cover Takes made before.
-    static func source(in session: URL) -> URL? {
-        let c = PostFile.read(session)
-        guard let media = PostFile.media(c, in: session), Asset.kind(of: media) == .video else {
-            return PostFile.newest(session.appending(path: "edits"), .video)
+    static func source(in session: URL, _ p: PostPlatform = .linkedin) -> URL? {
+        let c = PostFile.read(session, p)
+        guard let media = PostFile.media(c, in: session, p), Asset.kind(of: media) == .video else {
+            return p == .vertical ? nil : PostFile.newest(session.appending(path: "edits"), .video)
         }
         if let made = c?.meta["cover_video"], let from = c?.meta["cover_from"],
            media.standardizedFileURL == session.appending(path: made).standardizedFileURL {
@@ -40,6 +47,36 @@ enum Cover {
             if FileManager.default.fileExists(atPath: u.path) { return u }
         }
         return media
+    }
+
+    /// Width over height of an image or a video, as it shows.
+    static func ratio(_ url: URL) -> CGFloat? {
+        if Asset.kind(of: url) == .video {
+            guard let track = AVURLAsset(url: url).tracks(withMediaType: .video).first else { return nil }
+            let r = CGRect(origin: .zero, size: track.naturalSize).applying(track.preferredTransform)
+            return abs(r.height) > 0 ? abs(r.width) / abs(r.height) : nil
+        }
+        guard let src = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any],
+              let w = props[kCGImagePropertyPixelWidth] as? CGFloat,
+              let h = props[kCGImagePropertyPixelHeight] as? CGFloat, h > 0 else { return nil }
+        let turned = ((props[kCGImagePropertyOrientation] as? Int) ?? 1) >= 5
+        return turned ? h / w : w / h
+    }
+
+    /// Tall, wide or square: a cover is cropped to fill the video, so only the same shape fits.
+    static func shape(_ ratio: CGFloat) -> Int { ratio < 0.85 ? -1 : ratio > 1.18 ? 1 : 0 }
+
+    /// The session's thumbnails with the shape of `video`, newest first.
+    static func candidates(in session: URL, for video: URL) -> [URL] {
+        let dir = session.appending(path: "thumbnails")
+        let files = (try? FileManager.default.contentsOfDirectory(
+            at: dir, includingPropertiesForKeys: [.contentModificationDateKey], options: .skipsHiddenFiles)) ?? []
+        let want = ratio(video).map(shape)
+        return files.filter { Asset.kind(of: $0) == .image }
+            .filter { f in want == nil || ratio(f).map(shape) == want }
+            .sorted { (Store.modified($0) ?? .distantPast) > (Store.modified($1) ?? .distantPast) }
+            .map(\.standardizedFileURL)
     }
 
     /// edits/a-v7.mp4 → edits/a-v8.mp4 (one more than the highest a-vN there).
@@ -83,27 +120,65 @@ enum Cover {
         try await ffmpeg(args)
     }
 
-    /// Puts `image` on the post's video as its cover: a new edit version, and the post shows it.
+    /// Puts `image` on a platform's video as its cover: a new edit version, and that post shows it.
     /// Returns the new file.
-    static func use(_ image: URL) async throws -> URL {
+    static func use(_ image: URL, on p: PostPlatform = .linkedin) async throws -> URL {
         guard let session = AppModel.session(containing: image) else { throw Failure("This image is not in a session") }
-        guard let video = source(in: session) else { throw Failure("No edit in edits/ to put the cover on") }
+        guard let video = source(in: session, p) else { throw Failure("No video in edits/ for the \(p.name) post") }
         let out = next(after: video)
         let part = out.deletingLastPathComponent().appending(path: ".\(out.lastPathComponent).part.mp4")
         try await make(image: image, video: video, out: part)
+        // Read before the new version lands: after, it is the newest edit every post without a pick shows.
+        let keep = before(session)
         try FileManager.default.moveItem(at: part, to: out)
-
-        let rel = { (u: URL) in String(u.standardizedFileURL.path.dropFirst(session.standardizedFileURL.path.count + 1)) }
-        let pinned = PostFile.read(session)?.media != nil
-        if PostFile.read(session) == nil { PostFile.write(PostFile.Content(text: ""), to: session) }
-        PostFile.update(session) { c in
+        let real = { (u: URL) in u.standardizedFileURL.resolvingSymlinksInPath().path }
+        let rel = { (u: URL) in String(real(u).dropFirst(real(session).count + 1)) }
+        settle(session, p, keep: keep) { c in
             c.meta["cover"] = rel(image)
             c.meta["cover_from"] = rel(video)
             c.meta["cover_video"] = rel(out)
-            // A starred video moves to the new version; else the newest edit (this one) shows anyway.
-            if pinned { c.media = rel(out) }
+            c.media = rel(out)
         }
         return out
+    }
+
+    /// Takes the cover off: the post shows the video without it again.
+    static func remove(from session: URL, _ p: PostPlatform) {
+        guard let c = PostFile.read(session, p), c.meta["cover"] != nil else { return }
+        let from = c.meta["cover_from"].map { session.appending(path: $0) }
+        let back = from.flatMap { FileManager.default.fileExists(atPath: $0.path) ? c.meta["cover_from"] : nil }
+        settle(session, p, keep: before(session)) { c in
+            c.meta["cover"] = nil; c.meta["cover_from"] = nil; c.meta["cover_video"] = nil
+            c.media = back
+        }
+    }
+
+    /// What each platform's post shows now.
+    private static func before(_ session: URL) -> [PostPlatform: (pick: String?, shows: URL?)] {
+        var out: [PostPlatform: (pick: String?, shows: URL?)] = [:]
+        for p in platforms() {
+            guard let c = PostFile.read(session, p) else { continue }
+            out[p] = (c.media, PostFile.media(c, in: session, p))
+        }
+        return out
+    }
+
+    /// Changes post `p`, then keeps every other post on the video it showed. A post without a pick
+    /// shows the newest edit, and the new cover version is the newest: before, a cover for the
+    /// vertical post also moved the LinkedIn post onto it.
+    private static func settle(_ session: URL, _ p: PostPlatform, keep: [PostPlatform: (pick: String?, shows: URL?)],
+                               _ change: (inout PostFile.Content) -> Void) {
+        if PostFile.read(session, p) == nil { PostFile.write(PostFile.Content(text: ""), to: session, p) }
+        PostFile.update(session, p, change)
+        // Resolved: a folder listing says /private/var where the session says /var.
+        let real = { (u: URL) in u.standardizedFileURL.resolvingSymlinksInPath().path }
+        let base = real(session) + "/"
+        for (q, was) in keep where q != p && was.pick == nil {
+            guard let shows = was.shows, real(shows).hasPrefix(base),
+                  PostFile.media(PostFile.read(session, q), in: session, q).map(real) != real(shows)
+            else { continue }
+            PostFile.update(session, q) { $0.media = String(real(shows).dropFirst(base.count)) }
+        }
     }
 
     struct Failure: LocalizedError {
@@ -112,9 +187,7 @@ enum Cover {
     }
 
     static func ffmpeg(_ args: [String]) async throws {
-        let bin = ["/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg", "/usr/bin/ffmpeg"]
-            .first { FileManager.default.isExecutableFile(atPath: $0) }
-        guard let bin else { throw Failure("ffmpeg is not installed (brew install ffmpeg)") }
+        guard let bin = Setup.tool("ffmpeg") else { throw Failure("ffmpeg is missing. Click Finish setup in the sidebar.") }
         try await Task.detached(priority: .utility) {
             let p = Process()
             p.executableURL = URL(fileURLWithPath: bin)
@@ -136,16 +209,19 @@ enum Cover {
 }
 
 extension AppModel {
-    /// "Use as cover": makes the version in the background, then says where it is.
-    func useCover(_ image: URL) {
-        guard !coverWork.contains(image) else { return }
-        coverWork.insert(image)
-        show(toast: "Putting the cover on the video…")
+    /// Makes the cover version in the background, then says where it is. `coverWork` holds the
+    /// post file while it works, so its button shows a spinner.
+    func useCover(_ image: URL, on p: PostPlatform) {
+        guard let session = AppModel.session(containing: image) else { return }
+        let key = PostFile.url(session, p).standardizedFileURL
+        guard !coverWork.contains(key) else { return }
+        coverWork.insert(key)
+        show(toast: "Putting the cover on the \(p.name) video…")
         Task {
-            defer { coverWork.remove(image) }
+            defer { coverWork.remove(key) }
             do {
-                let out = try await Cover.use(image)
-                show(toast: "\(out.deletingPathExtension().lastPathComponent) starts with this cover. The post uses it.")
+                let out = try await Cover.use(image, on: p)
+                show(toast: "\(out.deletingPathExtension().lastPathComponent) starts with this cover. The \(p.name) post uses it.")
             } catch {
                 show(toast: error.localizedDescription)
             }
@@ -153,36 +229,109 @@ extension AppModel {
     }
 }
 
-/// "Use as cover" on a thumbnail: on the stage bar (dark) and on chat cards (light).
-struct CoverButton: View {
+/// The Cover button on the Post toolbar: the post's cover, and the session's thumbnails of the
+/// same shape to pick from.
+struct CoverPicker: View {
     @Environment(AppModel.self) var app
-    let image: URL
-    var dark = true
-    @State private var isCover = false
+    let session: URL
+    let platform: PostPlatform
+    /// The video the post shows.
+    let video: URL
+    @State private var open = false
+    @State private var current: URL?
+    @State private var choices: [URL] = []
+    @State private var images: [URL: NSImage] = [:]
+
+    private var busy: Bool { app.coverWork.contains(PostFile.url(session, platform).standardizedFileURL) }
 
     var body: some View {
-        let busy = app.coverWork.contains(image)
-        Button { app.useCover(image) } label: {
-            HStack(spacing: 5) {
+        Button { open.toggle() } label: {
+            ZStack {
                 if busy {
-                    LayerSpinner(color: dark ? .white : Theme.ink, lineWidth: 1.5, inset: 1).frame(width: 12, height: 12)
+                    LayerSpinner(color: Theme.ink, lineWidth: 1.5, inset: 1).frame(width: 13, height: 13)
+                } else if let current, let img = images[current] {
+                    Image(nsImage: img).resizable().scaledToFill()
+                        .frame(width: 18, height: 18).clipShape(RoundedRectangle(cornerRadius: 4))
                 } else {
-                    Image(systemName: isCover ? "checkmark" : "photo.badge.checkmark")
+                    Image(systemName: "photo.on.rectangle")
                 }
-                Text(busy ? "Making…" : isCover ? "Cover" : "Use as cover")
             }
-            .font(dark ? Theme.mono(11, .medium) : Theme.sans(12, .medium))
-            .padding(.horizontal, 9).padding(.vertical, 4)
-            .background(dark ? Color.white.opacity(isCover ? 0.18 : 0.1) : (isCover ? Theme.accentSoft : Theme.hover),
-                        in: RoundedRectangle(cornerRadius: Theme.radius))
-            .foregroundStyle(dark ? Color.white : (isCover ? Theme.accentInk : Theme.ink))
+            .frame(width: 30, height: 28)
+        }
+        .help(busy ? "Making the cover version…" : current == nil
+              ? "Cover: put a thumbnail in the first frames of the \(platform.name) video"
+              : "Cover: \(current!.lastPathComponent). Click to change it")
+        .popover(isPresented: $open, arrowEdge: .bottom) { panel }
+        .task(id: "\(video.path)|\(busy)") { await load() }
+    }
+
+    private func load() async {
+        current = Cover.current(session, platform)
+        let s = session, v = video
+        choices = await Task.detached(priority: .userInitiated) { Cover.candidates(in: s, for: v) }.value
+        for u in choices + [current].compactMap({ $0 }) where images[u] == nil {
+            let a = Asset(url: u, group: "", name: u.lastPathComponent, size: 0, modified: Store.modified(u) ?? .distantPast)
+            images[u] = await Thumbs.shared.image(a)
+        }
+    }
+
+    private var panel: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("\(platform.name) cover").font(Theme.sans(13, .semibold))
+                Text("The video starts with this image, so the feed shows it before it plays. Every version of this post uses it.")
+                    .font(Theme.sans(11.5)).foregroundStyle(Theme.muted).fixedSize(horizontal: false, vertical: true)
+            }
+            if choices.isEmpty {
+                Text("No thumbnail in this shape yet. Ask Takes to make one.")
+                    .font(Theme.sans(12)).foregroundStyle(Theme.faint).padding(.vertical, 8)
+            } else {
+                ScrollView {
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 96, maximum: 140), spacing: 10)], spacing: 10) {
+                        ForEach(choices, id: \.self) { u in tile(u) }
+                    }
+                }
+                .frame(maxHeight: 360)
+            }
+            if current != nil {
+                Button("No cover") {
+                    Cover.remove(from: session, platform)
+                    open = false
+                    app.show(toast: "The \(platform.name) post shows the video without a cover again")
+                }
+                .buttonStyle(BracketButtonStyle())
+            }
+        }
+        .padding(14)
+        .frame(width: 330)
+    }
+
+    private func tile(_ u: URL) -> some View {
+        let on = u == current
+        return Button {
+            open = false
+            app.useCover(u, on: platform)
+        } label: {
+            VStack(alignment: .leading, spacing: 4) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 8).fill(Theme.hover)
+                    if let img = images[u] { Image(nsImage: img).resizable().scaledToFit() }
+                }
+                .frame(height: 96)
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+                .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(on ? Theme.accent : Theme.border, lineWidth: on ? 2 : 0.5))
+                .overlay(alignment: .topTrailing) {
+                    if on {
+                        Image(systemName: "checkmark.circle.fill").foregroundStyle(.white, Theme.accent).padding(5)
+                    }
+                }
+                Text((u.lastPathComponent as NSString).deletingPathExtension)
+                    .font(Theme.sans(10.5)).foregroundStyle(Theme.muted).lineLimit(1).truncationMode(.middle)
+            }
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .disabled(busy || app.isRecording)
-        .help(isCover ? "The video starts with this image. Click to make the newest edit again with it."
-                      : "Put this image in the first frames of the post's video, as a new edit version")
-        .task(id: busy) {
-            if let s = AppModel.session(containing: image) { isCover = Cover.current(s) == image.standardizedFileURL }
-        }
+        .help(on ? "The cover now. Click to make the newest edit again with it." : "Use as the \(platform.name) cover")
     }
 }

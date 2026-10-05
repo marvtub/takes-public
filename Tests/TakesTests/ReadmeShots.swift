@@ -115,6 +115,7 @@ let demoRoot = ProcessInfo.processInfo.environment["TAKES_DEMO"]
 
     @Test(.enabled(if: readmeDir != nil && demoRoot != nil)) func window() async throws {
         _ = NSApplication.shared
+        PostVideo.stills = true
         let fonts = URL(fileURLWithPath: #filePath).deletingLastPathComponent().appending(path: "../../assets/fonts")
         for f in (try? FileManager.default.contentsOfDirectory(at: fonts, includingPropertiesForKeys: nil)) ?? []
         where f.pathExtension == "ttf" { CTFontManagerRegisterFontsForURL(f as CFURL, .process, nil) }
@@ -126,12 +127,15 @@ let demoRoot = ProcessInfo.processInfo.environment["TAKES_DEMO"]
         d.set(true, forKey: "chatDocked")
         NSApp.applicationIconImage = NSImage(contentsOf: URL(fileURLWithPath: #filePath).deletingLastPathComponent()
             .appending(path: "../../assets/Takes.icns"))
-        d.set("Sam Rivera", forKey: "linkedinName")
-        d.set("Video creator · Editing with agents", forKey: "linkedinHeadline")
-        d.set("Sam Rivera", forKey: "xName")
-        d.set("samrivera", forKey: "xHandle")
-        let avatar = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
-            .appending(path: "../../scripts/public/demo-media/avatar.jpg")
+        // The made-up creator demo.py picked for this library (2026-10-05): each site picture shows another one.
+        let creator = (try? JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: demoRoot!)
+            .appending(path: ".creator.json")))) as? [String: String] ?? [:]
+        d.set(creator["name"] ?? "Sam Rivera", forKey: "linkedinName")
+        d.set(creator["headline"] ?? "Video creator · Editing with agents", forKey: "linkedinHeadline")
+        d.set(creator["name"] ?? "Sam Rivera", forKey: "xName")
+        d.set(creator["handle"] ?? "samrivera", forKey: "xHandle")
+        let avatar = creator["avatar"].map { URL(fileURLWithPath: $0) } ?? URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().appending(path: "../../scripts/public/demo-media/sam/avatar.jpg")
         LinkedIn.photoImage = NSImage(contentsOf: avatar)
         LinkedIn.photoLoaded = true
         revealAtOnce = true
@@ -193,7 +197,7 @@ struct Banner: View {
                 Text("Record takes.\nClaude Code does the rest.")
                     .font(.custom("Nunito-Bold", size: 38)).foregroundStyle(Color(red: 0.96, green: 0.97, blue: 0.99))
                     .lineSpacing(2)
-                Text("Scripts, storyboards, edits and posts for\nLinkedIn, X, YouTube, Shorts and your blog.")
+                Text("Scripts, storyboards, edits and posts for\nLinkedIn, X, YouTube, TikTok, Reels and Shorts.")
                     .font(.custom("Inter-Regular", size: 19)).foregroundStyle(Color(red: 0.66, green: 0.71, blue: 0.80))
                     .lineSpacing(4)
             }

@@ -14,15 +14,27 @@
 
 <p align="center"><img src="docs/tour.webp" alt="Storyboard, record and post in Takes" width="100%"></p>
 
-You write a script, record takes (camera, or camera and screen at once) and star the keeper. Claude Code reads the same files: it storyboards the video, cuts the edit, and drafts the posts for LinkedIn, X, YouTube, vertical video and your blog. Takes shows each post the way the platform will show it, so you review the real thing, not a text box.
+You write a script, record takes (camera, or camera and screen at once) and star the keeper. Claude Code reads the same files: it storyboards the video, cuts the edit, and drafts the posts for LinkedIn, X, YouTube and vertical video. Takes shows each post the way the platform will show it, so you review the real thing, not a text box.
 
 > **Shared as is.** This is a personal tool, made public so you can read it, fork it and make it yours. It does not take pull requests (a bot closes them) and it has no support, but [Discussions](https://github.com/marvtub/takes-public/discussions) are open.
 
 ## Getting started
 
-1. Install [Claude Code](https://claude.com/claude-code) and sign in, then `brew install ffmpeg`.
-2. Get Takes: download `Takes.dmg` from [Releases](https://github.com/marvtub/takes-public/releases/latest), or clone this repo and run `./build.sh install`. The download is not notarized by Apple: at the first open, go to System Settings > Privacy & Security and click **Open Anyway**.
-3. Open Takes, allow the camera and mic, and press ⌘R.
+Paste this in Terminal:
+
+```sh
+curl -fsSL https://gettakes.app/install | bash
+```
+
+It installs Takes, ffmpeg and [Claude Code](https://claude.com/claude-code) (if you don't have them), signs you in to Claude and opens Takes. Run it again to update. Then allow the camera and mic, and press ⌘R.
+
+<details>
+<summary>Other ways to install</summary>
+
+- **Download:** get `Takes.dmg` from [Releases](https://github.com/marvtub/takes-public/releases/latest) and drag Takes to Applications. Apple has not notarized Takes, so the first open is blocked: open System Settings > Privacy & Security and click **Open Anyway**. Then click **Finish setup** in the sidebar: it installs Claude Code and ffmpeg for you.
+- **From source:** clone this repo, `brew install ffmpeg`, then `./build.sh install`.
+
+</details>
 
 On its first launch Takes connects itself to Claude Code: it adds the `takes` MCP server and two skills, `takes-storyboard` and `takes-video-edit`. Then ask Claude Code, in the Takes chat or any terminal: *"storyboard my next Takes video"* or *"cut my last take"*.
 
@@ -38,7 +50,7 @@ On its first launch Takes connects itself to Claude Code: it adds the `takes` MC
 
 **Every platform, previewed as it will look.**
 
-<p align="center"><img src="docs/posts.webp" alt="LinkedIn, X, YouTube, vertical and blog previews" width="100%"></p>
+<p align="center"><img src="docs/posts.webp" alt="LinkedIn, X, YouTube and vertical previews" width="100%"></p>
 
 <details>
 <summary>All the screens</summary>
@@ -48,8 +60,8 @@ On its first launch Takes connects itself to Claude Code: it adds the `takes` MC
 | <img src="docs/post-linkedin.webp"> | <img src="docs/post-x.webp"> |
 | **YouTube** | **TikTok, Reels and Shorts** |
 | <img src="docs/post-youtube.webp"> | <img src="docs/post-vertical.webp"> |
-| **Blog article** (edit it in place) | **Light mode** |
-| <img src="docs/post-article.webp"> | <img src="docs/record-light.webp"> |
+| **Light mode** | |
+| <img src="docs/record-light.webp"> | |
 
 </details>
 
@@ -71,7 +83,7 @@ flowchart LR
 
 ## Good to know
 
-- **Needs:** macOS 15+, Claude Code, ffmpeg. Building from source also needs the Swift toolchain (Xcode or the Command Line Tools).
+- **Needs:** a Mac with Apple silicon, macOS 15+, a Claude plan. The install script gets the rest. Building from source also needs the Swift toolchain (Xcode or the Command Line Tools).
 - **Optional:** `whisper` for transcripts, a `GEMINI_API_KEY` for storyboard sketches, the iPhone app (`TAKES_TEAM=<team id> ios/install.sh`).
 - **Questions and ideas:** [Discussions](https://github.com/marvtub/takes-public/discussions). Pull requests are closed by a bot; fork it and make it yours.
 - **Tests:** `./test.sh`.

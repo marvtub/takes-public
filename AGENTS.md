@@ -47,6 +47,8 @@ Where things are in `Sources/Takes/`:
   `Updater.swift` (the Update button), `Namer.swift` (session titles).
 - **Private features** (`Features.socialBoards`): `Copilot.swift` and `CopilotView.swift` (LinkedIn
   comments), `Performance.swift`, `Social.swift`, `SocialWeek.swift`.
+- **Private blog** (`Features.blog`, `BLOG` in `mcp/takes_mcp.py`): the Article side of the post tab
+  (`Article.swift`, `ArticleView.swift`) and the server's `article` platform. The public copy turns both off.
 
 The app and the server share one data format: the library folders in `~/Movies/Takes`. The
 server's `instructions` describe that format. When you change the format, change both sides and

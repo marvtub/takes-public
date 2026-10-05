@@ -349,8 +349,10 @@ final class PhoneServer: PhoneHandler, @unchecked Sendable {
             }
             return .encode(["ok": true])
         case ("POST", "/api/cover"):
+            // Older phones still send it; the cover goes to the LinkedIn post unless ?platform= says.
             guard let img = inLibrary(req.query["path"]), Cover.can(img) else { return .error(400, "Only a thumbnail in a session can be a cover") }
-            await MainActor.run { self.app?.useCover(img) }
+            let p = req.query["platform"].flatMap(PostPlatform.init(rawValue:)) ?? .linkedin
+            await MainActor.run { self.app?.useCover(img, on: p) }
             return .encode(["ok": true])
         case ("POST", "/api/archive"):
             // ?id=…&on=1 (archive) or on=0 (back to the list).

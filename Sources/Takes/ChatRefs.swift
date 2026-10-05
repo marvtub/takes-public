@@ -125,13 +125,6 @@ enum ChatRefs {
         text.components(separatedBy: "\n").filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
             .joined(separator: "\n")
     }
-
-    static func open(_ file: URL) -> URL? {
-        var c = URLComponents()
-        c.scheme = "takes"; c.host = "open"
-        c.queryItems = [URLQueryItem(name: "path", value: file.path)]
-        return c.url
-    }
 }
 
 /// Claude's reply: text with inline markdown, and a card for each reference line.
@@ -168,8 +161,7 @@ struct ChatReply: View {
         if let (id, action) = linksCache, id == ObjectIdentifier(app) { return action }
         let action = OpenURLAction { [weak app] url in
             guard let app else { return .systemAction }
-            if url.isFileURL, let t = ChatRefs.open(url) { app.handle(url: t); return .handled }
-            if url.scheme == "takes" { app.handle(url: url); return .handled }
+            if url.isFileURL || url.scheme == "takes" { app.follow(url); return .handled }
             return .systemAction
         }
         linksCache = (ObjectIdentifier(app), action)
@@ -309,9 +301,6 @@ struct FileRefCard: View {
         Group {
             if visual { mediaCard } else { refCard }
         }
-        .overlay(alignment: .topTrailing) {
-            if asset.kind == .image, Cover.can(url) { CoverButton(image: url).padding(8) }
-        }
         // A vertical or square frame makes a narrow card; a wide one takes the chat's width.
         .frame(maxWidth: visual && ratio < 1.2 ? (ratio < 0.9 ? 210 : 280) : .infinity)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -333,7 +322,7 @@ struct FileRefCard: View {
     /// In Takes when the file is in a session; else (a file dropped into the chat) in its own app.
     private func open() {
         if AppModel.session(containing: url) == nil { NSWorkspace.shared.open(url); return }
-        if let t = ChatRefs.open(url) { app.handle(url: t) }
+        app.follow(url)
     }
 
     /// A frame or a video: the video plays right here in the glass player; the name below opens
@@ -471,7 +460,7 @@ struct PostRefCard: View {
                 if let s = found?.session {
                     Button("Open in Takes") {
                         let p = PostPlatform.allCases.first { $0.name == platform } ?? .linkedin
-                        if let t = ChatRefs.open(s.appending(path: p.rel)) { app.handle(url: t) }
+                        app.follow(s.appending(path: p.rel))
                     }
                     .buttonStyle(.plain).font(Theme.sans(11.5, .medium)).foregroundStyle(Theme.accentInk)
                 }

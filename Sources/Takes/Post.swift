@@ -24,6 +24,12 @@ import SwiftUI
 enum PostPlatform: String, CaseIterable, Identifiable {
     case linkedin, x, youtube, vertical, article
     var id: String { rawValue }
+    /// The platforms the app shows: the article only where the blog is on (Features.blog).
+    static let shown: [PostPlatform] = allCases.filter { Features.blog || $0 != .article }
+    /// The remembered side of the post tab, or LinkedIn when that side is not shown.
+    static func stored(_ raw: String) -> PostPlatform {
+        PostPlatform(rawValue: raw).flatMap { shown.contains($0) ? $0 : nil } ?? .linkedin
+    }
     var name: String {
         switch self {
         case .linkedin: "LinkedIn"
@@ -515,7 +521,7 @@ struct PostPane: View {
 
     var body: some View {
         let _ = Perf.body("PostPane")
-        let p = PostPlatform(rawValue: raw) ?? .linkedin
+        let p = PostPlatform.stored(raw)
         PlatformPostPane(doc: doc, platform: p, from: from, pick: { from = p; raw = $0.rawValue }).id(p)
     }
 }
@@ -755,7 +761,7 @@ struct PlatformPostPane: View {
                         .allowsHitTesting(false)
                 }
                 .shadow(color: Theme.shadow, radius: 14, y: 6)
-                .frame(maxWidth: 555)
+                .frame(maxWidth: 555 * TextSize.shared.factor)
                 .padding(.horizontal, 24).padding(.top, 76).padding(.bottom, 60)
                 .frame(maxWidth: .infinity)
         }
@@ -803,6 +809,9 @@ struct PlatformPostPane: View {
                     }
                     .help(expanded ? "Feed view: cut after three lines, as the feed does" : "Show the whole post and edit it")
                     }
+                    if platform != .article, let media, Asset.kind(of: media) == .video {
+                        CoverPicker(session: doc.url, platform: platform, video: media)
+                    }
                     Button { startComment() } label: { Image(systemName: "text.bubble").frame(width: 30, height: 28) }
                         .help("Comment for Takes: on the selected text, or on the whole post")
                     Button {
@@ -826,7 +835,7 @@ struct PlatformPostPane: View {
     /// LinkedIn | X | YouTube | Vertical. A dot marks the sides that have a post.
     private var platformSwitch: some View {
         HStack(spacing: 0) {
-            ForEach(PostPlatform.allCases) { p in
+            ForEach(PostPlatform.shown) { p in
                 let on = p == pill
                 let has = FileManager.default.fileExists(atPath: PostFile.url(doc.url, p).path)
                 Button { if p != platform { post.close(); pick(p) } } label: {
@@ -1162,10 +1171,11 @@ enum LinkedIn {
     static let blue = Color(red: 10 / 255, green: 102 / 255, blue: 194 / 255)  // #0A66C2
     static let inkNS = NSColor(white: 0, alpha: 0.9)
     static let blueNS = NSColor(srgbRed: 10 / 255, green: 102 / 255, blue: 194 / 255, alpha: 1)
-    static let textFont = NSFont.systemFont(ofSize: 14)
-    static let lineHeight: CGFloat = 20
+    /// The preview follows the app's text size (⌘+ / ⌘−), like the rest of Takes.
+    static var textFont: NSFont { NSFont.systemFont(ofSize: 14 * TextSize.shared.factor) }
+    static var lineHeight: CGFloat { (20 * TextSize.shared.factor).rounded() }
 
-    static func font(_ size: CGFloat, _ weight: Font.Weight = .regular) -> Font { .system(size: size, weight: weight) }
+    static func font(_ size: CGFloat, _ weight: Font.Weight = .regular) -> Font { .system(size: size * TextSize.shared.factor, weight: weight) }
 
     /// Your photo, kept with the app's settings (it is not part of any session or library).
     static let photoURL: URL = {
@@ -1483,7 +1493,7 @@ struct PostMedia: View {
             } else {
                 ZStack {
                     Color.black
-                    if let player { PostPlayerLayer(player: player) }
+                    if let player { PostVideo(player: player) }
                     if paused {
                         Image(systemName: "play.fill").font(.system(size: 26)).foregroundStyle(.white)
                             .frame(width: 60, height: 60).background(.black.opacity(0.5), in: Circle())
@@ -1596,6 +1606,32 @@ struct PostPlayerLayer: NSViewRepresentable {
     final class Coordinator { var ready: NSKeyValueObservation? }
 }
 
+/// A post's video. Screenshots can't see a player layer, so with `stills` on it shows a frame
+/// of the file instead, clipped and overlaid like the video.
+struct PostVideo: View {
+    let player: AVPlayer
+    nonisolated(unsafe) static var stills = false
+    @State private var still: CGImage?
+
+    var body: some View {
+        if Self.stills {
+            Color.clear
+                .overlay { if let still { Image(decorative: still, scale: 1).resizable().scaledToFill() } }
+                .clipped()
+                .task {
+                    // A looper hands its first item to the player a moment later.
+                    for _ in 0..<30 where player.currentItem == nil { try? await Task.sleep(for: .milliseconds(100)) }
+                    guard let asset = player.currentItem?.asset else { return }
+                    let gen = AVAssetImageGenerator(asset: asset)
+                    gen.appliesPreferredTrackTransform = true
+                    still = try? await gen.image(at: CMTime(seconds: 1.5, preferredTimescale: 600)).image
+                }
+        } else {
+            PostPlayerLayer(player: player)
+        }
+    }
+}
+
 // MARK: - Editor
 
 /// The type a post editor writes in: LinkedIn's or X's.
@@ -1606,8 +1642,8 @@ struct EditorLook {
     let tag: NSColor
     /// What gets the tag colour: hashtags, mentions and links; the article's markdown marks.
     var marks: (String) -> [NSRange] = PostFile.tags
-    static let linkedin = EditorLook(font: LinkedIn.textFont, lineHeight: LinkedIn.lineHeight, ink: LinkedIn.inkNS, tag: LinkedIn.blueNS)
-    static let x = EditorLook(font: XFeed.textFont, lineHeight: XFeed.lineHeight, ink: XFeed.inkNS, tag: XFeed.blueNS)
+    static var linkedin: EditorLook { EditorLook(font: LinkedIn.textFont, lineHeight: LinkedIn.lineHeight, ink: LinkedIn.inkNS, tag: LinkedIn.blueNS) }
+    static var x: EditorLook { EditorLook(font: XFeed.textFont, lineHeight: XFeed.lineHeight, ink: XFeed.inkNS, tag: XFeed.blueNS) }
 }
 
 /// The post text, editable, in the platform's type. It grows with the text; the pane scrolls.
@@ -1677,6 +1713,19 @@ struct PostEditor: NSViewRepresentable {
                 tv.undoManager?.removeAllActions(withTarget: tv.textStorage as Any)
             }
         } else if tv.string != text && !c.editing { set(tv, text) }
+        if look.font.pointSize != c.fontSize {
+            c.fontSize = look.font.pointSize
+            let all = NSRange(location: 0, length: (tv.string as NSString).length)
+            tv.textStorage?.setAttributes(attributes, range: all)
+            tv.typingAttributes = attributes
+            tv.defaultParagraphStyle = attributes[.paragraphStyle] as? NSParagraphStyle
+            tv.lineHeight = look.lineHeight
+            if let p = tv.placeholder {
+                tv.placeholder = NSAttributedString(string: p.string, attributes: [
+                    .font: look.font, .foregroundColor: look.ink.withAlphaComponent(0.4)])
+            }
+            tv.invalidateIntrinsicContentSize()
+        }
         c.decorate(tv, highlights)
         if let reveal, reveal.token != c.lastReveal {
             c.lastReveal = reveal.token
@@ -1745,9 +1794,11 @@ struct PostEditor: NSViewRepresentable {
         var identity: String
         var lastReveal = 0
         var lastFocus: Int
+        /// The type size the text has: a new text size (⌘+ / ⌘−) restyles it in place.
+        var fontSize: CGFloat
         private var lit: (String, [String])?
 
-        init(_ p: PostEditor) { parent = p; identity = p.identity; lastFocus = p.autofocus ? p.focusToken - 1 : p.focusToken }
+        init(_ p: PostEditor) { parent = p; identity = p.identity; fontSize = p.look.font.pointSize; lastFocus = p.autofocus ? p.focusToken - 1 : p.focusToken }
 
         func textDidBeginEditing(_ notification: Notification) { editing = true }
         func textDidEndEditing(_ notification: Notification) { editing = false }

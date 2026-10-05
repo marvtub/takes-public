@@ -152,6 +152,23 @@ class CommentCopilot(unittest.TestCase):
         v = t.t_set_comment_stats({"id": sid, "impressions": 900, "likes": 4})
         self.assertEqual((v["status"], v["stats"]["impressions"]), ("posted", 900))
 
+    def test_comments_on_the_library_files(self):
+        # The user comments on the target list in Comments > Library: the app writes the comment with
+        # the file's full path, in the copilot's own folder.
+        targets = t.linkedin_ref("commenting-targets.md")
+        d = t.comments_dir()
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, "comments.json"), "w") as f:
+            json.dump({"comments": [{"id": "c1", "file": targets, "quote": "Jane", "text": "Drop him",
+                                     "status": "open", "created": "2026-10-04T18:00:00Z"}]}, f)
+        ctx = t.t_get_comment_context({})
+        self.assertEqual(ctx["open_comments"], 1)
+        got = t.t_get_comments({"library": "comments"})["comments"]
+        self.assertEqual([c["id"] for c in got], ["c1"])
+        self.assertEqual(got[0]["quote"], "Jane")
+        t.t_reply_comment({"library": "comments", "replies": [{"id": "c1", "text": "Removed", "resolve": True}]})
+        self.assertEqual(t.t_get_comment_context({})["open_comments"], 0)
+
     def test_tools_registered(self):
         names = {n for n, *_ in t.TOOLS}
         for n in ("get_comment_context", "add_comment_suggestion", "redraft_comment",

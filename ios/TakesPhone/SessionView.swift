@@ -523,7 +523,6 @@ struct FileCard: View {
                     Image(systemName: file.isVideo ? "film" : file.isImage ? "photo" : "doc")
                     Text(file.name).lineLimit(1)
                     Spacer()
-                    if file.canBeCover { CoverButton(path: file.path) }
                 }
                 .font(.inter(.footnote, .medium)).foregroundStyle(Palette.ink)
                 .padding(12)
@@ -534,28 +533,6 @@ struct FileCard: View {
             .shadow(color: Palette.shadow.opacity(0.5), radius: 6, y: 2)
         }
         .buttonStyle(Pressable(scale: 0.98))
-    }
-}
-
-struct CoverButton: View {
-    @EnvironmentObject var model: Model
-    let path: String
-    @State private var state = 0  // 0 idle, 1 asked, 2 failed
-
-    var body: some View {
-        Button {
-            state = 1
-            Task {
-                do { try await model.cover(path) } catch { state = 2; model.error = error.localizedDescription }
-            }
-        } label: {
-            Label(state == 1 ? "Making…" : "Use as cover", systemImage: state == 1 ? "hourglass" : "photo.badge.checkmark")
-                .font(.inter(.caption, .semibold)).foregroundStyle(Palette.accent)
-                .padding(.horizontal, 10).padding(.vertical, 6)
-                .background(Palette.accentSoft, in: Capsule())
-        }
-        .buttonStyle(.press)
-        .disabled(state == 1)
     }
 }
 
@@ -650,9 +627,6 @@ struct Tile: View {
                 Button { Task { await model.keeper(sessionID, take: n); await reload() } } label: {
                     Label(file.keeper == true ? "Remove the star" : "Star as keeper", systemImage: "star")
                 }
-            }
-            if file.canBeCover {
-                Button { Task { try? await model.cover(file.path) } } label: { Label("Use as cover", systemImage: "photo.badge.checkmark") }
             }
         }
     }
@@ -1252,13 +1226,12 @@ struct Viewer: View {
                 Button(action: onDone) { dark("xmark", "Close") }.buttonStyle(.press)
                 Text(file.name).font(.inter(.footnote, .semibold)).foregroundStyle(.white.opacity(0.9)).lineLimit(1)
                     .frame(maxWidth: .infinity)
-                if file.canBeCover { CoverButton(path: file.path) }
                 if let n = file.take {
                     Button { Task { await model.keeper(sessionID, take: n); onDone() } } label: {
                         dark(file.keeper == true ? "star.fill" : "star", "Star as keeper", tint: file.keeper == true ? .yellow : .white)
                     }
                     .buttonStyle(.press)
-                } else if !file.canBeCover {
+                } else {
                     Color.clear.frame(width: 40, height: 40)
                 }
             }

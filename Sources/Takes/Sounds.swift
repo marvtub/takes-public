@@ -89,20 +89,25 @@ final class EffectTrack {
     private func rebuild() {
         if let boundary, let player { player.removeTimeObserver(boundary) }
         boundary = nil
-        let times = here.map { NSValue(time: CMTime(seconds: $0.at, preferredTimescale: 600)) }
-        guard let player, !times.isEmpty else { return }
-        boundary = player.addBoundaryTimeObserver(forTimes: times, queue: .main) { [weak self] in
-            MainActor.assumeIsolated { self?.fire() }
+        last = nil
+        guard let player, !here.isEmpty else { return }
+        // A tick every 0.1 s, not a boundary observer: on a busy Mac the boundary callback came late
+        // or not at all, and effects were skipped (2026-10-04). Each tick plays the cues passed since
+        // the last one; a jump (a seek) plays nothing.
+        boundary = player.addPeriodicTimeObserver(forInterval: CMTime(value: 1, timescale: 10), queue: .main) { [weak self] time in
+            MainActor.assumeIsolated { self?.tick(time.seconds) }
         }
     }
 
-    private func fire() {
-        guard let t = player?.currentTime().seconds, t.isFinite else { return }
-        // The cue just crossed: the latest one at or before now. On a busy Mac the callback comes late
-        // (a 0.25 s window skipped effects, 2026-10-04), so allow 1.5 s; never an earlier cue again.
-        let crossed = here.filter { $0.at <= t + 0.25 && t - $0.at < 1.5 }
-        guard let last = crossed.map(\.at).max() else { return }
-        for c in crossed where c.at == last { play(c) }
+    /// Where the last tick saw the playhead.
+    private var last: Double?
+
+    private func tick(_ t: Double) {
+        guard t.isFinite else { return }
+        defer { last = t }
+        // The first tick from the start counts a cue at 0:00 too.
+        guard let from = last ?? (t < 0.2 ? -1 : nil), t > from, t - from < 1.5, player?.rate ?? 0 > 0 else { return }
+        for c in here where c.at > from && c.at <= t { play(c) }
     }
 
     func play(_ c: EffectCue) {

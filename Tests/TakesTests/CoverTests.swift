@@ -28,7 +28,7 @@ struct CoverTests {
         try sh(["-f", "lavfi", "-i", "color=red:s=400x400", "-frames:v", "1", image.path])
         PostFile.pickMedia("thumbnails/a-v1.png", in: s)  // starred as the post image, like the user did
 
-        let out = try await Cover.use(image)
+        let out = try await Cover.use(image, on: .linkedin)
         #expect(out.lastPathComponent == "a-v2.mp4")
         let c = try #require(PostFile.read(s))
         #expect(c.media == "edits/a-v2.mp4")
@@ -47,6 +47,42 @@ struct CoverTests {
         let later = try await gen.image(at: CMTime(seconds: 0.5, preferredTimescale: 600)).image
         #expect(Self.red(first) > 0.7 && Self.red(later) < 0.3)
         #expect(first.width == 360 && first.height == 640)
+    }
+
+    /// A cover for the vertical post goes on the vertical video; the LinkedIn post keeps its wide
+    /// video, though the new version is now the newest edit. Only tall thumbnails are offered.
+    @Test func eachPlatformGetsItsOwnCover() async throws {
+        guard FileManager.default.isExecutableFile(atPath: "/opt/homebrew/bin/ffmpeg") else { return }
+        let fm = FileManager.default
+        let s = fm.temporaryDirectory.appending(path: "cover-\(UUID().uuidString)/P/2026-10-04-a")
+        try fm.createDirectory(at: s.appending(path: "edits"), withIntermediateDirectories: true)
+        try fm.createDirectory(at: s.appending(path: "thumbnails"), withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: s.deletingLastPathComponent().deletingLastPathComponent()) }
+        try Data("{}".utf8).write(to: s.appending(path: "session.json"))
+        let tall = s.appending(path: "edits/v-v1.mp4"), wide = s.appending(path: "edits/a-v1.mp4")
+        try sh(["-f", "lavfi", "-i", "color=blue:s=360x640:r=30:d=1", "-c:v", "libx264", "-pix_fmt", "yuv420p", tall.path])
+        try sh(["-f", "lavfi", "-i", "color=green:s=640x360:r=30:d=1", "-c:v", "libx264", "-pix_fmt", "yuv420p", wide.path])
+        try fm.setAttributes([.modificationDate: Date().addingTimeInterval(-60)], ofItemAtPath: tall.path)
+        let tallThumb = s.appending(path: "thumbnails/v-wall-v1.png"), wideThumb = s.appending(path: "thumbnails/a-v1.png")
+        try sh(["-f", "lavfi", "-i", "color=red:s=360x640", "-frames:v", "1", tallThumb.path])
+        try sh(["-f", "lavfi", "-i", "color=red:s=1280x720", "-frames:v", "1", wideThumb.path])
+        PostFile.write(PostFile.Content(text: "LinkedIn"), to: s)
+        PostFile.write(PostFile.Content(text: "Vertical"), to: s, .vertical)
+        #expect(PostFile.media(PostFile.read(s), in: s)?.lastPathComponent == "a-v1.mp4")
+
+        #expect(Cover.candidates(in: s, for: tall).map(\.lastPathComponent) == ["v-wall-v1.png"])
+        #expect(Cover.candidates(in: s, for: wide).map(\.lastPathComponent) == ["a-v1.png"])
+
+        let out = try await Cover.use(tallThumb, on: .vertical)
+        #expect(out.lastPathComponent == "v-v2.mp4")
+        #expect(PostFile.read(s, .vertical)?.media == "edits/v-v2.mp4")
+        #expect(Cover.current(s, .vertical) == tallThumb.standardizedFileURL)
+        #expect(Cover.current(s) == nil)
+        #expect(PostFile.media(PostFile.read(s), in: s)?.lastPathComponent == "a-v1.mp4")
+
+        Cover.remove(from: s, .vertical)
+        #expect(Cover.current(s, .vertical) == nil)
+        #expect(PostFile.read(s, .vertical)?.media == "edits/v-v1.mp4")
     }
 
     private static func red(_ img: CGImage) -> Double {

@@ -91,7 +91,7 @@ struct AboutView: View {
         ("text.alignleft", "Script and prompter", "Read as you record"),
         ("video", "Camera and screen", "Every take kept"),
         ("rectangle.split.3x1", "Storyboard", "A sketch for each shot"),
-        ("paperplane", "Posts", "LinkedIn, X, YouTube, blog"),
+        ("paperplane", "Posts", Features.blog ? "LinkedIn, X, YouTube, blog" : "LinkedIn, X, YouTube, Shorts"),
         ("text.bubble", "Comment copilot", "Drafts in your voice"),
         ("chart.line.uptrend.xyaxis", "Performance", "What worked, and why"),
         ("bubble.left.and.text.bubble.right", "Takes chat", "Edits, cuts, thumbnails"),

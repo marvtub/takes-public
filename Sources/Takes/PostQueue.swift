@@ -60,7 +60,7 @@ final class PostQueue: ObservableObject {
         for project in (try? fm.contentsOfDirectory(at: root, includingPropertiesForKeys: nil, options: .skipsHiddenFiles)) ?? []
         where !project.lastPathComponent.hasPrefix("_") {
             for s in (try? fm.contentsOfDirectory(at: project, includingPropertiesForKeys: nil, options: .skipsHiddenFiles)) ?? [] {
-                for p in PostPlatform.allCases {
+                for p in PostPlatform.shown {
                     guard let c = PostFile.read(s, p) else { continue }
                     found.append(QueuedPost(session: s, platform: p, project: project.lastPathComponent,
                                             title: Self.title(s), content: c))

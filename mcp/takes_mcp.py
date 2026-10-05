@@ -10,6 +10,7 @@ Register:  claude mcp add takes --scope user -- python3 <path>/takes_mcp.py
 import hashlib
 import json
 import os
+import random
 import re
 import shutil
 import subprocess
@@ -327,7 +328,7 @@ def t_get_session(a):
             "x_post": post_overview(s, "x"),
             "youtube_post": post_overview(s, "youtube"),
             "vertical_post": post_overview(s, "vertical"),
-            "article": post_overview(s, "article"),
+            **({"article": post_overview(s, "article")} if BLOG else {}),
             "hooks": read_hooks(s).get("hooks", []),
             "storyboard": storyboard_view(s),
             "hook_in_script": next((h["id"] for h in read_hooks(s).get("hooks", [])
@@ -489,6 +490,9 @@ def style_pick(project, session=None):
 def library_dir(level):
     """'style:<Name>' is one of the user's styles ('user' = the default style); anything else is a project."""
     level = (level or "user").strip()
+    # The comment copilot's files (lessons, target list, style guide): Comments > Library.
+    if level == "comments":
+        return comments_dir()
     if level.lower().startswith("style:"):
         name = level.split(":", 1)[1].strip()
         if not name or "/" in name or name.startswith((".", "_")):
@@ -965,7 +969,7 @@ def t_get_comments(a):
             "note": "Video and image comments: read each 'frame' PNG, it shows the moment with the area "
                     "outlined in orange; fix it as a new version (next_path). Text comments carry 'quote', "
                     "the text the user selected: in a session script (script.md, variants/<slug>.md) change it "
-                    "with update_session / update_variant; in the post (posts/linkedin.md, posts/x.md, posts/youtube.md, posts/vertical.md, posts/article.md) with set_post (and that platform), in a post variant (posts/variants/<slug>.md, posts/x/variants/<slug>.md) with set_post variant=<slug>; in a library "
+                    "with update_session / update_variant; in the post (posts/linkedin.md, posts/x.md, posts/youtube.md, posts/vertical.md" + (", posts/article.md" if BLOG else "") + ") with set_post (and that platform), in a post variant (posts/variants/<slug>.md, posts/x/variants/<slug>.md) with set_post variant=<slug>; in a library "
                     "README.md or tokens.json edit the file. Storyboard comments carry 'shot' (its id) and "
                     "'shot_now': change the shot with set_storyboard (keep every id; the storyboard skill), "
                     "and the script with update_session if the lines change. "
@@ -1337,6 +1341,11 @@ PLATFORMS = {
     "article": {"name": "Article", "post": os.path.join("posts", "article.md"), "dir": os.path.join("posts", "article"),
                 "suffix": "article", "limit": 200000},
 }
+# The blog article is a private feature (2026-10-05), like Comments and Performance: the public copy
+# sets BLOG = False (scripts/public/export.py) and has no article platform.
+BLOG = False
+if not BLOG:
+    del PLATFORMS["article"]
 ARTICLE_CATEGORIES = ["Tech", "Life", "Business"]
 ARTICLE_SITE_REPO = "marvtub/personal-website"
 # The blog's components (components/mdx on the site); the app's preview draws each the same way.
@@ -1376,7 +1385,8 @@ def platform_of(a):
          "instagram": "vertical", "ig": "vertical", "shorts": "vertical", "youtube_shorts": "vertical",
          "blog": "article", "blog_post": "article"}.get(p, p)
     if p not in PLATFORMS:
-        raise ValueError("platform is linkedin, x, youtube, vertical (TikTok, Reels and Shorts) or article (the blog post).")
+        raise ValueError("platform is linkedin, x, youtube, vertical (TikTok, Reels and Shorts)"
+                         + (" or article (the blog post)." if BLOG else "."))
     return p
 
 
@@ -2784,7 +2794,7 @@ def voice_mix(s, key):
     g = VOICE_LOUDNESS.get(v.get("loudness"), 0.0)
     ffmpeg = find_tool("ffmpeg")
     if not ffmpeg:
-        raise ValueError("ffmpeg is not installed (brew install ffmpeg).")
+        raise ValueError("ffmpeg is not installed. Open Takes and click Finish setup, or run brew install ffmpeg.")
     subprocess.run([ffmpeg, "-v", "error", "-y", "-i", f["clean"], "-i", f["dry"], "-filter_complex",
                     "[0:a][1:a]amerge=inputs=2,pan=mono|c0=%.4f*c0+%.4f*c1,volume=%.1fdB" % (k, 1 - k, g),
                     "-ar", "48000", "-c:a", "pcm_f32le", f["mix"] + ".tmp.wav"], check=True, timeout=600)
@@ -3083,7 +3093,7 @@ def describe_video(src, prompt=None, schema=None, ask="Describe this clip.", fps
         raise ValueError("No Gemini key: set GOOGLE_AI_API_KEY in ~/.claude/.env.")
     ffmpeg = find_tool("ffmpeg")
     if not ffmpeg:
-        raise ValueError("ffmpeg is not installed (brew install ffmpeg).")
+        raise ValueError("ffmpeg is not installed. Open Takes and click Finish setup, or run brew install ffmpeg.")
     tmp = tempfile.mkdtemp(prefix="takes-describe-")
     try:
         # A small copy: Gemini looks at about 1 frame a second, so 480 px and a low bitrate lose nothing.
@@ -3113,7 +3123,7 @@ def tag_broll(path, title, description, keywords):
     """Writes the tags into the clip (stream copy into a new file, then swap). Returns the file."""
     ffmpeg = find_tool("ffmpeg")
     if not ffmpeg:
-        raise ValueError("ffmpeg is not installed (brew install ffmpeg).")
+        raise ValueError("ffmpeg is not installed. Open Takes and click Finish setup, or run brew install ffmpeg.")
     d, f = os.path.split(path)
     tmp = os.path.join(d, ".tagging-" + f)  # hidden: list_broll and the tab skip it
     subprocess.run([ffmpeg, "-v", "error", "-y", "-i", path, "-map", "0", "-c", "copy",
@@ -3427,7 +3437,11 @@ SCOUT_OUTPUT = (
     "Return only JSON, nothing else: {\"candidates\": [{\"url\": the post's own link "
     "(linkedin.com/feed/update/urn:li:activity:...), \"author\", \"author_url\", \"headline\", "
     "\"posted\" (as LinkedIn shows it, e.g. \"3h\"), \"age_hours\" (number), \"comments\" (int), "
-    "\"reactions\" (int), \"text\" (the whole post text, its line breaks kept), \"author_photo\" (the "
+    "\"reactions\" (int), \"text\" (the whole post text, word for word, from its first line to its "
+    "last, with every line break and empty line kept: with javascript_tool, find the text node with "
+    "the post's first words and return the innerText of the <p> around it; get_page_text, read_page "
+    "and textContent drop the empty lines between paragraphs. Never shorten, reword or cut a P.S.), "
+    "\"author_photo\" (the "
     "src of the author's photo on the post, an img on media.licdn.com), \"why\" (one line: what the user, "
     "an AI agent builder and founder who also surfs and travels, could add)}], %s \"stopped\": "
     "null or what stopped you}. Up to %d candidates, best first. Only posts that pass every rule.")
@@ -3449,6 +3463,40 @@ NEW_TARGETS = ("\"new_targets\": [{\"name\", \"url\", \"why\"}] (people who fit 
                "post often, only ones you would want to read every week),")
 
 
+# How many names the list scout usually reaches in one run: these count as read.
+LIST_SCOUT_REACH = 25
+
+
+def shuffled_targets(targets_file):
+    """The names on the target list, the ones offered longest ago first, random among equals
+    (2026-10-04). The scout stops at 20 candidates, so a fixed order kept the bottom of the list
+    from ever being read, and plain random kept repeating people. The first LIST_SCOUT_REACH names
+    get today's date in list-scout-seen.json."""
+    try:
+        text = open(targets_file, encoding="utf-8").read()
+    except OSError:
+        return "the list's order"
+    names = list(dict.fromkeys(re.findall(r"^\| \[([^\]]+)\]\(https://www\.linkedin\.com/in/", text, re.M)))
+    if not names:
+        return "the list's order"
+    seen_file = os.path.join(comments_dir(), "list-scout-seen.json")
+    try:
+        seen = json.load(open(seen_file, encoding="utf-8"))
+    except (OSError, ValueError):
+        seen = {}
+    random.shuffle(names)
+    names.sort(key=lambda n: seen.get(n, ""))
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    seen = {n: seen[n] for n in names if n in seen}
+    seen.update({n: now for n in names[:LIST_SCOUT_REACH]})
+    try:
+        with open(seen_file, "w", encoding="utf-8") as f:
+            json.dump(seen, f, indent=1, sort_keys=True)
+    except OSError:
+        pass
+    return ", ".join(names)
+
+
 def scout_briefs(skip_urls, skip_authors, targets_file):
     skip = ("Skip these post URLs (already drafted): %s. Skip these authors (commented in the last 2 "
             "days): %s." % (", ".join(skip_urls) or "none", ", ".join(skip_authors) or "none"))
@@ -3462,8 +3510,9 @@ def scout_briefs(skip_urls, skip_authors, targets_file):
     lst = ("You are the target-list scout for the user's LinkedIn comment copilot. " + SCOUT_BROWSER + " "
            "Read his target list at %s. For each person in it, open "
            "linkedin.com/in/<handle>/recent-activity/all/ and read their newest posts (skip their "
-           "reposts and comments). Go through every person in the list, top to bottom, but skip the "
-           "\"Quiet or unconfirmed\" section. Stop early at 20 candidates. " % targets_file
+           "reposts and comments). Go through the people in this order, the ones read longest ago first, so "
+           "every run reaches different people: %s. Stop early at 20 candidates. "
+           % (targets_file, shuffled_targets(targets_file))
            + SCOUT_RULES + " Posts under 24 hours old. " + skip + " Also note the people whose "
            "newest own post is over 30 days old. "
            + SCOUT_OUTPUT % ("\"quiet\": [names],", 20))
@@ -3527,6 +3576,7 @@ def t_get_comment_context(a):
                for s in sugg if s.get("status") == "redraft"]
 
     style = linkedin_ref("comment-style-guide.md")
+    open_notes = [c for c in read_comments(comments_dir())["comments"] if c.get("status") != "resolved"]
     skip_urls = sorted({norm_post_url((s.get("post") or {}).get("url")) for s in sugg} - {""})
     return {
         "lessons": read_text(lessons_path()),
@@ -3540,6 +3590,10 @@ def t_get_comment_context(a):
         "skip_authors": recent,
         "scouts": scout_briefs(skip_urls, recent, linkedin_ref("commenting-targets.md")),
         "waiting_for_redraft": redraft,
+        "open_comments": len(open_notes),
+        "open_comments_note": ("The user left comments on these files (Comments > Library): get_comments "
+                               "library='comments', edit the file, then reply_comment library='comments' "
+                               "resolve=true.") if open_notes else None,
         "rules": "English posts only. Author headline must show a founder, CEO, CTO, head of / VP, product, "
                  "growth or engineering role. Under ~150 comments. A post by someone on the target list: under 24 hours old. "
                  "Anyone else: under 12 hours old with at least 20 reactions (from a commenter scout: under 24 hours, 10 reactions). Skip skip_post_urls "
@@ -3665,15 +3719,17 @@ def t_set_comment_stats(a):
 
 S = {"type": "string"}
 SESSION = {"type": "string", "description": "Session as 'Project/folder' (from list_sessions) or an absolute path."}
-PLATFORM = {"type": "string", "enum": ["linkedin", "x", "youtube", "vertical", "article"],
+PLATFORM = {"type": "string", "enum": list(PLATFORMS),
             "description": "Which post of the session: linkedin (default, posts/linkedin.md), x (posts/x.md), "
                            "youtube (the long wide video: title + description, posts/youtube.md) or vertical (one "
-                           "vertical video and caption for TikTok, Instagram Reels and YouTube Shorts, posts/vertical.md) or article (a post "
-                           "for the user's blog in markdown, posts/article.md; later also a LinkedIn and an X article)."}
+                           "vertical video and caption for TikTok, Instagram Reels and YouTube Shorts, posts/vertical.md)"
+                           + (" or article (a post for the user's blog in markdown, posts/article.md; later also a LinkedIn "
+                              "and an X article)." if BLOG else ".")}
 TWEETS = {"type": "array", "items": {"type": "string"},
           "description": "X only, instead of text: the tweets of a thread in order (one item = one tweet)."}
 LIBRARY = {"type": "string", "description": "A library: 'style:<Name>' for one of the user's styles (e.g. "
-           "'style:Magazine'; a new name makes a new style), or a project name for that project's own additions."}
+           "'style:Magazine'; a new name makes a new style), a project name for that project's own additions, "
+           "or 'comments' for the comment copilot's files (lessons, target list, style guide)."}
 TOOLS = [
     ("get_comment_context", "LinkedIn comment copilot: everything to read before drafting comments for the user. "
      "Returns lessons.md (his rules), the target list, his best past comments, recent examples (approved as is, "
@@ -3777,12 +3833,14 @@ TOOLS = [
      "(chapters as '0:00 Intro' lines). Vertical (platform=vertical, also for tiktok/reels/shorts): one caption for "
      "TikTok, Instagram Reels and YouTube Shorts with the 9:16 edit; hook in the first line, max 2200 characters, "
      "at most 5 hashtags; title is the Shorts title, on picks the places. "
-     "The old text stays in history. get_session returns them as 'post', 'x_post', 'youtube_post', 'vertical_post', 'article'. "
-     "Article (platform=article, also 'blog'): a post for the user's blog; the app shows the blog's page. "
-     "Pass title, description (one line under the title), category (Tech, Life or Business) and the body as text. "
-     + ARTICLE_COMPONENTS + " Read 2-3 of his posts first for his voice (content/blog/*.mdx in "
-     + ARTICLE_SITE_REPO + ", e.g. gh api repos/" + ARTICLE_SITE_REPO + "/contents/content/blog). "
-     "The other platforms are plain text only: they show no markdown. No video? The post works without one "
+     "The old text stays in history. get_session returns them as 'post', 'x_post', 'youtube_post', 'vertical_post'"
+     + (", 'article'. "
+        "Article (platform=article, also 'blog'): a post for the user's blog; the app shows the blog's page. "
+        "Pass title, description (one line under the title), category (Tech, Life or Business) and the body as text. "
+        + ARTICLE_COMPONENTS + " Read 2-3 of his posts first for his voice (content/blog/*.mdx in "
+        + ARTICLE_SITE_REPO + ", e.g. gh api repos/" + ARTICLE_SITE_REPO + "/contents/content/blog). "
+        "The other platforms are plain text only: they show no markdown." if BLOG else ". Posts are plain text only: they show no markdown.")
+     + " No video? The post works without one "
      "(text only, or pass an image). For other versions use create_post_variants; for opening options "
      "set_post_hooks. With variant=<slug> it edits that variant instead of the main post.",
      {"session": SESSION, "platform": PLATFORM,
@@ -3797,9 +3855,10 @@ TOOLS = [
                 "uses the caption's first line). Max 100 characters."},
       "on": {"type": "array", "items": {"type": "string", "enum": ["tiktok", "reels", "shorts"]},
              "description": "vertical only: where it goes. Default all three."},
-      "description": {"type": "string", "description": "article only: the line under the title (front matter description)."},
-      "category": {"type": "string", "enum": ARTICLE_CATEGORIES, "description": "article only: where the blog files it."},
-      "slug": {"type": "string", "description": "article only: the URL name (example.com/blog/<slug>). Default: from the title."},
+      **({"description": {"type": "string", "description": "article only: the line under the title (front matter description)."},
+          "category": {"type": "string", "enum": ARTICLE_CATEGORIES, "description": "article only: where the blog files it."},
+          "slug": {"type": "string", "description": "article only: the URL name (example.com/blog/<slug>). Default: from the title."}}
+         if BLOG else {}),
       "first_comment": {"type": "string", "description": "LinkedIn only. Optional: the first comment the user posts under it "
                         "(links, resources, a question). The app shows it under the post as his comment. "
                         "One per session, shared by the variants. Empty string removes it."}},
@@ -3839,7 +3898,7 @@ TOOLS = [
      "media_path (the video to upload), status, at (iso, utc, local in his chosen tz, this_mac = the Mac's "
      "zone, which LinkedIn's scheduler uses) and 'action': what to do on that platform now (schedule, move, "
      "replace text, delete, or nothing). The user sets the times with [schedule] on the post tab, or asks you to pick them.",
-     {"platform": {"type": "string", "enum": ["linkedin", "x", "youtube", "vertical", "article"], "description": "Optional: only this platform."},
+     {"platform": {"type": "string", "enum": list(PLATFORMS), "description": "Optional: only this platform."},
       "posted": {"type": "boolean", "description": "Also list posts already live. Default false."},
       "drafts": {"type": "boolean", "description": "Also list drafts (not marked ready yet), e.g. for a "
                  "pipeline overview. Default false."}},

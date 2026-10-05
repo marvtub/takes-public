@@ -52,6 +52,9 @@ struct ChatLog: Codable {
     /// Messages sent while Claude worked that have not gone out yet. Kept on disk, so a quit or a
     /// crash does not lose them: the chat sends them when it loads (2026-10-03).
     var pending: [String]?
+    /// What the user typed and has not sent yet. Kept on disk, so it stays through tab and session
+    /// switches, a closed panel and a quit (2026-10-04).
+    var draft: String?
 }
 
 /// Tokens in Claude's context window, from the usage the CLI reports with each reply.
@@ -320,6 +323,7 @@ final class ClaudeChat {
         messages = log.messages
         context = log.context
         queued = log.pending ?? []
+        draft = log.draft ?? ""
         settle()
         // Messages that waited when Takes quit or crashed go out now, in the same conversation.
         if !queued.isEmpty { Task { @MainActor [weak self] in self?.sendPending() } }
@@ -413,7 +417,7 @@ final class ClaudeChat {
     static var access: String { UserDefaults.standard.string(forKey: "claudeAccess") ?? "bypassPermissions" }
 
     /// The login shell's PATH, so Claude finds ffmpeg, python and the rest. Read once.
-    static let shellPath: String = {
+    nonisolated static let shellPath: String = {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/bin/zsh")
         p.arguments = ["-lc", "printf %s \"$PATH\""]
@@ -425,8 +429,13 @@ final class ClaudeChat {
         let data = out.fileHandleForReading.readDataToEndOfFile()
         p.waitUntilExit()
         let s = String(decoding: data, as: UTF8.self)
-        return s.isEmpty ? "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin" : s
+        return withLocalBin(s.isEmpty ? "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin" : s)
     }()
+
+    /// Claude Code and the ffmpeg that Finish setup downloads live in ~/.local/bin (2026-10-05).
+    nonisolated static func withLocalBin(_ path: String, bin: String = Setup.localBin) -> String {
+        path.split(separator: ":").contains(Substring(bin)) ? path : path + ":" + bin
+    }
 
     static let commentsAsk = "I left comments in Takes, some maybe on older versions. Read them with get_comments, "
         + "fix them in the newest version, and reply to each one (resolve=true when it is fixed)."
@@ -476,6 +485,26 @@ final class ClaudeChat {
     /// like the terminal, Return queues; ⌘Return steers). Saved with the log (2026-10-03).
     /// Files dragged or pasted in, sent with the next message (ChatAttach). Not saved.
     var attachments: [URL] = []
+
+    /// The message box's text, not sent yet. It lives here, not in the view, so a tab or session
+    /// switch never loses it; it goes to disk 2 s after the last key, or at once with saveDraft().
+    var draft = "" {
+        didSet {
+            guard draft != oldValue else { return }
+            draftSave?.cancel()
+            draftSave = Task { @MainActor [weak self] in
+                try? await Task.sleep(for: .seconds(2))
+                if !Task.isCancelled { self?.saveDraft() }
+            }
+        }
+    }
+    @ObservationIgnored private var draftSave: Task<Void, Never>?
+
+    func saveDraft() {
+        draftSave?.cancel()
+        draftSave = nil
+        if log.draft != (draft.isEmpty ? nil : draft) { save() }
+    }
 
     var queued: [String] = [] {
         didSet {
@@ -596,14 +625,16 @@ final class ClaudeChat {
             posts/linkedin.md has a cover: field, start every new edit with that image for \
             0.1 s (see the takes-video-edit skill) and set cover_video to the new file. When he \
             brainstorms a video idea or asks for a storyboard, use the takes-storyboard skill: script \
-            first, then set_storyboard (it shows on the Storyboard tab). A blog post or article \
-            is posts/article.md (set_post platform=article: markdown with his blog's components, \
-            shown as your blog shows it); the LinkedIn and X articles and the video come from it.
+            first, then set_storyboard (it shows on the Storyboard tab).
             """
+            if Features.blog {
+                context += " A blog post or article is posts/article.md (set_post platform=article: markdown with " +
+                    "his blog's components, shown as your blog shows it); the LinkedIn and X articles and the video come from it."
+            }
             if let onStage {
                 context += " Right now he has \(CommentStore.path(of: onStage, in: session)) open in the player."
             } else if UserDefaults.standard.string(forKey: "rightTab") == "post",
-                      let p = PostPlatform(rawValue: UserDefaults.standard.string(forKey: "postPlatform") ?? "") {
+                      case let p = PostPlatform.stored(UserDefaults.standard.string(forKey: "postPlatform") ?? "") {
                 // Which post he looks at, so "make it shorter" lands on the right one (2026-10-04).
                 context += " Right now he has the Post tab open on the \(p.name) side (\(p.rel))."
             }
@@ -820,6 +851,7 @@ final class ClaudeChat {
     /// The app quits: the terminationHandler will not get to run, so save now. The CLI keeps what
     /// it did so far, and the next message resumes the conversation from there.
     func quit() {
+        saveDraft()
         guard running, let process = detach() else { return }
         // A steer that did not go out yet waits in the queue, which is saved: it goes next launch.
         if let steer { queued.append(steer.replacingOccurrences(of: "I interrupted you.\n", with: "")) }
@@ -1035,6 +1067,7 @@ final class ClaudeChat {
         if log.messages != messages { log.updated = Date() }
         log.messages = messages
         log.context = context
+        log.draft = draft.isEmpty ? nil : draft
         if session != nil {
             follow()
             guard let now = session, FileManager.default.fileExists(atPath: now.path) else { return }
@@ -1347,6 +1380,7 @@ private struct ChatPanel: View {
         .onReceive(NotificationCenter.default.publisher(for: .takesFilesChanged)) { n in
             if let session = target.session, FileWatch.touches(n, session) { countComments() }
         }
+        .background { if let session = target.session { SeenNotices(session: session) } }
     }
 
     private var header: some View {
@@ -1586,10 +1620,9 @@ private struct ChatPanel: View {
 /// The message box under a chat, with its draft and voice note.
 private struct ChatComposer: View {
     @Environment(AppModel.self) var app
-    var chat: ClaudeChat
+    @Bindable var chat: ClaudeChat
     let target: ChatTarget
     let openComments: Int
-    @State private var draft = ""
     @StateObject private var dictation = Dictation()
     /// What was in the box when the voice note started: the words go after it.
     @State private var spokenAfter = ""
@@ -1634,130 +1667,40 @@ private struct ChatComposer: View {
                     .transition(.opacity.combined(with: .offset(y: 4)))
             }
             ForEach(Array(chat.queued.enumerated()), id: \.offset) { i, q in
-                HStack(spacing: 8) {
-                    Image(systemName: "clock").font(.system(size: 10.5)).foregroundStyle(Theme.faint)
-                    Text(CopilotAsk.shown(q)).font(Theme.sans(12)).foregroundStyle(Theme.muted).lineLimit(2)
-                    Spacer(minLength: 4)
-                    Button { if i < chat.queued.count { chat.queued.remove(at: i) } } label: {
-                        Image(systemName: "xmark").font(.system(size: 9.5, weight: .semibold)).foregroundStyle(Theme.faint)
-                    }
-                    .buttonStyle(.plain).help("Take it out of the queue")
+                QueuedChip(text: CopilotAsk.shown(q), help: "Queued: sent when Takes is done") {
+                    if i < chat.queued.count { chat.queued.remove(at: i) }
                 }
-                .padding(.horizontal, 12).padding(.vertical, 6)
-                .background(Theme.hover, in: RoundedRectangle(cornerRadius: 10))
-                .help("Queued: sent when Takes is done")
-                .transition(.opacity.combined(with: .offset(y: 4)))
             }
             if !chat.attachments.isEmpty {
                 AttachedFiles(chat: chat)
                     .transition(.opacity.combined(with: .offset(y: 4)))
             }
-            HStack(alignment: .bottom, spacing: 8) {
-                TextField(chat.compacting ? "Queue a message: it goes after compacting"
-                          : chat.running ? "Queue a message (⌘Return: Takes stops and reads it now)" : "Message Takes",
-                          text: $draft, axis: .vertical)
-                    .textFieldStyle(.plain)
-                    .font(Theme.sans(13))
-                    .lineLimit(1...6)
-                    .overlay(alignment: .topLeading) { CommandToken(draft: draft) }
-                    .focused($focused)
-                    .onSubmit { submit() }
-                    // Escape cancels dictation, else stops Claude's reply (as in Claude Code).
-                    .onKeyPress(.escape) {
-                        if dictation.active { dictation.cancel(); return .handled }
-                        guard chat.running else { return .ignored }
-                        chat.stop()
-                        return .handled
-                    }
-                    // ⌘Return while Claude works: steer now instead of queueing.
-                    .onKeyPress(.return, phases: .down) { press in
-                        guard press.modifiers.contains(.command), chat.running, canSend else { return .ignored }
-                        send(draft, now: true)
-                        return .handled
-                    }
-                    // ⌘V with an image or files on the clipboard: they go with the message.
-                    .onKeyPress("v", phases: .down) { press in
-                        guard press.modifiers == .command else { return .ignored }
-                        return ChatAttach.paste(into: chat) ? .handled : .ignored
-                    }
-                    // Shift-Return: a new line at the cursor (Return sends).
-                    .onKeyPress(.return, phases: .down) { press in
-                        guard press.modifiers.contains(.shift),
-                              let editor = NSApp.keyWindow?.firstResponder as? NSTextView else { return .ignored }
-                        editor.insertNewlineIgnoringFieldEditor(nil)
-                        return .handled
-                    }
-                    .padding(.vertical, 7)
-                if dictation.active {
-                    VoiceNote(dictation: dictation, done: { Task { await dictation.stop() } },
-                              cancel: { dictation.cancel() })
-                        .padding(.bottom, 1)
-                } else {
-                    Button { startDictation() } label: {
-                        Image(systemName: "mic").font(.system(size: 13, weight: .medium)).frame(width: 28, height: 28)
-                    }
-                    .buttonStyle(IconButtonStyle())
-                    .disabled(app.isRecording)
-                    .help(app.isRecording ? "Not while recording a take" : "Voice note: talk, and the words come into the box")
-                    .transition(.opacity)
-                }
-                Button {
-                    if stopping { stop() } else { submit() }
-                } label: {
-                    ZStack {
-                        Circle().fill(canSend || chat.running ? Theme.ink : Theme.border)
-                        if stopping {
-                            RoundedRectangle(cornerRadius: 2).fill(Theme.paper).frame(width: 9, height: 9)
-                        } else {
-                            Image(systemName: "arrow.up").font(.system(size: 12, weight: .bold)).foregroundStyle(Theme.paper)
-                        }
-                    }
-                    .frame(width: 28, height: 28)
-                    .contentShape(Circle())
-                }
-                .buttonStyle(PressStyle())
-                .disabled(!canSend && !chat.running && !dictation.active)
-                .help(stopping ? "Stop the reply" : chat.running ? "Queue: sent when Takes is done (Return). ⌘Return steers now." : "Send (Return)")
-            }
-            .padding(.leading, 14).padding(.trailing, 6).padding(.vertical, 4)
-            .background(Theme.canvas, in: RoundedRectangle(cornerRadius: 14))
-            .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(focused ? Theme.muted.opacity(0.5) : Theme.border, lineWidth: 0.5))
+            ChatField(
+                draft: $chat.draft, focused: $focused, dictation: dictation, spokenAfter: $spokenAfter,
+                placeholder: chat.compacting ? "Queue a message: it goes after compacting"
+                    : chat.running ? "Queue a message (⌘Return: Takes stops and reads it now)" : "Message Takes",
+                running: chat.running, canSend: canSend, micOff: app.isRecording,
+                sendHelp: chat.running ? "Queue: sent when Takes is done (Return). ⌘Return steers now." : "Send (Return)",
+                stopHelp: "Stop the reply",
+                send: { send(chat.draft) }, stop: stop,
+                steer: { send(chat.draft, now: true) },
+                paste: { ChatAttach.paste(into: chat) })
         }
         .padding(12)
         .animation(Theme.motion, value: focused)
         .animation(Theme.motion, value: chat.running)
-        .animation(Theme.spring, value: dictation.active)
         .animation(Theme.motion, value: chat.attachments)
-        .onChange(of: dictation.text) { _, words in draft = spokenAfter + words }
         .onChange(of: dictation.problem) { _, why in if let why { app.show(toast: why) } }
-        .onDisappear { dictation.cancel() }
-    }
-
-    private func startDictation() {
-        let kept = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-        spokenAfter = kept.isEmpty ? "" : kept + " "
-        focused = true
-        Task { await dictation.start() }
-    }
-
-    /// Return or the send button. During a voice note: wait for the last words, then send.
-    private func submit() {
-        guard dictation.active else { send(draft); return }
-        Task {
-            await dictation.stop()
-            if canSend { send(draft) }
-        }
+        .onDisappear { chat.saveDraft() }
     }
 
     /// "@comments" alone is not a message: the "Fix my comments" button is for that.
-    private var canSend: Bool { !ClaudeChat.withoutCommentsToken(draft).isEmpty || !chat.attachments.isEmpty }
-    /// While Claude works, the button stops it; with text in the box it steers instead.
-    private var stopping: Bool { chat.running && !canSend }
+    private var canSend: Bool { !ClaudeChat.withoutCommentsToken(chat.draft).isEmpty || !chat.attachments.isEmpty }
 
     private func send(_ text: String, now: Bool = false) {
         var out = text
         // Only what the user typed: not the buttons' own asks, and /compact must stay the whole message.
-        let typed = text == draft
+        let typed = text == chat.draft
         if typed, !chat.attachments.isEmpty {
             out = ChatAttach.message(ClaudeChat.mentionsComments(text) ? ClaudeChat.withoutCommentsToken(text) : text,
                                      files: chat.attachments)
@@ -1770,18 +1713,154 @@ private struct ChatComposer: View {
             }
         }
         chat.send(out, title: target.title, onStage: target.session == nil ? nil : app.preview, now: now)
-        if typed { draft = "" }
+        if typed { chat.draft = "" }
     }
 
     /// Stop also stops the queue: its messages come back into the box.
     private func stop() {
         if !chat.queued.isEmpty {
-            draft = (chat.queued + [draft]).filter { !$0.isEmpty }.joined(separator: "\n\n")
+            chat.draft = (chat.queued + [chat.draft]).filter { !$0.isEmpty }.joined(separator: "\n\n")
             chat.queued = []
         }
         chat.stop()
     }
 
+}
+
+/// A message waiting for the run to end, with an x to take it back.
+struct QueuedChip: View {
+    let text: String
+    var help = ""
+    let remove: () -> Void
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "clock").font(.system(size: 10.5)).foregroundStyle(Theme.faint)
+            Text(text).font(Theme.sans(12)).foregroundStyle(Theme.muted).lineLimit(2)
+            Spacer(minLength: 4)
+            Button(action: remove) {
+                Image(systemName: "xmark").font(.system(size: 9.5, weight: .semibold)).foregroundStyle(Theme.faint)
+            }
+            .buttonStyle(.plain).help("Take it out of the queue")
+        }
+        .padding(.horizontal, 12).padding(.vertical, 6)
+        .background(Theme.hover, in: RoundedRectangle(cornerRadius: 10))
+        .help(help)
+        .transition(.opacity.combined(with: .offset(y: 4)))
+    }
+}
+
+/// The box the user types in, with the voice note and the send button that stops a run while the
+/// box is empty. Takes' chat and the Connections board's Muse both use it.
+struct ChatField: View {
+    @Binding var draft: String
+    var focused: FocusState<Bool>.Binding
+    @ObservedObject var dictation: Dictation
+    /// What was in the box when the voice note started: the words go after it.
+    @Binding var spokenAfter: String
+    let placeholder: String
+    let running: Bool
+    let canSend: Bool
+    var micOff = false
+    var sendHelp = "Send (Return)"
+    var stopHelp = "Stop"
+    let send: () -> Void
+    let stop: () -> Void
+    /// ⌘Return while a run goes: stop it and read the message now. Nil: Return queues only.
+    var steer: (() -> Void)?
+    /// ⌘V: true when it took the clipboard (files), so the field does not paste text too.
+    var paste: (() -> Bool)?
+
+    /// While a run goes, the button stops it; with text in the box it sends instead.
+    private var stopping: Bool { running && !canSend }
+
+    var body: some View {
+        HStack(alignment: .bottom, spacing: 8) {
+            TextField(placeholder, text: $draft, axis: .vertical)
+                .textFieldStyle(.plain)
+                .font(Theme.sans(13))
+                .lineLimit(1...6)
+                .overlay(alignment: .topLeading) { CommandToken(draft: draft) }
+                .focused(focused)
+                .onSubmit { submit() }
+                // Escape cancels dictation, else stops the run (as in Claude Code).
+                .onKeyPress(.escape) {
+                    if dictation.active { dictation.cancel(); return .handled }
+                    guard running else { return .ignored }
+                    stop()
+                    return .handled
+                }
+                .onKeyPress(.return, phases: .down) { press in
+                    guard press.modifiers.contains(.command), running, canSend, let steer else { return .ignored }
+                    steer()
+                    return .handled
+                }
+                .onKeyPress("v", phases: .down) { press in
+                    guard press.modifiers == .command, let paste else { return .ignored }
+                    return paste() ? .handled : .ignored
+                }
+                // Shift-Return: a new line at the cursor (Return sends).
+                .onKeyPress(.return, phases: .down) { press in
+                    guard press.modifiers.contains(.shift),
+                          let editor = NSApp.keyWindow?.firstResponder as? NSTextView else { return .ignored }
+                    editor.insertNewlineIgnoringFieldEditor(nil)
+                    return .handled
+                }
+                .padding(.vertical, 7)
+            if dictation.active {
+                VoiceNote(dictation: dictation, done: { Task { await dictation.stop() } },
+                          cancel: { dictation.cancel() })
+                    .padding(.bottom, 1)
+            } else {
+                Button { startDictation() } label: {
+                    Image(systemName: "mic").font(.system(size: 13, weight: .medium)).frame(width: 28, height: 28)
+                }
+                .buttonStyle(IconButtonStyle())
+                .disabled(micOff)
+                .help(micOff ? "Not while recording a take" : "Voice note: talk, and the words come into the box")
+                .transition(.opacity)
+            }
+            Button {
+                if stopping { stop() } else { submit() }
+            } label: {
+                ZStack {
+                    Circle().fill(canSend || running ? Theme.ink : Theme.border)
+                    if stopping {
+                        RoundedRectangle(cornerRadius: 2).fill(Theme.paper).frame(width: 9, height: 9)
+                    } else {
+                        Image(systemName: "arrow.up").font(.system(size: 12, weight: .bold)).foregroundStyle(Theme.paper)
+                    }
+                }
+                .frame(width: 28, height: 28)
+                .contentShape(Circle())
+            }
+            .buttonStyle(PressStyle())
+            .disabled(!canSend && !running && !dictation.active)
+            .help(stopping ? stopHelp : sendHelp)
+        }
+        .padding(.leading, 14).padding(.trailing, 6).padding(.vertical, 4)
+        .background(Theme.canvas, in: RoundedRectangle(cornerRadius: 14))
+        .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(focused.wrappedValue ? Theme.muted.opacity(0.5) : Theme.border, lineWidth: 0.5))
+        .animation(Theme.spring, value: dictation.active)
+        .onChange(of: dictation.text) { _, words in draft = spokenAfter + words }
+        .onDisappear { dictation.cancel() }
+    }
+
+    private func startDictation() {
+        let kept = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        spokenAfter = kept.isEmpty ? "" : kept + " "
+        focused.wrappedValue = true
+        Task { await dictation.start() }
+    }
+
+    /// Return or the send button. During a voice note: wait for the last words, then send.
+    private func submit() {
+        guard dictation.active else { send(); return }
+        Task {
+            await dictation.stop()
+            if canSend { send() }
+        }
+    }
 }
 
 /// "@comments" at the start of the box looks like a command, not a word: a tinted chip drawn
@@ -1815,7 +1894,6 @@ struct CommandToken: View {
 struct ChatRows: View {
     var chat: ClaudeChat
     static let page = 40
-    @State private var limit = ChatRows.page
     @Environment(\.chatLive) private var live
     /// What the chat showed when it went out of sight. While set, the body does not read
     /// `chat.messages`, so a streamed word does not redraw this copy (2026-10-04).
@@ -1824,11 +1902,26 @@ struct ChatRows: View {
     var body: some View {
         let _ = Perf.body("ChatRows")
         let messages = live ? chat.messages : frozen ?? chat.messages
+        ChatTranscript(messages: messages, running: chat.running, mood: chat.mood)
+            .onAppear { if !live { frozen = chat.messages } }
+            .onChange(of: live) { _, on in frozen = on ? nil : chat.messages }
+    }
+}
+
+/// The messages of a chat as the Takes panel draws them: bubbles, replies, folded tool steps and
+/// the working mascot. Takes' own chat and the Connections board's Muse both draw with it.
+struct ChatTranscript: View {
+    let messages: [ChatMessage]
+    let running: Bool
+    var mood: LiveMascot.Mood = .thinking
+    @State private var limit = ChatRows.page
+
+    var body: some View {
         let all = ChatItem.group(messages)
         let items = all.suffix(limit)
         VStack(alignment: .leading, spacing: 10) {
             if all.count > items.count {
-                Button { limit += Self.page * 3 } label: {
+                Button { limit += ChatRows.page * 3 } label: {
                     Label("Show earlier messages", systemImage: "arrow.up")
                         .font(Theme.sans(11.5, .medium)).foregroundStyle(Theme.muted)
                         .padding(.horizontal, 10).padding(.vertical, 5)
@@ -1842,23 +1935,44 @@ struct ChatRows: View {
                     switch item {
                     case .message(let m): ChatBubble(message: m).equatable()
                     case .tools(let t):
-                        ToolRun(tools: t, active: chat.running && item.id == items.last?.id)
+                        ToolRun(tools: t, active: running && item.id == items.last?.id)
                     }
                 }
                 .transition(.opacity.combined(with: .offset(y: 6)))
             }
-            if chat.running, messages.last.map({ $0.role != .claude || $0.done }) ?? true {
-                Working(mood: chat.mood).transition(.opacity)
+            if running, messages.last.map({ $0.role != .claude || $0.done }) ?? true {
+                Working(mood: mood).transition(.opacity)
             }
         }
         .animation(Theme.motion, value: messages.count)
-        .onAppear { if !live { frozen = chat.messages } }
-        .onChange(of: live) { _, on in frozen = on ? nil : chat.messages }
     }
 }
 
 // A plain key, not @Entry: build.sh builds with the Command Line Tools, which have no
 // SwiftUI macro plugin (2026-10-02).
+/// The pill on the stage says what this chat made. With the chat on screen 2 s (Takes in front),
+/// The user saw it here, so the pill goes; before, he had to close it by hand (2026-10-04).
+/// Its own view: the panel does not redraw when a notice comes or goes.
+private struct SeenNotices: View {
+    @Environment(AppModel.self) var app
+    @Environment(\.chatLive) private var live
+    let session: URL
+
+    var body: some View {
+        let s = session.standardizedFileURL
+        let waiting = live && app.notices.contains { $0.session == s }
+        Color.clear
+            .task(id: waiting) {
+                guard waiting else { return }
+                while !Task.isCancelled {
+                    try? await Task.sleep(for: .seconds(2))
+                    if Task.isCancelled { return }
+                    if NSApp.isActive { app.seen(s); return }
+                }
+            }
+    }
+}
+
 private struct ChatLiveKey: EnvironmentKey { static let defaultValue = true }
 
 extension EnvironmentValues {

@@ -20,10 +20,11 @@ enum YouTube {
     static let well = Color.black.opacity(0.05)
     static let inkNS = NSColor(srgbRed: 15 / 255, green: 15 / 255, blue: 15 / 255, alpha: 1)
     static let blueNS = NSColor(srgbRed: 6 / 255, green: 95 / 255, blue: 212 / 255, alpha: 1)
-    static let textFont = NSFont.systemFont(ofSize: 14)
-    static let lineHeight: CGFloat = 20
+    /// The preview follows the app's text size (⌘+ / ⌘−), like the rest of Takes.
+    static var textFont: NSFont { NSFont.systemFont(ofSize: 14 * TextSize.shared.factor) }
+    static var lineHeight: CGFloat { (20 * TextSize.shared.factor).rounded() }
 
-    static func font(_ size: CGFloat, _ weight: Font.Weight = .regular) -> Font { .system(size: size, weight: weight) }
+    static func font(_ size: CGFloat, _ weight: Font.Weight = .regular) -> Font { .system(size: size * TextSize.shared.factor, weight: weight) }
 
     static func styled(_ text: String, ink: NSColor = inkNS, tag: NSColor = blueNS) -> AttributedString {
         let ns = NSMutableAttributedString(string: text, attributes: [.foregroundColor: ink])
@@ -37,7 +38,7 @@ enum YouTube {
 }
 
 extension EditorLook {
-    static let youtube = EditorLook(font: YouTube.textFont, lineHeight: YouTube.lineHeight, ink: YouTube.inkNS, tag: YouTube.blueNS)
+    static var youtube: EditorLook { EditorLook(font: YouTube.textFont, lineHeight: YouTube.lineHeight, ink: YouTube.inkNS, tag: YouTube.blueNS) }
 }
 
 /// A one-line title, saved after a short pause, so typing does not write the file on each key.
@@ -57,7 +58,7 @@ struct PostTitleField: View {
                 .foregroundStyle(YouTube.ink)
                 .lineLimit(1...3)
             if text.count > limit - 20 {
-                Text("\(text.count)/\(limit)").font(.system(size: 11)).monospacedDigit()
+                Text("\(text.count)/\(limit)").font(YouTube.font(11)).monospacedDigit()
                     .foregroundStyle(text.count > limit ? YouTube.red : YouTube.muted)
                     .help("YouTube allows \(limit) characters in a title")
             }
@@ -224,11 +225,11 @@ struct VerticalCard: View {
         ViewThatFits(in: .horizontal) {
             HStack(alignment: .top, spacing: 40) {
                 phoneColumn
-                details.frame(width: 440).frame(minHeight: VerticalPhone.outer(phoneHeight).height, alignment: .top)
+                details.frame(width: 440 * TextSize.shared.factor).frame(minHeight: VerticalPhone.outer(phoneHeight).height, alignment: .top)
             }
             VStack(spacing: 28) {
                 phoneColumn
-                details.frame(maxWidth: 520)
+                details.frame(maxWidth: 520 * TextSize.shared.factor)
             }
         }
         .environment(\.colorScheme, .light)
@@ -253,7 +254,7 @@ struct VerticalCard: View {
                 Button { withAnimation(Theme.spring) { previewRaw = p.rawValue } } label: {
                     HStack(spacing: 6) {
                         PlatformLogo(platform: p.logo, size: 14)
-                        Text(p.name).font(.system(size: 12.5, weight: .medium))
+                        Text(p.name).font(YouTube.font(12.5, .medium))
                     }
                     .foregroundStyle(p == preview ? YouTube.ink : YouTube.muted)
                     .padding(.horizontal, 12).frame(height: 28)
@@ -295,7 +296,7 @@ struct VerticalCard: View {
     }
 
     private func label(_ s: String) -> some View {
-        Text(s.uppercased()).font(.system(size: 10.5, weight: .semibold)).tracking(0.6).foregroundStyle(YouTube.muted)
+        Text(s.uppercased()).font(YouTube.font(10.5, .semibold)).tracking(0.6).foregroundStyle(YouTube.muted)
     }
 
     private var caption: some View {
@@ -338,7 +339,7 @@ struct VerticalCard: View {
         let over = places.contains(.reels) && tags > VerticalPlace.reelsHashtags
         if tags > 0 {
             Text("# \(tags)")
-                .font(.system(size: 11, weight: .medium)).monospacedDigit()
+                .font(YouTube.font(11, .medium)).monospacedDigit()
                 .foregroundStyle(over ? YouTube.red : YouTube.muted)
                 .padding(.horizontal, 7).frame(height: 18)
                 .background((over ? YouTube.red.opacity(0.1) : Color.black.opacity(0.05)), in: Capsule())
@@ -354,7 +355,7 @@ struct VerticalCard: View {
                 label("Shorts title")
             }
             PostTitleField(saved: title, placeholder: "Empty: YouTube uses the caption's first line",
-                           font: .system(size: 14, weight: .semibold), save: saveTitle)
+                           font: YouTube.font(14, .semibold), save: saveTitle)
         }
     }
 
@@ -373,7 +374,7 @@ struct VerticalCard: View {
         } label: {
             HStack(spacing: 6) {
                 PlatformLogo(platform: p.logo, size: 14).saturation(on ? 1 : 0).opacity(on ? 1 : 0.45)
-                Text(p.name).font(.system(size: 12.5, weight: .medium))
+                Text(p.name).font(YouTube.font(12.5, .medium))
             }
             .foregroundStyle(on ? YouTube.ink : YouTube.muted)
             .padding(.leading, 7).padding(.trailing, 10).frame(height: 28)
@@ -444,7 +445,7 @@ struct VerticalPhone: View {
         let screen = RoundedRectangle(cornerRadius: 30 * k, style: .continuous)
         ZStack {
             LinearGradient(colors: [Color(white: 0.16), Color(white: 0.04)], startPoint: .top, endPoint: .bottom)
-            if let player { PostPlayerLayer(player: player) }
+            if let player { PostVideo(player: player) }
             LinearGradient(stops: [.init(color: .black.opacity(0.35), location: 0), .init(color: .clear, location: 0.16),
                                    .init(color: .clear, location: 0.55), .init(color: .black.opacity(0.6), location: 1)],
                            startPoint: .top, endPoint: .bottom)

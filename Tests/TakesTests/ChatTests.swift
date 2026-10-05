@@ -281,6 +281,27 @@ struct ChatHistoryTests {
         // It survives a restart.
         #expect(ClaudeChat(session: session).messages.count == 2)
     }
+
+    /// Typed but not sent: it stays on the chat through a tab or session switch, goes to disk, and
+    /// a new conversation keeps it. Sending clears it.
+    @Test func unsentTextStaysThroughSwitchesAndAQuit() throws {
+        let session = FileManager.default.temporaryDirectory.appending(path: "chat-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: session, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: session) }
+        let hub = ChatHub()
+        hub.chat(session).draft = "Make the hook shorter"
+        #expect(hub.chat(session).draft == "Make the hook shorter")  // the same chat when you come back
+
+        hub.chat(session).quit()
+        #expect(ClaudeChat(session: session).draft == "Make the hook shorter")  // after a quit
+
+        let chat = ClaudeChat(session: session)
+        chat.reset()
+        #expect(chat.draft == "Make the hook shorter")
+        chat.draft = ""
+        chat.saveDraft()
+        #expect(ClaudeChat(session: session).draft == "")
+    }
 }
 
 @MainActor
@@ -319,7 +340,9 @@ struct NoticeTests {
     }
 }
 
+// Serialized: two tests set the shared rightTab default.
 @MainActor
+@Suite(.serialized)
 struct PoliteOpenTests {
     @Test func anAgentRequestNeverChangesTheScreen() throws {
         let fm = FileManager.default
@@ -372,6 +395,47 @@ struct PoliteOpenTests {
         #expect(app.preview == file.standardizedFileURL)
         #expect(d.string(forKey: "rightTab") == "assets")
         #expect(app.chats.open)
+    }
+
+    /// A click on a video card in the chat opens it now; before (2026-10-04), it only left a notice.
+    @Test func aClickOpensTheFileAtOnce() async throws {
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory.appending(path: "click-\(UUID().uuidString)")
+        let s = root.appending(path: "P/2026-10-01-a")
+        try fm.createDirectory(at: s.appending(path: "edits"), withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: root) }
+        try Data("{}".utf8).write(to: s.appending(path: "session.json"))
+        let file = s.appending(path: "edits/a-v2.mp4")
+        try Data().write(to: file)
+        let d = UserDefaults.standard
+        let saved = (d.string(forKey: "rightTab"), d.bool(forKey: "chatOpen"))
+        let app = AppModel()
+        let home = app.library.root
+        defer {
+            app.library.setRoot(home)
+            d.set(saved.0, forKey: "rightTab"); app.chats.open = saved.1
+        }
+        app.library.setRoot(root)
+        app.handle(url: URL(string: "takes://open?path=" + file.path)!)
+        app.follow(file)
+        #expect(app.notices.isEmpty)
+        for _ in 0..<20 where app.preview == nil { try await Task.sleep(for: .milliseconds(50)) }
+        #expect(app.preview == file.standardizedFileURL)
+        #expect(d.string(forKey: "rightTab") == "assets")
+        // A file outside the library does nothing.
+        app.follow(URL(fileURLWithPath: "/tmp/elsewhere.mp4"))
+        #expect(app.preview == file.standardizedFileURL)
+    }
+
+    @Test func seenClearsOnlyThatSessionsNotices() throws {
+        let app = AppModel()
+        let saved = app.notices
+        defer { app.notices = saved }
+        let a = URL(fileURLWithPath: "/tmp/P/a"), b = URL(fileURLWithPath: "/tmp/P/b")
+        app.notices = [AgentNotice(path: a.appending(path: "x.mp4"), session: a),
+                       AgentNotice(path: b.appending(path: "y.mp4"), session: b)]
+        app.seen(URL(fileURLWithPath: "/tmp/P/./a"))
+        #expect(app.notices.map(\.session) == [b])
     }
 }
 

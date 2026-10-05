@@ -53,7 +53,7 @@ enum Voice {
         p.executableURL = URL(filePath: "/usr/bin/python3")
         p.arguments = [script.path] + args
         var env = ProcessInfo.processInfo.environment
-        env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:" + (env["PATH"] ?? "/usr/bin:/bin")
+        env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:\(Setup.localBin):" + (env["PATH"] ?? "/usr/bin:/bin")
         p.environment = env
         p.standardInput = FileHandle.nullDevice
         p.standardOutput = FileHandle.nullDevice

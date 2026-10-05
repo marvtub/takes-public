@@ -10,6 +10,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import takes_mcp as t  # noqa: E402
 
 
+@unittest.skipUnless(t.BLOG, "the blog is private: the public copy has no article platform")
 class ArticleTests(unittest.TestCase):
     def setUp(self):
         self.root = tempfile.mkdtemp()
@@ -21,6 +22,16 @@ class ArticleTests(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.root)
         os.environ.pop("TAKES_ROOT", None)
+
+    def test_no_article_without_blog(self):
+        """With the blog off (the public copy) the platform is gone from the tools and get_session."""
+        t.PLATFORMS.pop("article")
+        try:
+            with self.assertRaises(ValueError):
+                t.platform_of({"platform": "blog"})
+        finally:
+            t.PLATFORMS["article"] = dict(name="Article", post=os.path.join("posts", "article.md"),
+                                          dir=os.path.join("posts", "article"), suffix="article", limit=200000)
 
     def test_write_article_with_head(self):
         out = t.t_set_post({"session": self.s, "platform": "blog", "title": "How I Ship Without Reading Code",

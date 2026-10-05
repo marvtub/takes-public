@@ -36,6 +36,9 @@ struct TakesApp: App {
                     Button("Performance") { app.toggle(.performance) }.keyboardShortcut("j", modifiers: [.command, .shift])
                     Button("Comments") { app.toggle(.comments) }.keyboardShortcut("m", modifiers: [.command, .shift])
                 }
+                ForEach(Plugins.all) { p in
+                    Button(p.title) { app.toggle(.plugin(p.id)) }.keyboardShortcut(KeyEquivalent(p.key), modifiers: [.command, .shift])
+                }
                 Button("Styles") { app.toggle(.styles) }.keyboardShortcut("y", modifiers: [.command, .shift])
                 Button("Chat with Takes") { app.chats.open.toggle() }.keyboardShortcut("l", modifiers: [.command, .shift])
             }
@@ -95,7 +98,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         Updater.shared.start()
         AgentSetup.run()
+        Setup.shared.start()
         Look.shared.applyMode()
+        _ = NSWindow.keepFullScreenOnEscape
         // Design check without screen-recording rights and without taking focus: post
         // "de.marvinaziz.takes.snapshot" (object = output path) and Takes draws its window into a PNG.
         DistributedNotificationCenter.default().addObserver(forName: .init("de.marvinaziz.takes.snapshot"),
@@ -106,6 +111,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             frame.cacheDisplay(in: frame.bounds, to: rep)
             try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: out))
         }
+    }
+}
+
+extension NSWindow {
+    /// Esc that no view takes ends at the window, and a full-screen window leaves full screen on it.
+    /// Takes uses Esc to close drafts, fields and comment mode, so one press too many dropped the user
+    /// out of full screen (2026-10-05). ⌃⌘F and the green button still leave it.
+    static let keepFullScreenOnEscape: Void = {
+        let sel = #selector(NSResponder.cancelOperation(_:)), ours = #selector(NSWindow.takesCancelOperation(_:))
+        guard let original = class_getInstanceMethod(NSWindow.self, sel),
+              let replacement = class_getInstanceMethod(NSWindow.self, ours) else { return }
+        // NSWindow may only inherit cancelOperation: add ours to NSWindow so NSResponder stays untouched.
+        if class_addMethod(NSWindow.self, sel, method_getImplementation(replacement), method_getTypeEncoding(replacement)) {
+            class_replaceMethod(NSWindow.self, ours, method_getImplementation(original), method_getTypeEncoding(original))
+        } else {
+            method_exchangeImplementations(original, replacement)
+        }
+    }()
+
+    @objc func takesCancelOperation(_ sender: Any?) {
+        if styleMask.contains(.fullScreen) { return }
+        takesCancelOperation(sender)  // swapped: this runs the original
     }
 }
 
@@ -167,7 +194,7 @@ struct ContentView: View {
                 Theme.canvas
                 if app.board == .performance {
                     ChatSlot(hub: app.chats, target: ChatTarget(chat: app.chats.board, title: "Performance", session: nil)) {
-                        PerformanceView(board: app.performance, root: library.root) { app.handle(url: $0) }
+                        PerformanceView(board: app.performance, root: library.root) { app.follow($0) }
                     }
                     .overlay(alignment: .bottomTrailing) {
                         BoardChatCorner(hub: app.chats).padding(18)
@@ -184,6 +211,8 @@ struct ContentView: View {
                 } else if app.board == .comments {
                     CommentsBoard(hub: app.chats, store: app.copilot, root: library.root)
                         .transition(.opacity)
+                } else if case .plugin(let id)? = app.board, let p = Plugins.named(id) {
+                    p.board(app).transition(.opacity)
                 } else {
                     DetailView(library: library, camera: app.camera, screen: app.screen)
                 }
@@ -237,10 +266,14 @@ struct BoardRows: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
+            SetupButton()
             UpdateButton(library: app.library)
             if Features.socialBoards {
                 PerformanceRow(board: app.performance, selected: app.board == .performance) { app.board = .performance }
                 CommentsRow(store: app.copilot, runner: app.copilot.runner, chat: app.chats.comments, post: app.chats.commentsPost, selected: app.board == .comments) { app.board = .comments }
+            }
+            ForEach(Plugins.all) { p in
+                PluginRow(plugin: p, app: app, selected: app.board == .plugin(p.id)) { app.board = .plugin(p.id) }
             }
         }
             .onAppear { app.posts.scan(app.library.root) }

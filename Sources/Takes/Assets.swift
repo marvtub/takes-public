@@ -239,7 +239,8 @@ struct AssetsPane: View {
     @State private var postMedia: [PostPlatform: URL] = [:]
     @State private var postPick: [PostPlatform: String] = [:]
     /// The thumbnail the post's video starts with (Cover.swift).
-    @State private var coverRel: String?
+    /// Thumbnails a post uses as its cover (Post tab > Cover).
+    @State private var coverRels: Set<String> = []
 
     var body: some View {
         let _ = Perf.body("AssetsPane")
@@ -304,16 +305,17 @@ struct AssetsPane: View {
     }
 
     private func readPost() {
-        var shows: [PostPlatform: URL] = [:], picks: [PostPlatform: String] = [:]
+        var shows: [PostPlatform: URL] = [:], picks: [PostPlatform: String] = [:], covers: Set<String> = []
         for p in PostPlatform.allCases {
             let c = PostFile.read(doc.url, p)
-            if p == .linkedin { coverRel = c?.meta["cover"] }
+            if let cover = c?.meta["cover"] { covers.insert(cover) }
             // A platform with no post yet shows nothing; LinkedIn is the post by default.
             guard p == .linkedin || c != nil else { continue }
             picks[p] = c?.media
             shows[p] = PostFile.media(c, in: doc.url, p)?.standardizedFileURL
         }
         if picks != postPick { postPick = picks }
+        if covers != coverRels { coverRels = covers }
         if shows != postMedia { postMedia = shows }
     }
 
@@ -368,7 +370,7 @@ struct AssetsPane: View {
                               openComments: open[a.rel] ?? 0,
                               inPost: posts(showing: a),
                               pinned: PostPlatform.allCases.filter { postPick[$0] == a.rel },
-                              isCover: coverRel == a.rel,
+                              isCover: coverRels.contains(a.rel),
                               onPin: a.kind == .video || a.kind == .image ? { pin(a, $0) } : nil)
                         .background(GeometryReader { g in
                             Color.clear.preference(key: TileFrames.self, value: [a.url: g.frame(in: .named("assets"))])
@@ -390,14 +392,10 @@ struct AssetsPane: View {
         }
         if a.kind == .video || a.kind == .image {
             Menu("Use in Post") {
-                ForEach(PostPlatform.allCases) { p in
+                ForEach(PostPlatform.shown) { p in
                     Toggle("\(p.name) post", isOn: Binding(get: { postPick[p] == a.rel }, set: { _ in pin(a, p) }))
                 }
             }
-        }
-        if Cover.can(a.url) {
-            Button(coverRel == a.rel ? "Use as Cover Again" : "Use as Cover") { app.useCover(a.url) }
-                .disabled(app.isRecording || app.coverWork.contains(a.url))
         }
         Button("Open") { NSWorkspace.shared.open(a.url) }
         Button("Reveal in Finder") { reveal(a.url) }
@@ -691,7 +689,7 @@ struct AssetTile: View {
                 if let onPin, hover || !pinned.isEmpty {
                     Menu {
                         Section("Show on") {
-                            ForEach(PostPlatform.allCases) { p in
+                            ForEach(PostPlatform.shown) { p in
                                 Toggle("\(p.name) post", isOn: Binding(get: { pinned.contains(p) }, set: { _ in onPin(p) }))
                             }
                         }

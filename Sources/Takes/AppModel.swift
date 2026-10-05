@@ -88,9 +88,10 @@ final class AppModel {
             holdCamera()
         }
     }
-    /// A board (performance, comments, styles) fills the window in place of the sessions. Like the
-    /// post tab, it hides the camera and the player. It stays shut while a take records.
-    enum Board { case performance, comments, styles }
+    /// A board (performance, comments, styles, or a plugin's: Plugins.swift) fills the window in
+    /// place of the sessions. Like the post tab, it hides the camera and the player. It stays shut
+    /// while a take records.
+    enum Board: Equatable { case performance, comments, styles, plugin(String) }
     var board: Board? {
         didSet {
             if board != nil && isRecording { board = nil; return }
@@ -101,7 +102,7 @@ final class AppModel {
     }
     /// Opens the board, or shuts it when it is already open.
     func toggle(_ b: Board) {
-        if !Features.socialBoards, b != .styles { return }
+        if !Features.socialBoards, b == .performance || b == .comments { return }
         Perf.mark("board \(b)"); board = board == b ? nil : b
     }
     /// The file the Styles board plays on its left, for comments.
@@ -315,6 +316,22 @@ final class AppModel {
         notices.append(AgentNotice(path: target, session: Self.session(containing: target)))
     }
 
+    /// A link or card the user clicked (a file in a chat reply, a post, a Performance row): it opens
+    /// now. handle(url:) is for the chats' requests and only leaves a notice; a click went there
+    /// too, so a click on a video in the chat only made a notice (2026-10-04).
+    func follow(_ url: URL) {
+        var path = url.isFileURL ? url.path : nil
+        if url.scheme == "takes" {
+            path = URLComponents(url: url, resolvingAgainstBaseURL: false)?
+                .queryItems?.first(where: { $0.name == "path" })?.value
+        }
+        guard let path else { return }
+        let target = URL(fileURLWithPath: path).standardizedFileURL
+        guard Self.inside(target, library.root) else { return }
+        notices.removeAll { $0.path == target }
+        go(target)
+    }
+
     /// The session folder a path is in (or is), if any.
     nonisolated static func session(containing url: URL) -> URL? {
         var dir = url
@@ -336,6 +353,12 @@ final class AppModel {
         let r = root.standardizedFileURL.resolvingSymlinksInPath().path
         let u = url.standardizedFileURL.resolvingSymlinksInPath().path
         return u == r || u.hasPrefix(r.hasSuffix("/") ? r : r + "/")
+    }
+
+    /// The user looked at a session's chat: its notices are seen, so they go.
+    func seen(_ session: URL) {
+        let s = session.standardizedFileURL
+        notices.removeAll { $0.session == s }
     }
 
     func show(_ n: AgentNotice) {
@@ -380,7 +403,7 @@ final class AppModel {
             return
         } else if FileManager.default.fileExists(atPath: target.path, isDirectory: &isDir), !isDir.boolValue {
             file = target
-            if let p = PostPlatform.allCases.first(where: { target.path.hasSuffix("/" + $0.rel) }) {
+            if let p = PostPlatform.shown.first(where: { target.path.hasSuffix("/" + $0.rel) }) {
                 // The post opens on its tab, on its platform's side, not on the stage.
                 file = nil
                 UserDefaults.standard.set("post", forKey: "rightTab")

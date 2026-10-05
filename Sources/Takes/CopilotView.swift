@@ -262,7 +262,7 @@ struct CommentsView: View {
                         .padding(.top, 36)
                 }
             }
-            .frame(maxWidth: 720, alignment: .leading)
+            .frame(maxWidth: 720 * TextSize.shared.factor, alignment: .leading)
             .padding(.horizontal, 32).padding(.vertical, 28)
             .frame(maxWidth: .infinity)
             .animation(Theme.spring, value: list.first?.id)
@@ -721,7 +721,7 @@ private struct ApprovedList: View {
                 ForEach(store.approved) { s in row(s) }
                 }
             }
-            .frame(maxWidth: 720, alignment: .leading)
+            .frame(maxWidth: 720 * TextSize.shared.factor, alignment: .leading)
             .padding(24)
             .frame(maxWidth: .infinity)
         }
@@ -792,7 +792,7 @@ struct SkippedList: View {
                     }
                 }
             }
-            .frame(maxWidth: 720, alignment: .leading)
+            .frame(maxWidth: 720 * TextSize.shared.factor, alignment: .leading)
             .padding(24)
             .frame(maxWidth: .infinity)
         }
@@ -1094,65 +1094,299 @@ private struct PostedMetric: View {
 
 // MARK: - Library
 
-private struct CopilotLibrary: View {
+/// The files each draft run reads, as a list; the one picked opens beside it to read, edit and
+/// comment on, like a file in the Assets library. Before (2026-10-04), the lessons filled the
+/// tab and the target list and style guide opened in another app.
+struct CopilotDoc: Identifiable, Hashable {
+    let id: String
+    let title: String
+    let note: String
+    let url: URL
+
+    /// Lessons in the library; the rest in your notes repo, where the agent reads them.
+    @MainActor static func all(_ root: URL) -> [CopilotDoc] {
+        let li = ClaudeChat.folder.appending(path: "reference-docs/communication/linkedin")
+        return [
+            CopilotDoc(id: "lessons", title: "Lessons", note: "Your rules, read first", url: CopilotStore.lessons(root)),
+            CopilotDoc(id: "targets", title: "Target list", note: "Whose posts to find",
+                       url: li.appending(path: "commenting-targets.md")),
+            CopilotDoc(id: "style", title: "Style guide", note: "How you sound",
+                       url: li.appending(path: "comment-style-guide.md")),
+            CopilotDoc(id: "best", title: "Best comments", note: "Comments that did well",
+                       url: li.appending(path: "comment-library.md")),
+        ]
+    }
+}
+
+/// About how much of the agent's context a text takes: Claude reads about 4 characters of
+/// English as one token. Close enough to compare files; not a bill.
+enum TokenCount {
+    static func of(_ text: String) -> Int { (text.utf8.count + 3) / 4 }
+
+    static func label(_ n: Int) -> String {
+        n < 1000 ? "\(n)" : n < 10_000 ? String(format: "%.1fk", Double(n) / 1000) : "\(n / 1000)k"
+    }
+}
+
+struct CopilotLibrary: View {
     @ObservedObject var store: CopilotStore
-    @State private var lessons = ""
-    @State private var saved = ""
+    @AppStorage("copilotLibraryPick") private var pick = "lessons"
+    /// Tokens per file, read when the list shows and when a file is saved.
+    @State private var tokens: [String: Int] = [:]
+
+    private static let decisions = "decisions"
 
     var body: some View {
-        HStack(alignment: .top, spacing: 0) {
-            VStack(alignment: .leading, spacing: 8) {
-                HStack {
-                    SectionLabel(text: "lessons")
-                    Spacer()
-                    if lessons != saved {
-                        Button("Save") { store.saveLessons(lessons); saved = lessons }
-                            .buttonStyle(AccentButtonStyle(kind: .solid))
-                            .keyboardShortcut("s", modifiers: .command)
+        HStack(spacing: 0) {
+            if let root = store.root {
+                list(root).frame(width: 260)
+                Rule(vertical: true)
+                Group {
+                    if pick == Self.decisions {
+                        CopilotDecisions(store: store)
+                    } else if let d = CopilotDoc.all(root).first(where: { $0.id == pick }) ?? CopilotDoc.all(root).first {
+                        CopilotDocView(doc: d, root: CopilotStore.folder(root)) { tokens[d.id] = $0 }
+                            .id(d.id)
                     }
                 }
-                Text("Your rules. Every draft run reads them first.").font(Theme.sans(11.5)).foregroundStyle(Theme.faint)
-                TextEditor(text: $lessons)
-                    .font(Theme.mono(12))
-                    .scrollContentBackground(.hidden)
-                    .padding(8)
-                    .background(Theme.canvas, in: RoundedRectangle(cornerRadius: 9))
-                HStack(spacing: 8) {
-                    Button("Open target list") { open("commenting-targets.md") }.buttonStyle(BracketButtonStyle())
-                    Button("Open style guide") { open("comment-style-guide.md") }.buttonStyle(BracketButtonStyle())
-                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
-            .padding(20)
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            Rule(vertical: true)
-            ScrollView {
-                VStack(alignment: .leading, spacing: 18) {
-                    examples("your edits", store.items.filter { $0.decision?.kind == "edited" }) { s in
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(s.drafts.last?.text ?? "").font(Theme.sans(12)).foregroundStyle(Theme.faint).strikethrough()
-                            Text(s.final ?? "").font(Theme.sans(12.5))
-                        }
-                    }
-                    examples("declined", store.declined) { s in
-                        VStack(alignment: .leading, spacing: 4) {
-                            HStack(spacing: 6) {
-                                Tag(text: s.decision?.kind == "wrong_post" ? "wrong post" : "bad comment")
-                                if let r = s.decision?.reason { Tag(text: r, accent: true) }
-                                if let n = s.decision?.note { Text(n).font(Theme.sans(11.5)).foregroundStyle(Theme.muted).lineLimit(1) }
-                            }
-                            Text(s.text).font(Theme.sans(12)).foregroundStyle(Theme.muted).lineLimit(3)
-                        }
-                    }
-                    examples("approved as drafted", store.items.filter { $0.decision?.kind == "approved" }) { s in
-                        Text(s.text).font(Theme.sans(12.5)).lineLimit(4)
-                    }
-                }
-                .padding(20)
-            }
-            .frame(width: 380)
         }
-        .onAppear { lessons = store.lessons(); saved = lessons }
-        .onDisappear { if lessons != saved { store.saveLessons(lessons) } }
+    }
+
+    private func list(_ root: URL) -> some View {
+        let docs = CopilotDoc.all(root)
+        let total = docs.compactMap { tokens[$0.id] }.reduce(0, +) + (tokens[Self.decisions] ?? 0)
+        return VStack(alignment: .leading, spacing: 2) {
+            SectionLabel(text: "what each run reads")
+            Text("About \(TokenCount.label(total)) tokens of the agent's context.")
+                .font(Theme.sans(11.5)).foregroundStyle(Theme.faint)
+                .padding(.bottom, 10)
+            ForEach(docs) { d in
+                row(d.id, icon: "doc.text", d.title, d.note, tokens[d.id])
+            }
+            row(Self.decisions, icon: "checklist", "Your decisions", "What you changed",
+                tokens[Self.decisions])
+            Spacer()
+        }
+        .padding(16)
+        .task(id: store.items.count) {
+            var t: [String: Int] = [:]
+            for d in docs { t[d.id] = TokenCount.of((try? String(contentsOf: d.url, encoding: .utf8)) ?? "") }
+            t[Self.decisions] = CopilotDecisions.tokens(store)
+            tokens = t
+        }
+    }
+
+    private func row(_ id: String, icon: String, _ title: String, _ note: String, _ count: Int?) -> some View {
+        let on = pick == id
+        return Button { withAnimation(Theme.motion) { pick = id } } label: {
+            HStack(spacing: 10) {
+                Image(systemName: icon).font(.system(size: 13)).foregroundStyle(on ? Theme.accentInk : Theme.muted)
+                    .frame(width: 28, height: 28)
+                    .background(on ? Theme.accentSoft : Theme.hover, in: RoundedRectangle(cornerRadius: 7))
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(title).font(Theme.sans(12.5, .medium)).foregroundStyle(Theme.ink)
+                    Text(note).font(Theme.sans(11)).foregroundStyle(Theme.faint)
+                }
+                .lineLimit(1)
+                Spacer(minLength: 4)
+                if let count {
+                    Text(TokenCount.label(count)).font(Theme.mono(11)).foregroundStyle(Theme.faint)
+                        .help("About \(count) tokens")
+                }
+            }
+            .padding(8)
+            .background(on ? Theme.hover : .clear, in: RoundedRectangle(cornerRadius: 9))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+/// One file: its text to edit, ⌘S saves, select text to comment for Takes. The comments sit in
+/// the library's comments folder; the Comments chat reads them with get_comments library 'comments'.
+private struct CopilotDocView: View {
+    @Environment(AppModel.self) var app
+    let doc: CopilotDoc
+    let root: URL
+    let counted: (Int) -> Void
+    @StateObject private var store = CommentStore()
+    @State private var text = ""
+    @State private var saved = ""
+    @State private var stamp: Date?
+    @State private var selection = ""
+    @State private var draft: ReviewPlayer.Draft?
+    @State private var focused: String?
+    @State private var reveal: (quote: String, token: Int)?
+    /// Read shows the markdown styled, with tables (2026-10-04); Edit is the plain text.
+    @AppStorage("copilotDocReading") private var reading = true
+
+    private var file: String { CommentStore.path(of: doc.url, in: root) }
+    private var comments: [Comment] { store.on(file) }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            bar
+            Rule()
+            ScriptCommentList(comments: comments, focused: focused) { c in
+                withAnimation(Theme.motion) { draft = nil; focused = c.id }
+                if let q = c.quote { reveal = (q, (reveal?.token ?? 0) + 1) }
+            }
+            Group {
+                if reading {
+                    MarkdownReader(text: text, size: 14.5, highlights: comments.filter(\.open).compactMap(\.quote),
+                                   reveal: reveal, onSelect: { selection = $0 }, onComment: start)
+                } else {
+                    Prompter(text: $text, contentKey: doc.url.path, fontSize: 15, scrolling: false, speed: 0,
+                             editable: true, resetToken: 0,
+                             highlights: comments.filter(\.open).compactMap(\.quote), reveal: reveal,
+                             onSelect: { selection = $0 }, onComment: start)
+                }
+            }
+            .overlay(alignment: .bottomLeading) { card.padding(12) }
+        }
+        .onAppear { load(); store.load(root) }
+        .onDisappear { if text != saved { save() } }
+        .onFilesChanged(in: root) { store.load(root) }
+        // The agent edits these files while you watch (a name added to the target list): show its
+        // change, unless you are in the middle of your own.
+        .task(id: doc.url) {
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(2))
+                if text == saved, Store.modified(doc.url) != stamp { load() }
+            }
+        }
+        .onExitCommand { withAnimation(Theme.motion) { if draft != nil { draft = nil } else { focused = nil } } }
+    }
+
+    private func load() {
+        let fresh = (try? String(contentsOf: doc.url, encoding: .utf8)) ?? ""
+        stamp = Store.modified(doc.url)
+        saved = fresh
+        if fresh != text { text = fresh }
+        counted(TokenCount.of(fresh))
+    }
+
+    private func save() {
+        try? FileManager.default.createDirectory(at: doc.url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        do {
+            try text.write(to: doc.url, atomically: true, encoding: .utf8)
+            saved = text
+            stamp = Store.modified(doc.url)
+            counted(TokenCount.of(text))
+        } catch {
+            app.show(toast: "Could not save \(doc.url.lastPathComponent): \(error.localizedDescription)")
+        }
+    }
+
+    private func start() {
+        guard !selection.isEmpty else { return }
+        withAnimation(Theme.motion) { focused = nil; draft = ReviewPlayer.Draft(quote: selection, timed: false) }
+    }
+
+    private var bar: some View {
+        HStack(spacing: 10) {
+            VStack(alignment: .leading, spacing: 1) {
+                Text(doc.title).font(Theme.sans(14, .semibold))
+                Text("\(doc.url.lastPathComponent) · about \(TokenCount.label(TokenCount.of(text))) tokens")
+                    .font(Theme.mono(10.5)).foregroundStyle(Theme.faint).help(doc.url.path)
+            }
+            Spacer()
+            Picker("", selection: $reading) {
+                Text("Read").tag(true)
+                Text("Edit").tag(false)
+            }
+            .pickerStyle(.segmented).labelsHidden().fixedSize()
+            .onChange(of: reading) { selection = "" }
+            .help("Read shows the formatting; Edit shows the markdown to change it")
+            Button(action: start) { Label("Comment", systemImage: "text.bubble") }
+                .buttonStyle(BracketButtonStyle())
+                .disabled(selection.isEmpty)
+                .help("Select text, then comment on it for Takes")
+            if !reading || text != saved {
+                Button("Save", action: save)
+                    .buttonStyle(AccentButtonStyle(kind: .solid))
+                    .keyboardShortcut("s", modifiers: .command)
+                    .disabled(text == saved)
+                    .opacity(text == saved ? 0.4 : 1)
+            }
+            Button { NSWorkspace.shared.activateFileViewerSelecting([doc.url]) } label: {
+                Image(systemName: "folder").font(.system(size: 12))
+            }
+            .buttonStyle(.plain).foregroundStyle(Theme.muted)
+            .help("Show in Finder")
+        }
+        .padding(.horizontal, 16).padding(.vertical, 10)
+    }
+
+    @ViewBuilder private var card: some View {
+        if let d = draft {
+            Composer(draft: Composer.bind($draft, d),
+                     onSend: {
+                         let t = (draft?.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                         guard !t.isEmpty, let q = draft?.quote else { return }
+                         if let c = store.add(script: file, quote: q, text: t) { app.show(toast: "Comment \(c.id) saved for Takes") }
+                         withAnimation(Theme.motion) { draft = nil }
+                     },
+                     onCancel: { withAnimation(Theme.motion) { draft = nil } },
+                     onArea: {})
+        } else if let id = focused, let i = comments.firstIndex(where: { $0.id == id }) {
+            let c = comments[i]
+            CommentCard(comment: c, number: i + 1,
+                        onReply: { store.reply(id, $0) },
+                        onResolve: { store.setResolved(id, c.open) },
+                        onDelete: { store.delete(id); focused = nil },
+                        onClose: { withAnimation(Theme.motion) { focused = nil } },
+                        onJump: { _, _ in })
+        }
+    }
+}
+
+/// What the agent learns from your past decisions: the newest 10 of each kind.
+private struct CopilotDecisions: View {
+    @ObservedObject var store: CopilotStore
+
+    /// The examples the agent gets, as text: each post's text and the comments around it.
+    @MainActor static func tokens(_ store: CopilotStore) -> Int {
+        let edited = store.items.filter { $0.decision?.kind == "edited" }.suffix(10)
+        let approved = store.items.filter { $0.decision?.kind == "approved" }.suffix(10)
+        let shown = Array(edited) + Array(approved) + Array(store.declined.suffix(10))
+        let text = shown.map { s in
+            [s.post.text, s.post.author, s.text, s.final, s.drafts.last?.text, s.decision?.note]
+                .compactMap { $0 }.joined(separator: "\n")
+        }.joined(separator: "\n")
+        return TokenCount.of(text)
+    }
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                Text("The agent studies these to learn what you change.")
+                    .font(Theme.sans(11.5)).foregroundStyle(Theme.faint)
+                examples("your edits", store.items.filter { $0.decision?.kind == "edited" }) { s in
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(s.drafts.last?.text ?? "").font(Theme.sans(12)).foregroundStyle(Theme.faint).strikethrough()
+                        Text(s.final ?? "").font(Theme.sans(12.5))
+                    }
+                }
+                examples("declined", store.declined) { s in
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack(spacing: 6) {
+                            Tag(text: s.decision?.kind == "wrong_post" ? "wrong post" : "bad comment")
+                            if let r = s.decision?.reason { Tag(text: r, accent: true) }
+                            if let n = s.decision?.note { Text(n).font(Theme.sans(11.5)).foregroundStyle(Theme.muted).lineLimit(1) }
+                        }
+                        Text(s.text).font(Theme.sans(12)).foregroundStyle(Theme.muted).lineLimit(3)
+                    }
+                }
+                examples("approved as drafted", store.items.filter { $0.decision?.kind == "approved" }) { s in
+                    Text(s.text).font(Theme.sans(12.5)).lineLimit(4)
+                }
+            }
+            .frame(maxWidth: 640, alignment: .leading)
+            .padding(20)
+        }
     }
 
     private func examples<Row: View>(_ title: String, _ list: [Suggestion], @ViewBuilder row: @escaping (Suggestion) -> Row) -> some View {
@@ -1169,11 +1403,6 @@ private struct CopilotLibrary: View {
                 .builderBorder()
             }
         }
-    }
-
-    private func open(_ name: String) {
-        let url = ClaudeChat.folder.appending(path: "reference-docs/communication/linkedin/\(name)")
-        NSWorkspace.shared.open(url)
     }
 }
 

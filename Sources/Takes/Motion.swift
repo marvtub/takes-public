@@ -335,9 +335,16 @@ final class MascotView: NSView {
 extension ClaudeChat {
     /// What the mascot does: what the chat is doing now. Views read the stored `mood`.
     var currentMood: LiveMascot.Mood {
+        if running && compacting { return .thinking }
+        return LiveMascot.mood(running: running, last: messages.last)
+    }
+}
+
+extension LiveMascot {
+    /// Working on a tool, writing a reply, or thinking: from the newest message of a running chat.
+    static func mood(running: Bool, last: ChatMessage?) -> Mood {
         guard running else { return .idle }
-        if compacting { return .thinking }
-        switch messages.last {
+        switch last {
         case let m? where m.role == .tool && !m.done: return .working
         case let m? where m.role == .claude && !m.done: return .writing
         default: return .thinking

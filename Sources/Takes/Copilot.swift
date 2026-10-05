@@ -517,7 +517,7 @@ enum CopilotAsk {
         comment, following lessons.md and the style guide. Each variant a different shape (a short \
         story from his work, a pointed question, a counterpoint, a concrete tip) and length; \
         variant_picks shows which shapes he picks. Save it with add_comment_suggestion: the post's \
-        own URL, author_photo from the scout, and source "feed", "list", "search" or "commenters" (the scout that found it). If the slop gate refuses \
+        own URL, post_text exactly as the scout returned it (its empty lines too), author_photo from the scout, and source "feed", "list", "search" or "commenters" (the scout that found it). If the slop gate refuses \
         a variant, rewrite it once; refused again, drop the post.
         6. End with one short line: how many drafts you added from how many candidates, anything \
         that stopped a scout, and the scouts' new_targets and quiet people (names only) for his \

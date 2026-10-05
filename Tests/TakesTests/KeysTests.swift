@@ -68,3 +68,23 @@ struct KeysTests {
         #expect(KeyRouter.action(key: Key.escape, modifiers: [], KeyContext(countdown: true)) == .toggleRecord)
     }
 }
+
+// Esc must not take a full-screen window out of full screen (2026-10-05). The guard swaps
+// NSWindow's cancelOperation; a normal window and every other responder keep the original.
+@MainActor
+struct FullScreenEscapeTests {
+    final class Spy: NSView {
+        var cancelled = false
+        override func cancelOperation(_ sender: Any?) { cancelled = true }
+    }
+
+    @Test func otherRespondersStillGetEscape() {
+        _ = NSWindow.keepFullScreenOnEscape
+        let v = Spy()
+        v.cancelOperation(nil)
+        #expect(v.cancelled)
+        let w = NSWindow(contentRect: .init(x: 0, y: 0, width: 100, height: 100), styleMask: [.titled], backing: .buffered, defer: true)
+        w.cancelOperation(nil)  // the original runs without a crash on a window that is not full screen
+        #expect(!w.styleMask.contains(.fullScreen))
+    }
+}

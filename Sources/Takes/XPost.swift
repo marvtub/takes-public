@@ -16,12 +16,13 @@ enum XFeed {
     static let blue = Color(red: 29 / 255, green: 155 / 255, blue: 240 / 255)        // #1D9BF0
     static let inkNS = NSColor(srgbRed: 15 / 255, green: 20 / 255, blue: 25 / 255, alpha: 1)
     static let blueNS = NSColor(srgbRed: 29 / 255, green: 155 / 255, blue: 240 / 255, alpha: 1)
-    static let textFont = NSFont.systemFont(ofSize: 15)
-    static let lineHeight: CGFloat = 20
+    /// The preview follows the app's text size (⌘+ / ⌘−), like the rest of Takes.
+    static var textFont: NSFont { NSFont.systemFont(ofSize: 15 * TextSize.shared.factor) }
+    static var lineHeight: CGFloat { (20 * TextSize.shared.factor).rounded() }
     /// The timeline shows this many characters of a long tweet, then "Show more".
     static let feedCut = 280
 
-    static func font(_ size: CGFloat, _ weight: Font.Weight = .regular) -> Font { .system(size: size, weight: weight) }
+    static func font(_ size: CGFloat, _ weight: Font.Weight = .regular) -> Font { .system(size: size * TextSize.shared.factor, weight: weight) }
 
     /// The tweet with hashtags, mentions and links in blue.
     static func styled(_ text: String) -> AttributedString {
@@ -188,7 +189,7 @@ struct XThreadCard: View {
                 Image(systemName: "bookmark")
                 Image(systemName: "square.and.arrow.up")
             }
-            .font(.system(size: 15)).foregroundStyle(XFeed.muted)
+            .font(XFeed.font(15)).foregroundStyle(XFeed.muted)
         }
     }
 

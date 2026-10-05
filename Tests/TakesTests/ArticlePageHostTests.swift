@@ -76,6 +76,9 @@ import WebKit
         settle(h)
         guard let second = webs(in: h).first else { Issue.record("no web view"); return }
         #expect(await text(second, until: "Third").contains("Third article"))
+        // The old view gives its page back when SwiftUI removes it, which on a busy Mac comes after
+        // a short settle (the check below failed in a full run, 2026-10-04): wait for it.
+        for _ in 0..<100 where ArticlePageHost.idle.isEmpty { settle(h) }
         h.rootView = AnyView(article("Fourth article body.\n").id("c").frame(width: 700, height: 600))
         settle(h)
         let fourth = webs(in: h).first
