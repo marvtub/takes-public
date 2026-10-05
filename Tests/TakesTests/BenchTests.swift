@@ -217,7 +217,7 @@ import SwiftUI
         let name = ProcessInfo.processInfo.environment["TAKES_BENCH_SESSION"] ?? "claude-ran-a-shop"
         guard let s = app.library.sessions.first(where: { $0.url.lastPathComponent.contains(name) }) else { return }
         app.library.select(s.url)
-        app.chats.open = true
+        app.chats.open = ProcessInfo.processInfo.environment["TAKES_BENCH_CHAT"] != "0"
         app.chats.docked = true
         UserDefaults.standard.set("script", forKey: "rightTab")
         let size = CGSize(width: 1440, height: 860)
@@ -245,6 +245,13 @@ import SwiftUI
             let first = step("post"), a = step("assets"), again = step("post"), b = step("script"), third = step("post")
             print(String(format: "BENCH %@ post first %.0f ms, assets %.0f, post again %.0f, record %.0f, post from record %.0f", String(p), first, a, again, b, third))
             _ = step("script")
+        }
+        // Any order of tabs, first frame of each: TAKES_BENCH_SEQ=post,script,assets,script.
+        // TAKES_BENCH_CHAT=0 closes the docked chat.
+        if let seq = ProcessInfo.processInfo.environment["TAKES_BENCH_SEQ"] {
+            for tab in seq.split(separator: ",").map(String.init) {
+                print(String(format: "BENCH to %@: %.0f ms", tab, step(tab)))
+            }
         }
         // A long run to sample: TAKES_BENCH_LOOP=40.
         let loops = Int(ProcessInfo.processInfo.environment["TAKES_BENCH_LOOP"] ?? "0") ?? 0
@@ -322,6 +329,70 @@ import WebKit
         let end = webProcs()
         print("BENCH web processes: \(start.0) (\(start.1) MB) before, \(end.0) (\(end.1) MB) after six switches")
         #expect(seen[1] === seen[0] && seen[2] === seen[0])
+        window.orderOut(nil)
+    }
+}
+
+@MainActor
+@Suite struct ZBenchStream {
+    /// CPU while a reply streams into a long docked chat, on each tab (TAKES_BENCH_SEQ). Runs on a copy
+    /// of a real session's text files, with a fake claude, so no real chat changes. The window is off
+    /// every screen, where animations never settle: compare two runs, do not trust one number.
+    @Test(.enabled(if: bench)) func streamCost() async throws {
+        let fm = FileManager.default
+        let name = ProcessInfo.processInfo.environment["TAKES_BENCH_SESSION"] ?? "claude-ran-a-shop"
+        let real = fm.homeDirectoryForCurrentUser.appending(path: "Movies/Takes")
+        guard let src = (fm.subpaths(atPath: real.path) ?? []).first(where: { $0.hasSuffix(name) && !$0.contains("/.") })
+            .map({ real.appending(path: $0) }) else { return }
+        let root = fm.temporaryDirectory.appending(path: "takes-stream-\(UUID().uuidString)")
+        let session = root.appending(path: "Bench/2026-10-01-\(name)")
+        try fm.createDirectory(at: session, withIntermediateDirectories: true)
+        defer { ClaudeChat.claudeOverride = nil; try? fm.removeItem(at: root) }
+        for f in [".claude-chat.json", "script.md", "session.json", "SESSION.md", "hooks.json", "posts"] {
+            try? fm.copyItem(at: src.appending(path: f), to: session.appending(path: f))
+        }
+        let script = root.appending(path: "claude")
+        try """
+        #!/bin/bash
+        cat > /dev/null
+        echo '{"type":"system","subtype":"init"}'
+        echo '{"type":"stream_event","event":{"type":"content_block_start","content_block":{"type":"text"}}}'
+        for i in $(seq 1 120); do
+          echo '{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"word '$i' and a few more words, "}}}'
+          sleep 0.025
+        done
+        echo '{"type":"result","subtype":"success","result":"","modelUsage":{}}'
+        """.write(to: script, atomically: true, encoding: .utf8)
+        try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: script.path)
+        ClaudeChat.claudeOverride = script.path
+
+        let app = AppModel()
+        app.library.setRoot(root)
+        guard let s = app.library.sessions.first else { return }
+        app.library.select(s.url)
+        app.chats.open = true
+        app.chats.docked = true
+        let size = CGSize(width: 1440, height: 860)
+        let host = NSHostingView(rootView: AnyView(ContentView(library: app.library).environment(app).frame(width: size.width, height: size.height)))
+        host.frame = NSRect(origin: .zero, size: size)
+        let window = NSWindow(contentRect: NSRect(x: -6000, y: -6000, width: size.width, height: size.height), styleMask: [.borderless], backing: .buffered, defer: false)
+        window.contentView = host
+        window.orderFrontRegardless()
+        func settle() { for _ in 0..<8 { RunLoop.main.run(until: Date().addingTimeInterval(0.03)); host.layoutSubtreeIfNeeded() } }
+        func cpu() -> Double { var u = rusage(); getrusage(RUSAGE_SELF, &u)
+            return Double(u.ru_utime.tv_sec + u.ru_stime.tv_sec) * 1000 + Double(u.ru_utime.tv_usec + u.ru_stime.tv_usec) / 1000 }
+        UserDefaults.standard.set(ProcessInfo.processInfo.environment["TAKES_BENCH_PLATFORMS"] ?? "linkedin", forKey: "postPlatform")
+        let chat = app.chats.chat(s.url)
+        for tab in (ProcessInfo.processInfo.environment["TAKES_BENCH_SEQ"] ?? "post,script").split(separator: ",").map(String.init) {
+            UserDefaults.standard.set(tab, forKey: "rightTab")
+            settle(); settle()
+            let c = cpu(), t = CFAbsoluteTimeGetCurrent()
+            chat.send("Bench", title: "Bench", onStage: nil)
+            while chat.running && CFAbsoluteTimeGetCurrent() - t < 15 {
+                try? await Task.sleep(for: .milliseconds(16))
+            }
+            print(String(format: "BENCH stream on %@: %.0f ms CPU over %.1f s (%d msgs)", tab, cpu() - c, CFAbsoluteTimeGetCurrent() - t, chat.messages.count))
+        }
         window.orderOut(nil)
     }
 }

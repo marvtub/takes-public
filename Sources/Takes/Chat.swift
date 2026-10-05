@@ -1164,30 +1164,37 @@ struct ChatSlot<Content: View>: View {
 
     // One layout in every state, so the content (and a video playing in it) is never rebuilt
     // when the chat opens, docks or floats (2026-09-30).
+    // The docked chat stays mounted while docked, also in the slot that is out of sight, and the
+    // page keeps its width (2026-10-04). It moved between the Record slot and the full-window tabs'
+    // slot on every switch: building a long chat again, and laying out every kept tab at a new width,
+    // made a switch two to three times slower (ZBenchTabs: ~110 ms, now ~50). The copy out of sight
+    // is frozen (`chatLive`), so a streamed word redraws one copy only (ZBenchStream).
     var body: some View {
-        let show = hub.open && hub.docked && active
-        GeometryReader { g in
-            HStack(spacing: 0) {
-                // The content takes its new width at once; only the chat slides. Squeezed frame
-                // by frame, a grid of tiles or a video reflows on every step (2026-10-02).
-                content
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .transaction(value: show) { $0.animation = nil }
-                    .overlay {
-                        if show && replace, let target {
+        let docked = hub.open && hub.docked && target != nil
+        let show = docked && active
+        return GeometryReader { g in
+            let width = max(360, g.size.width * 0.42)
+            // The content takes its new width at once; only the chat slides. Squeezed frame
+            // by frame, a grid of tiles or a video reflows on every step (2026-10-02).
+            content
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .padding(.trailing, docked && !replace ? width + 1 : 0)
+                .transaction(value: docked) { $0.animation = nil }
+                .overlay(alignment: .trailing) {
+                    if docked, let target {
+                        HStack(spacing: 0) {
+                            if !replace { Rectangle().fill(Theme.border).frame(width: 1) }
                             DockedChat(hub: hub, target: target)
-                                .transition(.opacity.combined(with: .offset(x: 16)))
+                                .frame(width: replace ? nil : width)
+                                .environment(\.chatLive, show)
                         }
+                        .opacity(show ? 1 : 0)
+                        .allowsHitTesting(show)
+                        .transition(replace ? .opacity.combined(with: .offset(x: 16)) : .move(edge: .trailing).combined(with: .opacity))
                     }
-                if show && !replace, let target {
-                    Rectangle().fill(Theme.border).frame(width: 1)
-                    DockedChat(hub: hub, target: target)
-                        .frame(width: max(360, g.size.width * 0.42))
-                        .transition(.move(edge: .trailing).combined(with: .opacity))
                 }
-            }
         }
-        .animation(Theme.spring, value: show)
+        .animation(Theme.spring, value: docked)
     }
 }
 
@@ -1587,13 +1594,18 @@ private struct ChatComposer: View {
     /// What was in the box when the voice note started: the words go after it.
     @State private var spokenAfter = ""
     @FocusState private var focused: Bool
+    @Environment(\.chatLive) private var live
 
     var body: some View {
         let _ = Perf.body("ChatComposer")
         composer
             // On the next turn: while the panel animates in, the box is not in the window yet and
             // AppKit gave focus to the first field it found, the session title (2026-10-02).
-            .onAppear { DispatchQueue.main.async { focused = true } }
+            // The copy out of sight never takes the keys; it takes them, as a new panel did, when it shows.
+            .onAppear { if live { DispatchQueue.main.async { focused = true } } }
+            .onChange(of: live) { _, on in
+                if on { DispatchQueue.main.async { focused = true } } else { focused = false; dictation.cancel() }
+            }
     }
 
     private var composer: some View {
@@ -1804,10 +1816,15 @@ struct ChatRows: View {
     var chat: ClaudeChat
     static let page = 40
     @State private var limit = ChatRows.page
+    @Environment(\.chatLive) private var live
+    /// What the chat showed when it went out of sight. While set, the body does not read
+    /// `chat.messages`, so a streamed word does not redraw this copy (2026-10-04).
+    @State private var frozen: [ChatMessage]?
 
     var body: some View {
         let _ = Perf.body("ChatRows")
-        let all = ChatItem.group(chat.messages)
+        let messages = live ? chat.messages : frozen ?? chat.messages
+        let all = ChatItem.group(messages)
         let items = all.suffix(limit)
         VStack(alignment: .leading, spacing: 10) {
             if all.count > items.count {
@@ -1830,11 +1847,25 @@ struct ChatRows: View {
                 }
                 .transition(.opacity.combined(with: .offset(y: 6)))
             }
-            if chat.running, chat.messages.last.map({ $0.role != .claude || $0.done }) ?? true {
+            if chat.running, messages.last.map({ $0.role != .claude || $0.done }) ?? true {
                 Working(mood: chat.mood).transition(.opacity)
             }
         }
-        .animation(Theme.motion, value: chat.messages.count)
+        .animation(Theme.motion, value: messages.count)
+        .onAppear { if !live { frozen = chat.messages } }
+        .onChange(of: live) { _, on in frozen = on ? nil : chat.messages }
+    }
+}
+
+// A plain key, not @Entry: build.sh builds with the Command Line Tools, which have no
+// SwiftUI macro plugin (2026-10-02).
+private struct ChatLiveKey: EnvironmentKey { static let defaultValue = true }
+
+extension EnvironmentValues {
+    /// False for the docked chat's copy out of sight: it keeps what it showed and skips streamed words.
+    var chatLive: Bool {
+        get { self[ChatLiveKey.self] }
+        set { self[ChatLiveKey.self] = newValue }
     }
 }
 

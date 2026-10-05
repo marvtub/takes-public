@@ -126,8 +126,13 @@ struct SoundsTests {
         player.isMuted = true
         track.attach(player)
         player.play()
-        // Wait for the playhead to pass 0:01. A fixed sleep failed when the whole suite ran at once.
-        for _ in 0..<50 where track.fired == 0 { try await Task.sleep(for: .milliseconds(100)) }
+        // Wait for the playhead itself to pass 0:01, not for a set time: on a busy Mac playback starts
+        // late (a 5 s wait failed in the public release's test run, 2026-10-04). Then one more beat for
+        // the boundary callback on the main queue.
+        for _ in 0..<300 where track.fired == 0 && player.currentTime().seconds < 1.2 {
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        for _ in 0..<10 where track.fired == 0 { try await Task.sleep(for: .milliseconds(100)) }
         player.pause()
         #expect(track.fired == 1)
         track.attach(nil)

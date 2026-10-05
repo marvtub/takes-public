@@ -98,7 +98,11 @@ final class EffectTrack {
 
     private func fire() {
         guard let t = player?.currentTime().seconds, t.isFinite else { return }
-        for c in here where abs(c.at - t) < 0.25 { play(c) }
+        // The cue just crossed: the latest one at or before now. On a busy Mac the callback comes late
+        // (a 0.25 s window skipped effects, 2026-10-04), so allow 1.5 s; never an earlier cue again.
+        let crossed = here.filter { $0.at <= t + 0.25 && t - $0.at < 1.5 }
+        guard let last = crossed.map(\.at).max() else { return }
+        for c in crossed where c.at == last { play(c) }
     }
 
     func play(_ c: EffectCue) {

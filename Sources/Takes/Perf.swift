@@ -26,6 +26,9 @@ enum Perf {
         return true
     }
 
+    /// How often a view built its body since the last flush. For tests.
+    static func count(_ name: String) -> Int { bodies[name, default: 0] }
+
     /// A click that changes the screen. Logs the time until SwiftUI drew the change.
     static func mark(_ what: String) {
         let t0 = CACurrentMediaTime()
