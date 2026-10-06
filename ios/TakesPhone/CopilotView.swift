@@ -459,6 +459,9 @@ struct ReviewDeck: View {
     @State private var variant = 0
     @State private var editing = false
     @State private var noting = false
+    /// Decline with a note: true wrong post, false bad comment. Mirrors the Mac, where a typed note
+    /// declines as "other" (2026-10-05).
+    @State private var declining: Bool?
     @State private var last: (s: Suggestion, undo: String, label: String)?
 
     private var deck: [Suggestion] { items.filter { !gone.contains($0.id) } }
@@ -518,6 +521,15 @@ struct ReviewDeck: View {
                 TextSheet(title: "Note for a redraft", text: "", button: "Send",
                           hint: "What should change? Takes on the Mac writes three new drafts from it.") { t in
                     decide(s, "feedback", ["text": t, "variant": variant], undo: nil, label: "Sent for a redraft")
+                }
+                .presentationDetents([.medium, .large])
+            }
+        }
+        .sheet(isPresented: Binding(get: { declining != nil }, set: { if !$0 { declining = nil } })) {
+            if let s = top, let wrong = declining {
+                TextSheet(title: wrong ? "Wrong post" : "Bad comment", text: "", button: "Decline",
+                          hint: "Say why, in a few words. Takes learns from it.") { t in
+                    decide(s, "decline", ["wrongPost": wrong, "reason": "other", "note": t], undo: nil, label: "Declined")
                 }
                 .presentationDetents([.medium, .large])
             }
@@ -591,14 +603,16 @@ struct ReviewDeck: View {
                 Button { noting = true } label: { Label("Note for a redraft", systemImage: "text.bubble") }
                 Divider()
                 Menu {
-                    ForEach(Self.wrongPost, id: \.self) { r in
+                    ForEach(Self.wrongPost.dropLast(), id: \.self) { r in
                         Button(r) { decide(s, "decline", ["wrongPost": true, "reason": r], undo: nil, label: "Declined") }
                     }
+                    Button { declining = true } label: { Label("Other: say why", systemImage: "text.bubble") }
                 } label: { Label("Wrong post", systemImage: "hand.thumbsdown") }
                 Menu {
-                    ForEach(Self.badComment, id: \.self) { r in
+                    ForEach(Self.badComment.dropLast(), id: \.self) { r in
                         Button(r) { decide(s, "decline", ["wrongPost": false, "reason": r], undo: nil, label: "Declined") }
                     }
+                    Button { declining = false } label: { Label("Other: say why", systemImage: "text.bubble") }
                 } label: { Label("Bad comment", systemImage: "hand.thumbsdown") }
             } label: {
                 RoundIcon(icon: "ellipsis", tint: Palette.muted, size: 46, label: "More")
@@ -841,6 +855,7 @@ struct BoardChatView: View {
     @State private var spoke = false
     @State private var voice = VoiceNote()
     @FocusState private var typing: Bool
+    @State private var latestRequest = 0
 
     private var chat: Chat? { live.id == id ? live.chat : nil }
     private var hasText: Bool { !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
@@ -848,27 +863,17 @@ struct BoardChatView: View {
     var body: some View {
         VStack(spacing: 0) {
             TopBar(title: title, subtitle: "On your Mac") { ContextRing(sessionID: id) }
-            ScrollViewReader { proxy in
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 10) {
-                        if let chat, chat.messages.isEmpty {
-                            MascotEmpty(title: "Nothing here yet", message: empty)
-                        }
-                        ForEach(chat?.messages ?? []) { m in
-                            Bubble(message: m, files: [], show: { _ in }).equatable().id(m.id)
-                        }
-                        if let chat, chat.running {
-                            HStack(spacing: 8) { WorkingDots(); Text(chat.workingLine) }
-                                .font(.inter(.footnote, .medium)).foregroundStyle(Palette.accent)
-                        }
-                        Color.clear.frame(height: 4).id("end")
-                    }
-                    .padding(16)
+            ChatTranscript(latestRequest: latestRequest) {
+                if let chat, chat.messages.isEmpty {
+                    MascotEmpty(title: "Nothing here yet", message: empty)
                 }
-                .defaultScrollAnchor(.bottom)
-                .scrollDismissesKeyboard(.interactively)
-                .onChange(of: chat?.messages.last?.text) { _, _ in proxy.scrollTo("end", anchor: .bottom) }
-                .onChange(of: chat?.messages.count) { _, _ in withAnimation { proxy.scrollTo("end", anchor: .bottom) } }
+                ChatItems(messages: chat?.messages ?? [], running: chat?.running ?? false) { m in
+                    Bubble(message: m, files: [], show: { _ in })
+                }
+                if let chat, chat.running {
+                    HStack(spacing: 8) { WorkingDots(); Text(chat.workingLine) }
+                        .font(.inter(.footnote, .medium)).foregroundStyle(Palette.accent)
+                }
             }
             HStack(alignment: .bottom, spacing: 8) {
                 Group {
@@ -958,6 +963,7 @@ struct BoardChatView: View {
             let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !text.isEmpty else { return }
             let dictated = spoke
+            latestRequest += 1
             draft = ""
             spoke = false
             let from = id.hasPrefix("board:comments") ? "Comments" : id.hasPrefix("board:performance") ? "Performance" : nil

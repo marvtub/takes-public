@@ -303,10 +303,13 @@ final class Model: ObservableObject {
     /// A message to a chat. Without the Mac it waits on the phone and shows in the chat.
     /// `from` names the screen it was sent from and `voice` says it was dictated: the Mac tells
     /// Claude, so it knows what the user is looking at and reads past transcription slips.
-    func say(_ text: String, in id: String, from: String? = nil, voice: Bool = false) async -> Bool {
+    /// `tokens`: the text says "@comments" when the open comments should go with it (the chat box).
+    /// Without it the Mac adds them to every message, as before 2026-10-05.
+    func say(_ text: String, in id: String, from: String? = nil, voice: Bool = false, tokens: Bool = false) async -> Bool {
         var json: [String: Any] = ["text": text]
         if let from { json["from"] = from }
         if voice { json["voice"] = "1" }
+        if tokens { json["tokens"] = "1" }
         let op = Outbox.Op(.say, session: id, path: "/api/chat", query: ["id": id], json: json)
         do {
             switch try await outbox.send(op) {
@@ -334,8 +337,11 @@ final class Model: ObservableObject {
     // MARK: Changes (they wait on the phone when the Mac is away)
 
     /// Saves the script or the post. Throws when the Mac said no (it changed there meanwhile).
-    func save(_ what: String, _ id: String, text: String, base: String) async throws {
-        let op = Outbox.Op(what == "script" ? .script : .post, session: id, path: "/api/" + what, query: ["id": id],
+    /// `platform`: whose post (linkedin, x, youtube, vertical). LinkedIn when left out.
+    func save(_ what: String, _ id: String, text: String, base: String, platform: String? = nil) async throws {
+        var query = ["id": id]
+        if let platform, platform != "linkedin" { query["platform"] = platform }
+        let op = Outbox.Op(what == "script" ? .script : .post, session: id, path: "/api/" + what, query: query,
                            json: ["text": text, "base": base])
         _ = try await outbox.send(op)
     }
@@ -354,8 +360,9 @@ final class Model: ObservableObject {
         _ = try? await outbox.send(Outbox.Op(.keeper, session: id, path: "/api/keeper", query: ["id": id, "take": String(take)]))
     }
 
-    func cover(_ path: String) async throws {
-        _ = try await outbox.send(Outbox.Op(.cover, session: "", path: "/api/cover", query: ["path": path]))
+    /// Makes the thumbnail the cover of one platform's post (the Mac puts it on the video's first frame).
+    func cover(_ path: String, platform: String = "linkedin") async throws {
+        _ = try await outbox.send(Outbox.Op(.cover, session: "", path: "/api/cover", query: ["path": path, "platform": platform]))
     }
 
     /// A decision on a comment draft (approve, decline, skip, feedback, posted …).

@@ -217,6 +217,20 @@ struct PhoneCommentTests {
         #expect(PostFile.versions(s).contains { $0.text().hasPrefix("New hook") })
         #expect(PhoneServer.postDraft(["action": "promote", "slug": "gone"], in: s) == "No such variant")
     }
+
+    @MainActor @Test func everyPlatformsPostGoesToThePhone() throws {
+        let s = FileManager.default.temporaryDirectory.appending(path: "phone-posts-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: s.appending(path: "posts"), withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: s) }
+        #expect(PhoneServer.platformPosts(s) == nil)
+        PostFile.write(PostFile.Content(text: "On LinkedIn"), to: s)
+        var yt = PostFile.Content(text: "The description")
+        yt.title = "The title"
+        PostFile.write(yt, to: s, .youtube)
+        let posts = try #require(PhoneServer.platformPosts(s))
+        #expect(posts.map(\.platform) == ["linkedin", "youtube"])
+        #expect(posts[1].title == "The title" && posts[1].limit == 5000 && posts[1].status == "draft")
+    }
 }
 
 struct PhoneOriginTests {

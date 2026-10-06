@@ -9,6 +9,7 @@ Register:  claude mcp add takes --scope user -- python3 <path>/takes_mcp.py
 """
 import hashlib
 import json
+import math
 import os
 import random
 import re
@@ -347,6 +348,7 @@ FOLDERS = {
                    "Get the path from next_path kind=thumbnail.",
     "stills/": "Frames the user saved from a paused video. Read them; never write here.",
     "storyboard/": "The storyboard and its sketches. Write it only with set_storyboard.",
+    "generated/": "AI videos (higgsfield) and images (make_image), as <name>-vN.<ext>. Write here only with those tools.",
     "assets/": "Files the user dropped on the Assets tab. Read them; never write here.",
     "(library)": "Reusable style (logos, icons, images, motion graphics, fonts, colours, type) goes in the "
                  "style or project library, never in a session. See get_library.",
@@ -1048,7 +1050,8 @@ def write_hooks(path, given):
 
 # ---------- the storyboard ----------
 #
-#   storyboard/storyboard.json   {"shots": [...], "updated": iso}
+#   storyboard/storyboard.json   {"shots": [...], "format": "16:9", "updated": iso}
+#       format: the video's shape (FORMATS); the sketches are drawn in it. Missing: 4:5, as before 2026-10-05.
 #       a shot: id (s1, s2...: stays the same across set_storyboard calls, takes and comments point at it),
 #               section (hook, main, end: the app shows each as its own row), kind (DESK, MG, B-ROLL, SCREEN, WALK, END...), say (the script lines it covers, word for word),
 #               do (how to film or build it), sketch (what the frame shows, for the drawing), seconds (optional),
@@ -1057,10 +1060,14 @@ def write_hooks(path, given):
 #                                is a new file, an unchanged one is never drawn twice.
 #
 # The app shows the shots as a horizontal timeline on the Storyboard tab. Sketches are drawn in the
-# background (Gemini image model) and land in the json one by one, so the tab fills in while you watch.
+# background (Nano Banana 2.1; GPT Image 2.5 Flare when Gemini fails) and land in the json one by one,
+# so the tab fills in while you watch. storyboard/.models.json keeps the model that drew each sketch.
 
 STORYBOARD_DIR = "storyboard"
-SKETCH_MODEL = "gemini-3-pro-image-preview"
+# Nano Banana 2.1 (out 2026-10-06) is the cheapest of the three image models ($0.034 a 1K image) and
+# draws the marker style well; GPT Image 2.5 Flare draws when Gemini fails.
+SKETCH_MODELS = ("nano-banana-2.1", "flare")
+SKETCH_QUALITY = "low"  # marker sketches are low fidelity on purpose
 SKETCH_STYLE = ("Low-fidelity film storyboard frame. Quick loose black marker sketch on plain white paper, like a "
                 "director's thumbnail. Very simple lines, no shading, no color except one blue marker for motion "
                 "arrows and camera moves. Simple faceless figure with a round head. Absolutely no text, no letters, "
@@ -1089,8 +1096,35 @@ def write_storyboard(s, d):
     os.replace(tmp, storyboard_file(s))
 
 
-def sketch_name(sketch):
-    return hashlib.sha1((SKETCH_STYLE + sketch).encode()).hexdigest()[:12] + ".png"
+# Any "W:H" shape works. These are the ones Gemini draws in; another shape is drawn in the
+# nearest of them and the app fits it to the card. 4:5 was the only one before 2026-10-05.
+FORMATS = ("16:9", "9:16", "4:5", "1:1", "3:4", "4:3", "2:3", "3:2", "5:4", "21:9")
+DEFAULT_FORMAT = "4:5"
+
+
+def parse_format(fmt):
+    # "16:9", "16x9", "1920x1080" -> "16:9". Not a shape: ValueError.
+    m = re.fullmatch(r"\s*(\d+(?:\.\d+)?)\s*[:x×/]\s*(\d+(?:\.\d+)?)\s*", str(fmt or ""))
+    if not m or float(m.group(1)) <= 0 or float(m.group(2)) <= 0:
+        raise ValueError("format is a shape such as 16:9, 9:16, 4:5 or 1:1 (any W:H works).")
+    w, h = m.group(1), m.group(2)
+    # Pixel sizes get reduced; a written shape stays as written (21:9, not 7:3).
+    if "." not in w + h and max(int(w), int(h)) > 64:
+        g = math.gcd(int(w), int(h))
+        w, h = str(int(w) // g), str(int(h) // g)
+    return w + ":" + h
+
+
+def draw_format(fmt):
+    # The Gemini shape nearest to fmt.
+    w, h = (float(x) for x in fmt.split(":"))
+    return min(FORMATS, key=lambda f: abs(math.log((w / h) / (float(f.split(":")[0]) / float(f.split(":")[1])))))
+
+
+def sketch_name(sketch, fmt=DEFAULT_FORMAT):
+    # A 4:5 sketch keeps the name it had before formats, so old sketches are not drawn again.
+    key = SKETCH_STYLE + sketch + ("" if fmt == DEFAULT_FORMAT else " @" + fmt)
+    return hashlib.sha1(key.encode()).hexdigest()[:12] + ".png"
 
 
 SECTIONS = ("hook", "main", "end")
@@ -1147,12 +1181,17 @@ def storyboard_view(s):
              "say": (x.get("say") or "")[:80]}
         if x.get("video"):
             r["video"] = x["video"]
+        if x.get("generating"):
+            r["generating"] = x["generating"]
+        if x.get("clip_error"):
+            r["clip_error"] = x["clip_error"]
         if takes.get(x.get("id")):
             r["takes"] = takes[x["id"]]
         if notes.get(x.get("id")):
             r["open_comments"] = notes[x["id"]]
         rows.append(r)
-    return {"shots": len(shots), "drawn": sum(1 for x in shots if x.get("image") or x.get("video")),
+    return {"shots": len(shots), "format": read_storyboard(s).get("format") or DEFAULT_FORMAT,
+            "drawn": sum(1 for x in shots if x.get("image") or x.get("video")),
             "file": storyboard_file(s), "list": rows,
             "note": "Pass each shot's id back to set_storyboard: takes and comments point at it."}
 
@@ -1160,7 +1199,10 @@ def storyboard_view(s):
 def t_set_storyboard(a):
     """Write the storyboard and draw the missing sketches in the background."""
     s = resolve_session(a["session"])
-    old = read_storyboard(s)["shots"]
+    before = read_storyboard(s)
+    old = before["shots"]
+    fmt = (a.get("format") or before.get("format") or DEFAULT_FORMAT).strip()
+    fmt = parse_format(fmt)
     shots = []
     for i, x in enumerate(a["shots"]):
         say, sketch = (x.get("say") or "").strip(), (x.get("sketch") or "").strip()
@@ -1175,25 +1217,30 @@ def t_set_storyboard(a):
             # A real clip shows instead of a sketch (the app plays it on hover): nothing to draw.
             shot["video"] = video
         else:
-            name = sketch_name(sketch)
+            name = sketch_name(sketch, fmt)
             if os.path.exists(os.path.join(s, STORYBOARD_DIR, name)) and not x.get("redraw"):
                 shot["image"] = name
         shots.append(shot)
     for shot, i in zip(shots, shot_ids(old, a["shots"])):
         shot["id"] = i
+    # A Higgsfield clip still on its way keeps its place: the runner finds the shot by id.
+    running = {o.get("id"): o["generating"] for o in old if o.get("generating")}
+    for shot in shots:
+        if shot["id"] in running and not shot.get("video"):
+            shot["generating"] = running[shot["id"]]
     # The app shows hook, main, end in that order: keep the file in the same order.
     shots.sort(key=lambda x: SECTIONS.index(x["section"]))
-    write_storyboard(s, {"shots": shots})
+    write_storyboard(s, {"shots": shots, "format": fmt})
     for given in a["shots"]:
         if given.get("redraw"):
-            p = os.path.join(s, STORYBOARD_DIR, sketch_name((given.get("sketch") or "").strip()))
+            p = os.path.join(s, STORYBOARD_DIR, sketch_name((given.get("sketch") or "").strip(), fmt))
             if os.path.exists(p):
                 os.remove(p)
     gone = {o.get("id") for o in old} - {x["id"] for x in shots} - {None}
     todo = sum(1 for x in shots if not x.get("image") and not x.get("video"))
     if todo:
         start_sketches(s)
-    out = {"shots": len(shots), "drawing": todo, "ids": [x["id"] for x in shots],
+    out = {"shots": len(shots), "format": fmt, "drawing": todo, "ids": [x["id"] for x in shots],
            "note": ("Drawing %d sketches in the background (about 30 s). The Storyboard tab fills in as they land."
                     % todo) if todo else "All sketches already drawn."}
     linked = sorted({t.get("shot") for t in read_meta(s).get("takes", [])} & gone)
@@ -1248,11 +1295,16 @@ def sketch_run(s):
             write_storyboard(s, d)
 
     def draw(sketch):
-        name = sketch_name(sketch)
+        fmt = read_storyboard(s).get("format") or DEFAULT_FORMAT
+        name = sketch_name(sketch, fmt)
         out = os.path.join(s, STORYBOARD_DIR, name)
         try:
+            model = None
             if not os.path.exists(out):
-                draw_sketch(SKETCH_STYLE + sketch, out)
+                model = draw_sketch(SKETCH_STYLE + sketch, out, fmt)
+            if model:
+                with mu:
+                    note_model(s, os.path.join(STORYBOARD_DIR, name), model)
             land(sketch, image=name)
         except Exception as e:
             land(sketch, error=str(e)[:300])
@@ -1271,28 +1323,45 @@ def sketch_run(s):
             list(ex.map(draw, todo))
 
 
-def draw_sketch(prompt, out):
+def draw_sketch(prompt, out, fmt=DEFAULT_FORMAT):
+    """Draw one sketch; returns the name of the model that drew it."""
     if os.environ.get("TAKES_SKETCH_CMD"):  # tests: a stand-in that writes the PNG
         r = subprocess.run(json.loads(os.environ["TAKES_SKETCH_CMD"]) + [out], capture_output=True, text=True)
         if r.returncode != 0:
             raise ValueError(r.stderr.strip() or "The sketch failed.")
-        return
+        return None
+    # Not in SKETCH_STYLE, so sketch names (and drawn sketches) stay the same. Without it, Nano Banana
+    # drew a small landscape box inside a 9:16 image (2026-10-06).
+    prompt += " The border runs along the edges of the image: the whole %s image is the frame." % fmt
+    return draw_image(prompt, out, fmt, quality=SKETCH_QUALITY, models=SKETCH_MODELS)
+
+
+def draw_gemini(prompt, out, fmt, model, images=(), size="1K"):
     import base64
     import urllib.request
     key = gemini_key()
     if not key:
         raise ValueError("No GOOGLE_AI_API_KEY in ~/.claude/.env.")
-    body = {"contents": [{"parts": [{"text": prompt}]}],
-            "generationConfig": {"responseModalities": ["IMAGE"],
-                                 "imageConfig": {"aspectRatio": "4:5", "imageSize": "1K"}}}
+    parts = [{"text": prompt}]
+    for f in images:
+        mime = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp"}.get(
+            os.path.splitext(f)[1].lower(), "image/png")
+        parts.append({"inlineData": {"mimeType": mime, "data": base64.b64encode(open(f, "rb").read()).decode()}})
+    image_config = {"imageSize": size}
+    if fmt:
+        image_config["aspectRatio"] = draw_format(fmt)
+    body = {"contents": [{"parts": parts}],
+            "generationConfig": {"responseModalities": ["IMAGE"], "imageConfig": image_config}}
     req = urllib.request.Request(
-        "https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent" % SKETCH_MODEL,
+        "https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent" % model,
         method="POST", data=json.dumps(body).encode(),
         headers={"x-goog-api-key": key, "Content-Type": "application/json"})
     try:
         res = json.load(urllib.request.urlopen(req, timeout=180))
     except urllib.error.HTTPError as e:
         raise ValueError("Gemini said %s: %s" % (e.code, e.read().decode(errors="replace")[:200]))
+    except urllib.error.URLError as e:
+        raise ValueError("Gemini did not answer: %s" % e.reason)
     for p in res.get("candidates", [{}])[0].get("content", {}).get("parts", []):
         data = (p.get("inlineData") or p.get("inline_data") or {}).get("data")
         if data:
@@ -1301,6 +1370,466 @@ def draw_sketch(prompt, out):
             os.replace(out + ".tmp", out)
             return
     raise ValueError("Gemini returned no image.")
+
+
+# ---------- Images: Nano Banana 2.1, GPT Image 2.5 Flare and Sunburst (2026-10-06) ----------
+#
+# Every image Takes makes (sketches, make_image) goes straight to Google or OpenAI: much cheaper than a
+# Higgsfield image. Higgsfield is for video only. The user picked these three as the defaults:
+#   nano-banana-2.1  cheapest and fast: sketches
+#   flare            fast, high quality: a new image
+#   sunburst         best quality and editing: a change to an image
+# When one fails (no key, no credit), the next one draws. Each file's model goes in .models.json in its
+# folder (generated/, storyboard/), and the app shows it.
+
+IMAGE_MODELS = {
+    "nano-banana-2.1": ("gemini", "gemini-nano-banana-2.1", "Nano Banana 2.1"),
+    "flare": ("openai", "gpt-image-2.5-flare", "GPT Image 2.5 Flare"),
+    "sunburst": ("openai", "gpt-image-2.5-sunburst", "GPT Image 2.5 Sunburst"),
+}
+IMAGE_MODEL = "gpt-image-2.5-flare"
+
+
+def draw_image(prompt, out, fmt=None, images=(), quality="medium", models=("flare",)):
+    """Draw with the first model that works; returns its name ("Nano Banana 2.1")."""
+    problems = []
+    for m in models:
+        api, model_id, label = IMAGE_MODELS[m]
+        try:
+            if api == "openai":
+                openai_image(prompt, out, fmt, images=images, quality=quality, model=model_id)
+            else:
+                draw_gemini(prompt, out, fmt, model_id, images=images, size="2K" if quality == "high" else "1K")
+            return label
+        except ValueError as e:
+            problems.append("%s: %s" % (label, e))
+    raise ValueError(" ".join(problems))
+
+
+def note_model(s, rel, label):
+    """Record which model made a file: <its folder>/.models.json maps file name -> model, for the app."""
+    p = os.path.join(s, os.path.dirname(rel), ".models.json")
+    try:
+        d = json.load(open(p))
+    except (OSError, ValueError):
+        d = {}
+    d[os.path.basename(rel)] = label
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    with open(p + ".tmp", "w") as f:
+        json.dump(d, f, indent=2)
+    os.replace(p + ".tmp", p)
+IMAGE_SIZES = ("1024x1024", "1536x1024", "1024x1536")  # the sizes every GPT Image takes
+
+
+def openai_key():
+    if os.environ.get("OPENAI_API_KEY"):
+        return os.environ["OPENAI_API_KEY"]
+    try:
+        for line in open(os.path.expanduser("~/.claude/.env")):
+            k, _, v = line.strip().partition("=")
+            if k.strip().removeprefix("export ").strip() == "OPENAI_API_KEY":
+                return v.strip().strip('"').strip("'") or None
+    except OSError:
+        pass
+    return None
+
+
+def openai_size(fmt):
+    """fmt as a size GPT Image draws: long edge 1536, both edges multiples of 16, at most 3:1."""
+    w, h = (float(x) for x in parse_format(fmt or DEFAULT_FORMAT).split(":"))
+    r = max(1 / 3, min(3, w / h))
+    if r >= 1:
+        W, H = 1536, 1536 / r
+    else:
+        W, H = 1536 * r, 1536
+    return "%dx%d" % (max(16, round(W / 16) * 16), max(16, round(H / 16) * 16))
+
+
+def nearest_size(size):
+    w, h = (int(x) for x in size.split("x"))
+    return min(IMAGE_SIZES, key=lambda s: abs(math.log((w / h) / (int(s.split("x")[0]) / int(s.split("x")[1])))))
+
+
+def openai_image(prompt, out, fmt=None, images=(), quality="medium", model=IMAGE_MODEL):
+    """Draw (or, with images, change) one image with GPT Image and write it to out as PNG."""
+    if os.environ.get("TAKES_IMAGE_CMD"):  # tests: a stand-in that writes the PNG
+        r = subprocess.run(json.loads(os.environ["TAKES_IMAGE_CMD"]) + [out, prompt] + list(images),
+                           capture_output=True, text=True)
+        if r.returncode != 0:
+            raise ValueError(r.stderr.strip() or "The image failed.")
+        return
+    import base64
+    import urllib.request
+    import uuid
+    key = openai_key()
+    if not key:
+        raise ValueError("No OPENAI_API_KEY in ~/.claude/.env.")
+    size = openai_size(fmt) if fmt else "auto"
+
+    def call(size):
+        fields = {"model": model, "prompt": prompt, "size": size, "quality": quality, "n": "1"}
+        if not images:
+            req = urllib.request.Request("https://api.openai.com/v1/images/generations", method="POST",
+                                         data=json.dumps(dict(fields, n=1)).encode(),
+                                         headers={"Content-Type": "application/json"})
+        else:  # multipart: one image[] part per input
+            b = uuid.uuid4().hex
+            parts = [b'--%s\r\nContent-Disposition: form-data; name="%s"\r\n\r\n%s\r\n'
+                     % (b.encode(), k.encode(), str(v).encode()) for k, v in fields.items()]
+            for f in images:
+                mime = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp"}.get(
+                    os.path.splitext(f)[1].lower(), "image/png")
+                parts.append(b'--%s\r\nContent-Disposition: form-data; name="image[]"; filename="%s"\r\n'
+                             b'Content-Type: %s\r\n\r\n' % (b.encode(), os.path.basename(f).encode(), mime.encode())
+                             + open(f, "rb").read() + b"\r\n")
+            req = urllib.request.Request("https://api.openai.com/v1/images/edits", method="POST",
+                                         data=b"".join(parts) + b"--%s--\r\n" % b.encode(),
+                                         headers={"Content-Type": "multipart/form-data; boundary=" + b})
+        req.add_header("Authorization", "Bearer " + key)
+        return json.load(urllib.request.urlopen(req, timeout=300))
+
+    try:
+        try:
+            res = call(size)
+        except urllib.error.HTTPError as e:
+            body = e.read().decode(errors="replace")
+            if e.code != 400 or "size" not in body.lower() or size in IMAGE_SIZES + ("auto",):
+                raise ValueError("OpenAI said %s: %s" % (e.code, openai_problem(body)))
+            res = call(nearest_size(size))  # this model takes only the fixed sizes
+    except urllib.error.HTTPError as e:
+        raise ValueError("OpenAI said %s: %s" % (e.code, openai_problem(e.read().decode(errors="replace"))))
+    except urllib.error.URLError as e:
+        raise ValueError("OpenAI did not answer: %s" % e.reason)
+    data = ((res.get("data") or [{}])[0]).get("b64_json")
+    if not data:
+        raise ValueError("OpenAI returned no image.")
+    with open(out + ".tmp", "wb") as f:
+        f.write(base64.b64decode(data))
+    os.replace(out + ".tmp", out)
+
+
+def openai_problem(body):
+    try:
+        msg = json.loads(body)["error"]["message"]
+    except (ValueError, KeyError, TypeError):
+        msg = body
+    return msg.strip()[:200]
+
+
+def t_make_image(a):
+    """Make or change an image (Flare new, Sunburst for a change); it lands in generated/<name>-vN.png."""
+    s = resolve_session(a["session"])
+    prompt = (a.get("prompt") or "").strip()
+    if not prompt:
+        raise ValueError("Give a prompt: what the image shows, or what to change.")
+    refs = a.get("images") or ([a["image"]] if a.get("image") else [])
+    if isinstance(refs, str):
+        refs = [refs]
+    board = read_storyboard(s)
+    paths = []
+    for ref in refs[:16]:
+        if ref == "sketch":
+            shot = next((x for x in board["shots"] if x.get("id") == a.get("shot")), None)
+            if not shot or not shot.get("image"):
+                raise ValueError("'sketch' needs shot=<id> whose sketch is drawn.")
+            paths.append(os.path.join(s, STORYBOARD_DIR, shot["image"]))
+            continue
+        f = session_file(s, ref)
+        if media_kind(f) != "image":
+            raise ValueError("%s is not an image." % ref)
+        paths.append(f)
+    fmt = (a.get("format") or "").strip() or (None if paths else "1:1")
+    quality = (a.get("quality") or "medium").strip().lower()
+    if quality not in ("low", "medium", "high"):
+        raise ValueError("quality is low, medium or high.")
+    name = slug(a.get("name") or " ".join(prompt.split()[:5])) or "image"
+    d = os.path.join(s, GENERATED_DIR)
+    os.makedirs(d, exist_ok=True)
+    have = versions_in(d, name)
+    rel = os.path.join(GENERATED_DIR, "%s-v%d.png" % (name, (have[-1] if have else 0) + 1))
+    first = (a.get("model") or ("sunburst" if paths else "flare")).strip().lower()
+    if first not in IMAGE_MODELS:
+        raise ValueError("model is nano-banana-2.1, flare or sunburst.")
+    order = [first] + [m for m in ("flare", "nano-banana-2.1") if m != first]
+    label = draw_image(prompt, os.path.join(s, rel), fmt, images=paths, quality=quality, models=order)
+    note_model(s, rel, label)
+    return {"file": rel, "model": label, "note": "Shows on the Assets tab with the model's name. Look at it before you reply."}
+
+
+# ---------- Higgsfield: AI video (2026-10-06) ----------
+#
+# Video only: images go to GPT Image directly (make_image), much cheaper. Takes runs the official `higgsfield` CLI (signed in once from Takes › Settings › Higgsfield, the
+# same browser sign-in as Higgsfield's own MCP, no API key). A job runs detached like the sketches:
+# the tool returns at once, the file lands in <session>/generated/, and a storyboard shot plays it.
+
+GENERATED_DIR = "generated"
+HF_VIDEO_MODEL = "seedance_2_5"
+HF_WORKFLOWS = ("reframe", "draw_to_video")
+HF_SETUP = "Open Takes › Settings › Higgsfield: Install, then Sign in."
+
+
+def higgsfield_cli():
+    """The CLI as an argv prefix, or None. Tests set TAKES_HIGGSFIELD_CMD to a stand-in."""
+    if os.environ.get("TAKES_HIGGSFIELD_CMD"):
+        return json.loads(os.environ["TAKES_HIGGSFIELD_CMD"])
+    for d in (os.path.expanduser("~/.local/bin"), "/opt/homebrew/bin", "/usr/local/bin"):
+        exe = os.path.join(d, "higgsfield")
+        if os.access(exe, os.X_OK):
+            return [exe]
+    found = shutil.which("higgsfield")
+    return [found] if found else None
+
+
+def hf_call(args, timeout=60):
+    cli = higgsfield_cli()
+    if not cli:
+        raise ValueError("Higgsfield is not installed. " + HF_SETUP)
+    try:
+        r = subprocess.run(cli + args, capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL)
+    except subprocess.TimeoutExpired:
+        return False, "Higgsfield did not answer in %d s." % timeout
+    return r.returncode == 0, (r.stdout + ("\n" + r.stderr if r.stderr.strip() else "")).strip()
+
+
+def hf_problem(out):
+    """The CLI's error in one line, with the fix when it is the sign-in."""
+    lines = [x.strip() for x in out.splitlines() if x.strip()]
+    err = next((x for x in lines if x.lower().startswith("error")), lines[-1] if lines else "Higgsfield failed.")
+    low = out.lower()
+    if any(k in low for k in ("not authenticated", "session expired", "no workspace selected", "401")):
+        err += " " + HF_SETUP
+    return err[:300]
+
+
+def hf_jobs_dir(s):
+    return os.path.join(s, GENERATED_DIR, ".jobs")
+
+
+def hf_jobs(s):
+    d = hf_jobs_dir(s)
+    out = []
+    for f in sorted(os.listdir(d)) if os.path.isdir(d) else []:
+        if f.endswith(".json"):
+            try:
+                out.append(json.load(open(os.path.join(d, f))))
+            except (OSError, ValueError):
+                pass
+    return out
+
+
+def hf_save_job(s, job):
+    os.makedirs(hf_jobs_dir(s), exist_ok=True)
+    p = os.path.join(hf_jobs_dir(s), job["id"] + ".json")
+    with open(p + ".tmp", "w") as f:
+        json.dump(job, f, indent=2)
+    os.replace(p + ".tmp", p)
+    return p
+
+
+def edit_shot(s, shot_id, fn):
+    """Change one shot under a lock, so a runner and the sketch writer do not drop each other's change."""
+    import fcntl
+    os.makedirs(os.path.join(s, STORYBOARD_DIR), exist_ok=True)
+    with open(os.path.join(s, STORYBOARD_DIR, ".edit"), "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        d = read_storyboard(s)
+        for x in d["shots"]:
+            if x.get("id") == shot_id:
+                fn(x)
+                write_storyboard(s, d)
+                return True
+    return False
+
+
+def t_higgsfield_status(a):
+    """Installed, signed in, credits; and a session's jobs."""
+    out = {"installed": higgsfield_cli() is not None}
+    if not out["installed"]:
+        out["note"] = "Higgsfield is not installed. " + HF_SETUP
+    else:
+        ok, text = hf_call(["account", "status"], timeout=30)
+        out["signed_in"] = ok
+        out["account" if ok else "problem"] = text.splitlines()[0] if ok and text else hf_problem(text)
+    if a.get("session"):
+        s = resolve_session(a["session"])
+        out["jobs"] = [{k: j.get(k) for k in ("id", "file", "status", "shot", "error", "started", "ended")}
+                       for j in hf_jobs(s)][-10:]
+    return out
+
+
+def shot_seconds(x):
+    if x.get("seconds"):
+        return float(x["seconds"])
+    return len((x.get("say") or "").split()) / 2.6
+
+
+def t_higgsfield(a):
+    """Start a Higgsfield job. The file lands in generated/ when it is done."""
+    s = resolve_session(a["session"])
+    if not higgsfield_cli():
+        raise ValueError("Higgsfield is not installed. " + HF_SETUP)
+    if (a.get("kind") or "video").strip().lower() != "video":
+        raise ValueError("Higgsfield is for video only. Make or change an image with make_image (GPT Image, much cheaper).")
+    kind = "video"
+    workflow = (a.get("workflow") or "").strip() or None
+    if workflow and workflow not in HF_WORKFLOWS:
+        raise ValueError("workflow is reframe or draw_to_video.")
+    if workflow:
+        kind = "video"
+    prompt = (a.get("prompt") or "").strip()
+    if not prompt and workflow != "reframe":
+        raise ValueError("Give a prompt: what the clip shows and how the camera moves.")
+
+    shot = None
+    board = read_storyboard(s)
+    if a.get("shot"):
+        shot = next((x for x in board["shots"] if x.get("id") == a["shot"]), None)
+        if not shot:
+            raise ValueError("No shot %s in the storyboard. get_session lists the ids." % a["shot"])
+
+    def media(ref):
+        ref = (ref or "").strip()
+        if not ref:
+            return None
+        if ref == "sketch":
+            if not shot or not shot.get("image"):
+                raise ValueError("'sketch' needs a shot whose sketch is drawn.")
+            return os.path.join(s, STORYBOARD_DIR, shot["image"])
+        return session_file(s, ref)
+
+    image, start, end, video = (media(a.get(k)) for k in ("image", "start_image", "end_image", "video"))
+    if workflow and not video:
+        raise ValueError("%s needs a video from the session." % workflow)
+
+    if workflow:
+        args = ["generate", "workflow", workflow]
+    else:
+        args = ["generate", "create", (a.get("model") or HF_VIDEO_MODEL).strip()]
+    if prompt:
+        args += ["--prompt", prompt]
+    for flag, path in (("--image", image), ("--start-image", start), ("--end-image", end), ("--video", video)):
+        if path:
+            args += [flag, path]
+    ratio = (a.get("aspect_ratio") or "").strip()
+    if not ratio and shot:
+        ratio = board.get("format") or DEFAULT_FORMAT
+    if ratio:
+        args += ["--aspect-ratio" if workflow == "reframe" else "--aspect_ratio", ratio]
+    duration = a.get("duration")
+    if not duration and shot and kind == "video" and not workflow:
+        duration = max(4, min(15, round(shot_seconds(shot))))
+    if duration and workflow != "reframe":
+        args += ["--duration", str(int(round(float(duration))))]
+    for k, v in (a.get("params") or {}).items():
+        args += ["--" + str(k).lstrip("-"), str(v)]
+    args += ["--wait", "--wait-timeout", "30m", "--json"]
+
+    name = slug(a.get("name") or (shot and "shot-%s" % shot["id"]) or " ".join(prompt.split()[:5]) or "clip") or "clip"
+    d = os.path.join(s, GENERATED_DIR)
+    os.makedirs(d, exist_ok=True)
+    have = versions_in(d, name)
+    n = (have[-1] if have else 0) + 1
+    rel = os.path.join(GENERATED_DIR, "%s-v%d%s" % (name, n, ".mp4" if kind == "video" else ".png"))
+    job = {"id": "%s-v%d" % (name, n), "file": rel, "kind": kind, "args": args, "shot": shot and shot["id"],
+           "status": "running", "started": now_iso()}
+    path = hf_save_job(s, job)
+    if shot:
+        def mark(x):
+            x["generating"] = rel
+            x.pop("clip_error", None)
+        edit_shot(s, shot["id"], mark)
+    start_higgsfield(s, path)
+    return {"file": rel, "job": job["id"], "model": None if workflow else args[2], "workflow": workflow,
+            "note": "Higgsfield works in the background (a video takes 1-5 min). The file "
+                    "lands at %s and shows on the Assets tab%s. higgsfield_status shows how it went. Credits come "
+                    "from the user's Higgsfield plan." % (rel, "; the shot plays it then" if shot else "")}
+
+
+def start_higgsfield(s, job_path):
+    subprocess.Popen([sys.executable, os.path.abspath(__file__), "--higgsfield-run", s, job_path],
+                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                     start_new_session=True)
+
+
+MEDIA_EXT = {"video": (".mp4", ".mov", ".webm", ".m4v"), "image": (".png", ".jpg", ".jpeg", ".webp")}
+
+
+def hf_result_url(out, kind):
+    """The result's URL in the CLI's output (JSON or text): a file of the right kind first."""
+    found = []
+
+    def walk(v):
+        if isinstance(v, dict):
+            for x in v.values():
+                walk(x)
+        elif isinstance(v, list):
+            for x in v:
+                walk(x)
+        elif isinstance(v, str) and re.match(r"^(https?|file)://\S+$", v.strip()):
+            found.append(v.strip())
+    try:
+        walk(json.loads(out))
+    except ValueError:
+        found = re.findall(r"(?:https?|file)://[^\s\"'<>]+", out)
+    ext = lambda u: os.path.splitext(u.split("?")[0])[1].lower()
+    for u in found:
+        if ext(u) in MEDIA_EXT[kind]:
+            return u
+    return next((u for u in found if ext(u) not in (".html", ".json", "")), None)
+
+
+def hf_label(job):
+    """'seedance_2_5' -> 'Seedance 2.5', 'kling3_0' -> 'Kling 3.0'; a workflow -> 'Higgsfield reframe'."""
+    a = job.get("args") or []
+    if a[:2] == ["generate", "workflow"] and len(a) > 2:
+        return "Higgsfield " + a[2].replace("_", " ")
+    name = a[2] if len(a) > 2 else "higgsfield"
+    m = re.fullmatch(r"([a-z_]*?[a-z])_?(\d+(?:_\d+)*)", name)  # kling3_0 -> kling, 3_0
+    base, ver = (m.group(1), m.group(2).replace("_", ".")) if m else (name, "")
+    return " ".join([w.capitalize() for w in base.split("_") if w] + ([ver] if ver else []))
+
+
+def higgsfield_run(s, job_path):
+    """Detached: run the job, download the result, put it on its shot."""
+    import urllib.request
+    job = json.load(open(job_path))
+    cli = higgsfield_cli()
+    try:
+        if not cli:
+            raise ValueError("Higgsfield is not installed. " + HF_SETUP)
+        r = subprocess.run(cli + job["args"], capture_output=True, text=True, timeout=40 * 60, stdin=subprocess.DEVNULL)
+        out = (r.stdout + "\n" + r.stderr).strip()
+        if r.returncode != 0:
+            raise ValueError(hf_problem(out))
+        url = hf_result_url(r.stdout, job["kind"]) or hf_result_url(out, job["kind"])
+        if not url:
+            raise ValueError("Higgsfield finished but gave no file: " + hf_problem(out))
+        if url.startswith("file://") and not os.environ.get("TAKES_HIGGSFIELD_CMD"):
+            raise ValueError("Higgsfield gave a local path, not a download.")
+        dest = os.path.join(s, job["file"])
+        real = os.path.splitext(url.split("?")[0])[1].lower()
+        if real in MEDIA_EXT[job["kind"]] and real != os.path.splitext(dest)[1]:
+            dest = os.path.splitext(dest)[0] + real
+            job["file"] = os.path.relpath(dest, s)
+        with urllib.request.urlopen(url, timeout=600) as res, open(dest + ".part", "wb") as f:
+            shutil.copyfileobj(res, f)
+        os.replace(dest + ".part", dest)
+        job.update(status="done", url=url, ended=now_iso(), model=hf_label(job))
+        note_model(s, job["file"], job["model"])
+        if job.get("shot"):
+            def done(x):
+                x.pop("generating", None)
+                x.pop("clip_error", None)
+                x["video"] = job["file"]
+            edit_shot(s, job["shot"], done)
+    except Exception as e:
+        job.update(status="error", error=str(e)[:300], ended=now_iso())
+        if job.get("shot"):
+            def failed(x):
+                x.pop("generating", None)
+                x["clip_error"] = job["error"]
+            edit_shot(s, job["shot"], failed)
+    hf_save_job(s, job)
 
 
 # ---------- the post (same format as Sources/Takes/Post.swift) ----------
@@ -3263,7 +3792,7 @@ def post_lines(text):
 # drafts, the user's feedback and decision, and later the posted link and its numbers. lessons.md holds
 # the rules in the user's words. The app shows them on the Comments board; agents add drafts here.
 
-COMMENT_STATUSES = ["review", "redraft", "approved", "posted", "declined"]
+COMMENT_STATUSES = ["review", "feedback", "redraft", "approved", "posted", "declined"]
 
 LESSONS_SEED = """# Comment lessons
 
@@ -3662,7 +4191,7 @@ def t_add_comment_suggestion(a):
 
 def t_redraft_comment(a):
     s = read_suggestion(a["id"])
-    if s.get("status") not in ("redraft", "review"):
+    if s.get("status") not in ("redraft", "review", "feedback"):
         raise ValueError("Suggestion %s is %s: only a draft in review or waiting for a redraft changes." % (s["id"], s.get("status")))
     variants = gate_variants(a)
     s.setdefault("drafts", []).append({"text": variants[0], "variants": variants, "at": now_iso(), "by": "agent"})
@@ -3763,7 +4292,7 @@ TOOLS = [
                    "description": "Three different comments, plain text as the user would type them. Each a different "
                    "shape (story, question, counterpoint, tip) and length. He picks one."}}, ["id", "variants"], t_redraft_comment),
     ("list_comment_suggestions", "List suggested LinkedIn comments, oldest first: review (waiting for the user), "
-     "redraft (he gave feedback), approved (to post), posted, declined.",
+     "feedback (his note, not sent to you yet), redraft (he gave feedback), approved (to post), posted, declined.",
      {"status": {"type": "string", "enum": COMMENT_STATUSES}, "limit": {"type": "integer"}}, [], t_list_comment_suggestions),
     ("set_comment_posted", "Mark an approved comment as posted on LinkedIn, with the comment's link. Only after "
      "The user approved it and you saw it live under the post.",
@@ -3808,8 +4337,14 @@ TOOLS = [
      "'video' puts a real clip on the shot instead of a sketch (a file from list_broll, or a file in the "
      "session such as edits/x.mp4); the app shows its frame and plays it on hover. "
      "The user records takes per shot and comments on shots: get_session's 'storyboard' lists each shot's id, "
-     "section, takes and open comments.",
-     {"session": SESSION, "shots": {"type": "array", "items": {"type": "object", "properties": {
+     "section, takes and open comments. 'format' is the video's shape: the cards and sketches use it.",
+     {"session": SESSION,
+      "format": {"type": "string",
+                 "description": "The video's shape as W:H, any shape: 16:9 (YouTube, a landscape launch video), "
+                                "9:16 (Reels, Shorts, TikTok), 4:5 (LinkedIn feed), 1:1, 21:9 (cinema), 4:3, 3:4... "
+                                "Set it on the first call; later calls keep it. A new format draws every sketch "
+                                "again in that shape."},
+      "shots": {"type": "array", "items": {"type": "object", "properties": {
          "id": {"type": "string", "description": "The shot's id from get_session's storyboard list. Keep it "
                 "when you change a shot: The user's takes and comments point at it. Leave it out for a new shot."},
          "section": {"type": "string", "enum": ["hook", "main", "end"],
@@ -3942,6 +4477,51 @@ TOOLS = [
       "id": {"type": "string", "description": "Single reply: comment id. Prefer replies=[...]."},
       "text": S, "resolve": {"type": "boolean"}, "fixed_in": S, "fixed_at": {"type": "number"}},
      [], t_reply_comment),
+    ("make_image", "Make or change an image straight from Google or OpenAI (much cheaper than a Higgsfield "
+     "image: never use higgsfield for images). Models: flare (GPT Image 2.5 Flare, fast, high quality: the "
+     "default for a new image), sunburst (GPT Image 2.5 Sunburst, best quality and editing: the default for a "
+     "change), nano-banana-2.1 (cheapest, fast). When one fails the next one draws. Waits about 10-60 s and "
+     "returns the file, <session>/generated/<name>-vN.png, and the model that drew it; the Assets tab shows "
+     "both. Change an image: images=[session files] (a thumbnail, a still, 'sketch' with shot=<id>) and say "
+     "what to change. One image per ask.",
+     {"session": SESSION,
+      "prompt": {"type": "string", "description": "What the image shows, or what to change in the given images."},
+      "images": {"type": "array", "items": {"type": "string"},
+                 "description": "Session images to change or use as references (paths, or 'sketch' with shot)."},
+      "shot": {"type": "string", "description": "With images=['sketch']: the shot whose sketch to use."},
+      "format": {"type": "string", "description": "Shape, e.g. 16:9, 9:16, 4:5, 1:1. Default 1:1, or the input's shape."},
+      "quality": {"type": "string", "enum": ["low", "medium", "high"], "description": "Default medium."},
+      "model": {"type": "string", "enum": list(IMAGE_MODELS), "description": "Default flare, or sunburst with images."},
+      "name": {"type": "string", "description": "Short file name. Default: the prompt's first words."}},
+     ["session", "prompt"], t_make_image),
+    ("higgsfield", "Make or change a video with Higgsfield (Seedance, Kling, Veo and 30+ more video "
+     "models) from inside Takes. Video only: images go to make_image. Returns at once; the job runs in the background and "
+     "the file lands in <session>/generated/<name>-vN, where the Assets tab shows it. With shot=<id> the "
+     "storyboard shot shows 'Generating' and then plays the clip (aspect ratio = the storyboard format, "
+     "length = the shot's length, 4-15 s). For a shot, write a real-footage prompt from the shot's do and say "
+     "(subject, setting, light, camera move); pass image='sketch' to use the sketch only as a composition "
+     "reference with params {mode: omni_reference}, and say in the prompt that the result is real footage, not a "
+     "drawing. Change a video: video=<session file> with params {mode: video_edit} (Seedance), or "
+     "workflow=reframe with aspect_ratio for a new shape. Default model: seedance_2_5; other models by id (`higgsfield model list` in Bash; `higgsfield model get <id>` for params). "
+     "Each job costs the user's Higgsfield credits: one job per ask, never a batch he did not ask for. "
+     "Not installed or not signed in: tell him to open Settings › Higgsfield.",
+     {"session": SESSION,
+      "prompt": {"type": "string", "description": "What the result shows. Not needed for workflow=reframe."},
+      "shot": {"type": "string", "description": "A storyboard shot id: the clip becomes that shot's video."},
+      "image": {"type": "string", "description": "A reference image: a session file, or 'sketch' for the shot's sketch."},
+      "start_image": {"type": "string", "description": "First frame (session file or 'sketch')."},
+      "end_image": {"type": "string", "description": "Last frame (session file)."},
+      "video": {"type": "string", "description": "A session video to change or reframe (take number or path)."},
+      "model": {"type": "string", "description": "A Higgsfield model id. Leave out for the default."},
+      "workflow": {"type": "string", "enum": list(HF_WORKFLOWS), "description": "reframe (new aspect ratio) or draw_to_video."},
+      "aspect_ratio": {"type": "string", "description": "e.g. 16:9, 9:16, 4:5, 1:1."},
+      "duration": {"type": "number", "description": "Seconds (video)."},
+      "params": {"type": "object", "description": "More model params, e.g. {\"mode\": \"omni_reference\", \"resolution\": \"1080p\"}."},
+      "name": {"type": "string", "description": "Short file name. Default: shot-<id> or the prompt's first words."}},
+     ["session"], t_higgsfield),
+    ("higgsfield_status", "Is Higgsfield installed and signed in, and how many credits are left; with session, "
+     "its Higgsfield jobs (running, done, error).",
+     {"session": SESSION}, [], t_higgsfield_status),
     ("next_path", "Get the path for a new file you make: the right folder and the next version number. "
      "kind=edit: <session>/edits/<name>-vN.mp4. kind=thumbnail: <session>/thumbnails/<name>-vN.png (use the "
      "edit's name, plus an option word if you offer several). kind=library: <library>/assets/<group>/<name>-vN.<ext>. "
@@ -4211,6 +4791,9 @@ def handle(msg):
                                     "range you use, even when it stays the same. "
                                     "B-roll: list_broll gives the user's own clips with descriptions; add_broll puts one in "
                                     "a session; save_broll saves a session's video into the library. "
+                                    "AI media: the higgsfield tool makes a clip for a storyboard shot or changes a session "
+                                    "video; make_image makes or changes an image (Nano Banana 2.1 or GPT Image 2.5, never Higgsfield for "
+                                    "images); results land in generated/. "
                                     "Trashing is recoverable."})
     elif method == "ping":
         reply(id_, {})
@@ -4255,6 +4838,8 @@ if __name__ == "__main__":
         broll_describe(sys.argv[2], rename="--rename" in sys.argv[3:])
     elif sys.argv[1:2] == ["--sketch-run"]:
         sketch_run(sys.argv[2])
+    elif sys.argv[1:2] == ["--higgsfield-run"]:
+        higgsfield_run(sys.argv[2], sys.argv[3])
     elif sys.argv[1:2] == ["--voice-mix"]:
         voice_mix(*sys.argv[2:4])
     else:

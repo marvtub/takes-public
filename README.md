@@ -1,4 +1,4 @@
-<p align="center"><img src="docs/banner.webp" alt="Takes: record takes, Claude Code does the rest" width="100%"></p>
+<p align="center"><img src="docs/banner.webp" alt="Takes: you talk, Takes does the rest" width="100%"></p>
 
 <p align="center">
   A Mac app for recording video takes and turning them into posts,<br>

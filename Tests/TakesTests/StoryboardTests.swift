@@ -18,6 +18,21 @@ import Testing
         #expect(Storyboard.clock(b.total) == "0:11")
     }
 
+    /// The cards take the video's shape. A storyboard from before formats is 4:5, as its sketches are.
+    @Test func theFormatGivesTheCardsTheirShape() throws {
+        let wide = try JSONDecoder().decode(Storyboard.self, from: Data(#"{"shots": [], "format": "16:9"}"#.utf8))
+        #expect(abs(wide.ratio - 16.0 / 9.0) < 0.001)
+        let old = try JSONDecoder().decode(Storyboard.self, from: Data(#"{"shots": []}"#.utf8))
+        #expect(old.format == nil && old.ratio == 0.8)
+        #expect(Storyboard.ratio("9:16") == 0.5625 && Storyboard.ratio("nonsense") == 0.8)
+        #expect(abs(Storyboard.ratio("21:9") - 21.0 / 9.0) < 0.001)
+    }
+
+    @Test func aMotionGraphicIsNotFilmed() {
+        #expect(StoryboardPane.howTitle("MG") == "What it shows")
+        #expect(StoryboardPane.howTitle("DESK") == "How to film it")
+    }
+
     @Test func ordersShotsByRowAndNumbersOldOnes() throws {
         let dir = FileManager.default.temporaryDirectory.appending(path: "sb-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: Storyboard.folder(dir), withIntermediateDirectories: true)

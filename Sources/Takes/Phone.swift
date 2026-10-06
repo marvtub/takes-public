@@ -63,6 +63,8 @@ struct PhoneShot: Codable {
     var image: String?      // absolute path of the sketch, or of the shot's clip (the phone shows a frame)
     var error: String?
     var comments: [Comment]
+    /// Width over height of the frame: the storyboard's format, or the clip's own shape (2026-10-05).
+    var ratio: Double?
 }
 
 struct PhonePost: Codable, Hashable {
@@ -75,6 +77,19 @@ struct PhonePost: Codable, Hashable {
     var variants: [PhonePostVariant] = []
     /// Claude's opening options (posts/hooks.json).
     var hooks: [Hook] = []
+}
+
+/// The post for one more platform (X, YouTube, Vertical), next to the LinkedIn post (2026-10-05).
+struct PhonePlatformPost: Codable, Hashable {
+    var platform: String
+    var name: String
+    var text: String
+    var title: String
+    var media: String?
+    var cover: String?
+    var status: String
+    var url: String?
+    var limit: Int
 }
 
 struct PhonePostVariant: Codable, Hashable {
@@ -108,6 +123,8 @@ struct PhoneSessionDetail: Codable {
     var openComments: Int
     var profile: PhoneProfile?
     var storyboard: [PhoneShot]?
+    /// Every platform with a post, LinkedIn first. Older phones read only `post`.
+    var posts: [PhonePlatformPost]?
 }
 
 /// One published post on the phone's performance tab: its latest numbers.
@@ -336,7 +353,7 @@ final class PhoneServer: PhoneHandler, @unchecked Sendable {
         case ("POST", "/api/chat"):
             guard let s = session(req.query["id"]) else { return .error(404, "No such session") }
             let b = (try? JSONDecoder().decode([String: String].self, from: req.body)) ?? [:]
-            return await send(b["text"] ?? "", to: s, origin: Self.origin(b))
+            return await send(b["text"] ?? "", to: s, origin: Self.origin(b), tokens: b["tokens"] == "1")
         case ("POST", "/api/chat/stop"):
             guard let s = session(req.query["id"]) else { return .error(404, "No such session") }
             await MainActor.run { self.app?.chats.existing(s)?.stop() }
@@ -418,7 +435,8 @@ final class PhoneServer: PhoneHandler, @unchecked Sendable {
                 return .error(400, "No text")
             }
             let ok = await MainActor.run {
-                req.path == "/api/script" ? self.saveScript(text, base: b["base"], in: s) : self.savePost(text, base: b["base"], in: s)
+                req.path == "/api/script" ? self.saveScript(text, base: b["base"], in: s)
+                    : self.savePost(text, base: b["base"], in: s, req.query["platform"].flatMap(PostPlatform.init(rawValue:)) ?? .linkedin)
             }
             return ok ? .encode(["ok": true]) : .error(409, "It changed on the Mac while you edited. Pull to reload, then edit again.")
         case ("POST", "/api/post/draft"):
@@ -451,6 +469,25 @@ final class PhoneServer: PhoneHandler, @unchecked Sendable {
     }
 
     /// The author of the phone's LinkedIn previews. The same defaults as the post tab's @AppStorage.
+    /// Each platform's post that exists, with its cover: the phone's Post tab switches between them.
+    static func platformPosts(_ s: URL) -> [PhonePlatformPost]? {
+        let all = Cover.platforms().compactMap { p -> PhonePlatformPost? in
+            guard let c = PostFile.read(s, p) else { return nil }
+            return PhonePlatformPost(platform: p.rawValue, name: p.name, text: c.text, title: c.title,
+                                     media: PostFile.media(c, in: s, p)?.path, cover: Cover.current(s, p)?.path,
+                                     status: c.status.rawValue, url: c.meta["url"], limit: p.limit)
+        }
+        return all.isEmpty ? nil : all
+    }
+
+    /// Width over height of a clip's picture, turned the way it plays. Nil if it has no video.
+    static func clipRatio(_ url: URL) async -> Double? {
+        guard let track = try? await AVURLAsset(url: url).loadTracks(withMediaType: .video).first,
+              let (size, turn) = try? await track.load(.naturalSize, .preferredTransform) else { return nil }
+        let r = CGRect(origin: .zero, size: size).applying(turn)
+        return r.width > 0 && r.height > 0 ? Double(abs(r.width) / abs(r.height)) : nil
+    }
+
     static func profile() -> PhoneProfile {
         let d = UserDefaults.standard
         return PhoneProfile(name: d.string(forKey: "linkedinName") ?? "You",
@@ -474,15 +511,15 @@ final class PhoneServer: PhoneHandler, @unchecked Sendable {
         return true
     }
 
-    @MainActor private func savePost(_ text: String, base: String?, in s: URL) -> Bool {
-        let old = PostFile.read(s)
+    @MainActor private func savePost(_ text: String, base: String?, in s: URL, _ p: PostPlatform = .linkedin) -> Bool {
+        let old = PostFile.read(s, p)
         if let base, let old, old.text != base, old.text != text { return false }
         guard old?.text != text else { return true }
-        if let old { PostFile.snapshot(s, draft: "main", text: old.text, note: "Before the phone edit") }
+        if let old { PostFile.snapshot(s, draft: "main", text: old.text, note: "Before the phone edit", p) }
         var c = old ?? PostFile.Content(text: text)
         c.text = text
-        PostFile.write(c, to: s)
-        PostFile.snapshot(s, draft: "main", text: text, note: "Edited on the phone")
+        PostFile.write(c, to: s, p)
+        PostFile.snapshot(s, draft: "main", text: text, note: "Edited on the phone", p)
         return true
     }
 
@@ -724,18 +761,25 @@ final class PhoneServer: PhoneHandler, @unchecked Sendable {
         let allComments = CommentStore.read(s).comments
         let open = allComments.filter(\.open).count
         let profile = Self.profile()
-        let board = Storyboard.read(s).map { b in
-            zip(b.shots, b.starts).map { x, start in
-                PhoneShot(id: x.id, section: x.section.rawValue, kind: x.kind, say: x.say, how: x.how, seconds: x.length,
+        var board: [PhoneShot]?
+        if let b = Storyboard.read(s) {
+            var shots: [PhoneShot] = []
+            for (x, start) in zip(b.shots, b.starts) {
+                // A clip shows in its own shape, as on the Mac.
+                var ratio = Double(b.ratio)
+                if let v = x.video, let r = await Self.clipRatio(s.appending(path: v)) { ratio = r }
+                shots.append(PhoneShot(id: x.id, section: x.section.rawValue, kind: x.kind, say: x.say, how: x.how, seconds: x.length,
                           start: start, image: x.video.map { s.appending(path: $0).path } ?? x.image.map { Storyboard.folder(s).appending(path: $0).path },
                           error: x.error,
-                          comments: allComments.filter { $0.shot == x.id })
+                          comments: allComments.filter { $0.shot == x.id }, ratio: ratio))
             }
+            board = shots
         }
         return PhoneSessionDetail(session: summary(s, meta: meta, root: root, state: state), folder: s.path,
                                   script: (try? String(contentsOf: s.appending(path: "script.md"), encoding: .utf8)) ?? "",
                                   files: files, post: post, chat: chat, openComments: open, profile: profile,
-                                  storyboard: board?.isEmpty == false ? board : nil)
+                                  storyboard: board?.isEmpty == false ? board : nil,
+                                  posts: Self.platformPosts(s))
     }
 
     private func chat(_ s: URL) async -> PhoneChat {
@@ -768,8 +812,12 @@ final class PhoneServer: PhoneHandler, @unchecked Sendable {
         return s + " He may be away from the Mac: don't count on him seeing anything on its screen."
     }
 
-    private func send(_ text: String, to s: URL, origin: String?) async -> PhoneResponse {
-        let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+    /// `tokens`: a phone from 2026-10-05 on says "@comments" when the open comments should go with
+    /// the message, as the Mac's box does. An older phone sends them with every message.
+    private func send(_ text: String, to s: URL, origin: String?, tokens: Bool = false) async -> PhoneResponse {
+        let typed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let mentions = ClaudeChat.mentionsComments(typed)
+        let text = tokens ? ClaudeChat.withoutCommentsToken(typed) : typed
         guard !text.isEmpty else { return .error(400, "The message is empty") }
         let meta = Store.readMeta(s)
         let title = meta?.title ?? s.lastPathComponent
@@ -779,8 +827,9 @@ final class PhoneServer: PhoneHandler, @unchecked Sendable {
             if c.running { return false }
             // A new session from the phone's + starts empty and untitled: the first message is the idea.
             let first = c.messages.isEmpty && meta?.named == false
-            // Open comments go with every message, as on the Mac (ClaudeChat.withComments).
-            let said = first ? Self.firstChat(text) : ClaudeChat.withComments(text, CommentStore.read(s).comments)
+            let comments = !tokens || mentions
+            let said = first ? Self.firstChat(text)
+                : comments && !ClaudeChat.isCompact(text) ? ClaudeChat.withComments(text, CommentStore.read(s).comments) : text
             c.send(said, title: title, onStage: nil, origin: origin)
             return true
         }
@@ -955,7 +1004,7 @@ final class PhoneServer: PhoneHandler, @unchecked Sendable {
             store.decline(s, wrongPost: b["wrongPost"] as? Bool ?? false, reason: reason, note: b["note"] as? String ?? "")
         case "feedback":
             guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return .error(400, "The note is empty") }
-            store.feedback(s, note: text, variant: variant)
+            store.feedback(s, note: text, variant: variant, send: true)  // the phone has no feedback pill
         case "skip": store.skip(s)
         case "unskip": store.unskip(s.id)
         case "pullback": store.pullBack(s)

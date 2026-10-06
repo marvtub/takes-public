@@ -5,14 +5,20 @@ It answers the calls the phone makes with one session. GET /test/down?s=N makes 
 for N seconds: the port refuses connections, as when the Mac sleeps. GET /test/log lists the
 changes it got (script saves, comments, chat messages, uploads).
 """
-import json, sys, threading, time
+import json, sys, threading, time, uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8797
 NOW = "2026-10-03T10:00:00Z"
 SID = "Tests/offline-video"
-state = {"script": "The first line of the script.\n\nThe second paragraph.", "comments": [], "log": [], "up": True}
+state = {"script": "The first line of the script.\n\nThe second paragraph.", "comments": [], "log": [], "up": True,
+         "chat": {"running": False, "messages": []}, "chat_revision": 0}
+
+
+def message(index, text, role="claude"):
+    return {"id": str(uuid.uuid5(uuid.NAMESPACE_URL, "takes-scroll-%d" % index)),
+            "role": role, "text": text, "done": False}
 
 session = {"id": SID, "title": "Offline video", "project": "Tests", "created": NOW, "updated": NOW,
            "takes": 0, "running": False, "unread": False, "notice": False, "published": False}
@@ -20,7 +26,7 @@ session = {"id": SID, "title": "Offline video", "project": "Tests", "created": N
 
 def detail():
     return {"session": session, "folder": "/tmp/" + SID, "script": state["script"], "files": [],
-            "post": None, "chat": {"running": False, "messages": []},
+            "post": None, "chat": state["chat"],
             "openComments": len(state["comments"]), "profile": None, "storyboard": None}
 
 
@@ -53,6 +59,36 @@ class H(BaseHTTPRequestHandler):
             return
         if p == "/test/log":
             return self.send(state["log"])
+        if p == "/test/chat/start":
+            messages = [message(i, "Earlier message %d.\n\n" % i +
+                                "A paragraph about making a video and reading its script.\n\n" * 4)
+                        for i in range(24)]
+            # A finished run of five tool steps folds to one line; a run of two stays open.
+            def tool(i, text):
+                return dict(message(i, text, role="tool"), done=True)
+            messages += [tool(100 + i, t) for i, t in enumerate(
+                ["Bash · cd /tmp/letter; python3 ascii2.py", "Read · a4.jpg", "Bash · ffmpeg -i in.mov",
+                 "Read · a5.jpg", "Grep · ascii"])]
+            messages.append(message(110, "The ASCII video is rendered."))
+            messages += [tool(111 + i, t) for i, t in enumerate(["Bash · ls edits", "Read · sheet5.jpg"])]
+            messages.append(message(24, "Latest reply marker"))
+            state["chat"] = {"running": True, "messages": messages}
+            state["chat_revision"] += 1
+            return self.send({"ok": True})
+        if p == "/test/chat/grow":
+            # Replace the last message as a real streaming event does, retaining its id.
+            chat = json.loads(json.dumps(state["chat"]))
+            chat["messages"][-1]["text"] += "\n\n" + "More streamed words that wrap onto several lines. " * 100
+            state["chat"] = chat
+            state["chat_revision"] += 1
+            return self.send({"ok": True})
+        if p == "/test/chat/finish":
+            chat = json.loads(json.dumps(state["chat"]))
+            chat["running"] = False
+            chat["messages"][-1]["done"] = True
+            state["chat"] = chat
+            state["chat_revision"] += 1
+            return self.send({"ok": True})
         if p == "/api/ping":
             return self.send({"ok": "takes"})
         if p == "/api/pair":
@@ -63,8 +99,16 @@ class H(BaseHTTPRequestHandler):
             self.send_header("Content-Type", "text/event-stream")
             self.end_headers()
             try:
+                revision = -1
                 while state["up"]:
-                    self.wfile.write(b": ping\n\n")
+                    if state["chat_revision"] and revision != state["chat_revision"]:
+                        revision = state["chat_revision"]
+                        chat = state["chat"]
+                        event = {"type": "chat", "id": SID, "running": chat["running"],
+                                 "count": len(chat["messages"]), "tail": chat["messages"][-1:]}
+                        self.wfile.write(("data: " + json.dumps(event) + "\n\n").encode())
+                    else:
+                        self.wfile.write(b": ping\n\n")
                     self.wfile.flush()
                     time.sleep(1)
             except OSError:
@@ -82,7 +126,14 @@ class H(BaseHTTPRequestHandler):
             return self.send(detail())
         if p == "/api/chat":
             if method == "POST":
-                state["log"].append({"say": json.loads(self.body())["text"], "id": q.get("id")})
+                text = json.loads(self.body())["text"]
+                state["log"].append({"say": text, "id": q.get("id")})
+                if state["chat_revision"]:
+                    chat = json.loads(json.dumps(state["chat"]))
+                    chat["messages"].append(message(len(chat["messages"]), text, role="user"))
+                    chat["running"] = True
+                    state["chat"] = chat
+                    state["chat_revision"] += 1
                 return self.send({})
             return self.send(detail()["chat"])
         if p == "/api/chat/read":

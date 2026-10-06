@@ -107,6 +107,9 @@ struct MediaReview: View {
     @State private var showResolved = false
     /// The playhead to a quarter second: enough for the comment boxes, 4 redraws a second.
     @State private var now: Double = 0
+    /// The TikTok, Reels and Shorts safe zone over a vertical video, as on the Mac. Remembered.
+    @AppStorage("safeZone") private var safeZone = false
+    private var vertical: Bool { file.isVideo && SafeZone.fits(size) }
 
     private var mine: [Comment] { comments.filter { $0.file == rel } }
     private var open: [Comment] { mine.filter(\.open) }
@@ -181,6 +184,7 @@ struct MediaReview: View {
                             .onTapGesture { focus(c) }
                     }
                 }
+                if safeZone && vertical && !marking { SafeZoneOverlay(frame: f).transition(.opacity) }
                 if let a = drawing ?? draft?.rect { AreaBox(rect: a, in: f, number: nil, strong: true).allowsHitTesting(false) }
                 if marking { drawLayer(f) }
             }
@@ -235,6 +239,16 @@ struct MediaReview: View {
                     .font(.inter(.footnote)).foregroundStyle(.white.opacity(0.6))
             }
             Spacer()
+            if vertical && !marking {
+                Button { withAnimation(.snappy) { safeZone.toggle() } } label: {
+                    Image(systemName: safeZone ? "rectangle.inset.filled" : "rectangle.dashed")
+                        .font(.system(size: 15, weight: .semibold))
+                        .frame(width: 36, height: 36)
+                        .background(safeZone ? Palette.accent.opacity(0.25) : Color.white.opacity(0.12), in: Circle())
+                        .foregroundStyle(.white)
+                }
+                .accessibilityLabel(safeZone ? "Hide the safe zone" : "Show the safe zone for TikTok, Reels and Shorts")
+            }
             Button { marking.toggle() } label: {
                 Label(marking ? "Marking…" : "Comment", systemImage: "text.bubble")
                     .font(.inter(.subheadline, .semibold))

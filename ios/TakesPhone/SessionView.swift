@@ -52,7 +52,7 @@ struct SessionView: View {
                     case .script: ScriptView(sessionID: session.id, text: detail.script, reload: { await reload() })
                     case .board: BoardView(sessionID: session.id, detail: detail, show: { showing = $0 },
                                            record: { shooting = $0 }, reload: { await reload() }, toChat: { tab = .chat })
-                    case .post: PostView(sessionID: session.id, post: detail.post, profile: detail.profile,
+                    case .post: PostView(sessionID: session.id, post: detail.post, posts: detail.posts ?? [], profile: detail.profile,
                                          show: { showing = $0 }, files: detail.files, reload: { await reload() })
                     }
                 } else if let failed {
@@ -148,6 +148,95 @@ struct SessionView: View {
 
 // MARK: - Chat
 
+/// Session and board chats share one scroll owner. Follow measured layout, not incoming text:
+/// the keyboard, wrapping and working line can all change the bottom after an event arrives.
+struct ChatTranscript<Content: View>: View {
+    var latestRequest: Int
+    @ViewBuilder var content: () -> Content
+    @State private var position = ScrollPosition(edge: .bottom)
+    @State private var follow = ChatScrollState()
+
+    private struct Layout: Equatable {
+        var content: CGSize
+        var viewport: CGSize
+        var distanceFromBottom: CGFloat
+    }
+
+    var body: some View {
+        ScrollView {
+            // Lazy height estimates can move the bottom past the actual messages during a
+            // keyboard resize or a long streamed reply (2026-10-06). Measure real rows instead.
+            VStack(alignment: .leading, spacing: 10) {
+                content()
+                Color.clear.frame(height: 4)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(16)
+            // Exactly the screen's width: a long chat measured 0.67 pt wider than the scroll view,
+            // and the chat could be pulled sideways (2026-10-06).
+            .containerRelativeFrame(.horizontal)
+        }
+        .scrollBounceBehavior(.basedOnSize, axes: .horizontal)
+        .accessibilityIdentifier("chat-transcript")
+        .defaultScrollAnchor(.bottom, for: .initialOffset)
+        .defaultScrollAnchor(.bottom, for: .alignment)
+        .scrollPosition($position)
+        .scrollDismissesKeyboard(.interactively)
+        .onScrollPhaseChange { _, phase, context in
+            switch phase {
+            case .tracking, .interacting, .decelerating:
+                follow.userScrollStarted()
+                follow.userScrolled(distanceFromBottom: distance(context.geometry))
+            case .idle:
+                if follow.browsing {
+                    follow.userScrollEnded(distanceFromBottom: distance(context.geometry))
+                }
+            default: break
+            }
+        }
+        .onScrollGeometryChange(for: Layout.self) { geometry in
+            Layout(content: geometry.contentSize, viewport: geometry.containerSize,
+                   distanceFromBottom: distance(geometry))
+        } action: { old, new in
+            let shouldFollow = follow.layoutChanged(distanceFromBottom: new.distanceFromBottom)
+            guard old.content != new.content || old.viewport != new.viewport else { return }
+            if shouldFollow { toLatest() }
+        }
+        .onChange(of: latestRequest) { _, _ in
+            follow.latest()
+            toLatest()
+        }
+        .overlay(alignment: .bottomTrailing) {
+            if follow.showsLatest {
+                Button {
+                    follow.latest()
+                    toLatest()
+                } label: {
+                    Label("Latest", systemImage: "arrow.down")
+                        .font(.inter(.footnote, .medium))
+                        .padding(.horizontal, 14).padding(.vertical, 10)
+                        .background(Palette.paper, in: Capsule())
+                        .overlay(Capsule().strokeBorder(Palette.border))
+                }
+                .buttonStyle(.press)
+                .accessibilityLabel("Jump to latest message")
+                .padding(12)
+            }
+        }
+    }
+
+    private func distance(_ geometry: ScrollGeometry) -> CGFloat {
+        max(0, geometry.contentSize.height - geometry.visibleRect.maxY)
+    }
+
+    private func toLatest() {
+        // No competing animated scrolls while a reply streams or the keyboard moves.
+        var transaction = Transaction()
+        transaction.disablesAnimations = true
+        withTransaction(transaction) { position.scrollTo(edge: .bottom) }
+    }
+}
+
 struct ChatView: View {
     @EnvironmentObject var model: Model
     @EnvironmentObject var live: LiveChat
@@ -165,39 +254,39 @@ struct ChatView: View {
     @State private var picks: [PhotosPickerItem] = []
     @State private var importing = false
     @FocusState private var typing: Bool
+    @State private var latestRequest = 0
 
     private var chat: Chat { live.id == session.id ? (live.chat ?? detail.chat) : detail.chat }
 
+    /// "@comments" in the box sends the open comments with the message, as on the Mac (2026-10-04):
+    /// delete it to leave them out. An empty box starts with it while comments are open.
+    static let commentsToken = "@comments"
+    private static let commentsPattern = #"(?<!\S)@comments(?!\w)"#
+    static func withoutToken(_ text: String) -> String {
+        text.replacingOccurrences(of: commentsPattern + #"[ \t]?"#, with: "", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+    /// Unsent text stays when you leave the chat or the app, as on the Mac.
+    private var draftKey: String { "chatDraft." + session.id }
+
+    private func offerComments() {
+        let typed = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        if detail.openComments > 0, typed.isEmpty { draft = Self.commentsToken + " " }
+        else if detail.openComments == 0, typed == Self.commentsToken { draft = "" }
+    }
+
     var body: some View {
         VStack(spacing: 0) {
-            ScrollViewReader { proxy in
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 10) {
-                        ForEach(chat.messages) { m in
-                            Bubble(message: m, files: detail.files, show: show, waiting: m.role == .user && model.outbox.ops.contains { $0.id == m.id })
-                                .equatable().id(m.id)
-                        }
-                        if chat.running {
-                            HStack(spacing: 8) { WorkingDots(); Text(chat.workingLine) }
-                                .font(.inter(.footnote, .medium)).foregroundStyle(Palette.accent).id("working")
-                                .transition(.opacity)
-                        }
-                        Color.clear.frame(height: 4).id("end")
-                    }
-                    .padding(16)
+            ChatTranscript(latestRequest: latestRequest) {
+                ChatItems(messages: chat.messages, running: chat.running) { m in
+                    Bubble(message: m, files: detail.files, show: show, waiting: m.role == .user && model.outbox.ops.contains { $0.id == m.id })
                 }
-                .defaultScrollAnchor(.bottom)
-                .scrollDismissesKeyboard(.interactively)
-                .task {
-                    proxy.scrollTo("end", anchor: .bottom)
-                    try? await Task.sleep(for: .milliseconds(300))
-                    proxy.scrollTo("end", anchor: .bottom)
+                if chat.running {
+                    HStack(spacing: 8) { WorkingDots(); Text(chat.workingLine) }
+                        .font(.inter(.footnote, .medium)).foregroundStyle(Palette.accent)
                 }
-                // Streamed text: follow it without an animation per update.
-                .onChange(of: chat.messages.last?.text) { _, _ in proxy.scrollTo("end", anchor: .bottom) }
-                .onChange(of: chat.messages.count) { _, _ in withAnimation { proxy.scrollTo("end", anchor: .bottom) } }
-                .overlay { if empty { start } }
             }
+            .overlay { if empty { start } }
             composer
         }
         .onChange(of: picks) { _, items in
@@ -214,6 +303,8 @@ struct ChatView: View {
             }
         }
         .onAppear {
+            if draft.isEmpty, let kept = UserDefaults.standard.string(forKey: draftKey) { draft = kept }
+            offerComments()
             if empty { typing = true }
             model.uploads.finished = { item in
                 guard waiting.contains(item.id), let p = item.path else { return }
@@ -240,6 +331,12 @@ struct ChatView: View {
 
     private var composer: some View {
         VStack(alignment: .leading, spacing: 8) {
+            if detail.openComments > 0 && !voice.recording {
+                OpenCommentsChip(sessionID: session.id, count: detail.openComments) { ask in
+                    Task { _ = await model.say(ask, in: session.id, from: "Chat", tokens: true) }
+                }
+                .transition(.opacity.combined(with: .offset(y: 4)))
+            }
             if !attached.isEmpty || !waiting.isEmpty {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 6) {
@@ -286,6 +383,7 @@ struct ChatView: View {
                         TextField("Message Takes", text: $draft, axis: .vertical)
                             .lineLimit(1...6)
                             .focused($typing)
+                            .accessibilityIdentifier("chat-input")
                     }
                 }
                 .padding(.leading, 14).padding(.trailing, 10).padding(.vertical, voice.recording ? 2 : 9)
@@ -320,7 +418,12 @@ struct ChatView: View {
         .background(Palette.canvas)
         .animation(Brand.quick, value: attached)
         .onDisappear { voice.cancel() }
-        .onChange(of: draft) { if draft.isEmpty && attached.isEmpty { spoke = false } }
+        .onChange(of: draft) {
+            if draft.isEmpty && attached.isEmpty { spoke = false }
+            let kept = Self.withoutToken(draft)
+            if kept.isEmpty { UserDefaults.standard.removeObject(forKey: draftKey) } else { UserDefaults.standard.set(draft, forKey: draftKey) }
+        }
+        .onChange(of: detail.openComments) { _, _ in offerComments() }
     }
 
     /// While recording: discard on the left, the level bars and the time in place of the text.
@@ -357,7 +460,7 @@ struct ChatView: View {
     }
 
     private var canSend: Bool {
-        voice.recording || (waiting.isEmpty && (!draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attached.isEmpty))
+        voice.recording || (waiting.isEmpty && (!Self.withoutToken(draft).isEmpty || !attached.isEmpty))
     }
 
     /// The arrow while recording stops, adds the words and sends in one tap.
@@ -365,7 +468,7 @@ struct ChatView: View {
         if voice.recording {
             Task {
                 await toggleVoice()
-                if !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attached.isEmpty { send() }
+                if !Self.withoutToken(draft).isEmpty || !attached.isEmpty { send() }
             }
             return
         }
@@ -374,10 +477,12 @@ struct ChatView: View {
             text += (text.isEmpty ? "I sent you these from my phone:" : "\n\nFrom my phone:") + "\n" + attached.joined(separator: "\n")
         }
         let before = (draft, attached, spoke)
+        latestRequest += 1
         draft = ""
         attached = []
+        offerComments()
         Task {
-            if !(await model.say(text, in: session.id, from: "Chat", voice: before.2)) { draft = before.0; attached = before.1; spoke = before.2 }
+            if !(await model.say(text, in: session.id, from: "Chat", voice: before.2, tokens: true)) { draft = before.0; attached = before.1; spoke = before.2 }
         }
     }
 
@@ -438,11 +543,7 @@ struct Bubble: View, Equatable {
                 }
             }
         case .tool:
-            HStack(spacing: 6) {
-                Image(systemName: message.done ? "checkmark" : "gearshape").font(.inter(.caption2))
-                Text(message.text).lineLimit(1)
-            }
-            .font(.caption.monospaced()).foregroundStyle(Palette.faint)
+            ToolLine(text: message.text, done: message.done)
         case .error:
             Label(message.text, systemImage: "exclamationmark.triangle").font(.inter(.footnote, .medium)).foregroundStyle(Palette.danger)
         case .claude:
@@ -849,10 +950,14 @@ struct PostView: View {
     @EnvironmentObject var model: Model
     let sessionID: String
     let post: Post?
+    /// Every platform's post, LinkedIn first (2026-10-05). Empty from an older Mac.
+    let posts: [PlatformPost]
     let profile: Profile?
     let show: (RemoteFile) -> Void
     let files: [RemoteFile]
     let reload: () async -> Void
+    /// The platform on show: linkedin, x, youtube, vertical. Remembered, as the Mac's post tab does.
+    @AppStorage("postPlatform") private var platform = "linkedin"
     @State private var expanded = false
     @State private var editing = false
     /// "main", or the slug of the variant on show.
@@ -867,23 +972,174 @@ struct PostView: View {
     /// The text of the draft on show.
     private var text: String { variant?.text ?? post?.text ?? "" }
     private var file: String { variant.map { "posts/variants/\($0.slug).md" } ?? "posts/linkedin.md" }
+    /// The other platforms' posts. LinkedIn shows even with no post: it is where a post starts.
+    private var others: [PlatformPost] { posts.filter { $0.platform != "linkedin" } }
+    private var other: PlatformPost? { platform == "linkedin" ? nil : others.first { $0.platform == platform } }
+    private var coverNow: String? { other?.cover ?? (platform == "linkedin" ? (posts.first { $0.platform == "linkedin" }?.cover ?? post?.cover) : nil) }
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
-                HStack {
-                    let posted = post?.status == "posted"
-                    Text((post?.status ?? "No post").capitalized).font(.inter(.caption, .semibold))
-                        .foregroundStyle(posted ? Palette.live : Palette.ink)
-                        .padding(.horizontal, 10).padding(.vertical, 5)
-                        .background(posted ? Palette.liveSoft : Palette.well, in: Capsule())
-                    if post != nil { Text("\(text.count) / 3000").font(.inter(.caption, .medium)).monospacedDigit().foregroundStyle(Palette.faint) }
-                    Spacer()
-                    Button { editing = true } label: { Label(post == nil ? "Write" : "Edit", systemImage: "pencil") }
-                        .buttonStyle(.pill(.soft, small: true))
-                }
-                if !variants.isEmpty { drafts }
+                if !others.isEmpty { platforms }
                 if let failed { Label(failed, systemImage: "exclamationmark.triangle").font(.inter(.footnote)).foregroundStyle(.orange) }
+                if let other { platformPost(other) } else { linkedIn }
+                if post != nil || other != nil { covers }
+            }
+            .padding(16)
+        }
+        .background(LinkedIn.feed)
+        .refreshable { await reload() }
+        .onChange(of: variants.map(\.slug)) { _, slugs in if draft != "main" && !slugs.contains(draft) { draft = "main" } }
+        .onChange(of: others.map(\.platform), initial: true) { _, have in if platform != "linkedin" && !have.contains(platform) { platform = "linkedin" } }
+        .sheet(isPresented: $editing) {
+            if let other {
+                TextEditSheet(title: "\(other.name) post", text: other.text, font: .system(size: 16), limit: other.limit) { new in
+                    try await model.save("post", sessionID, text: new, base: other.text, platform: other.platform)
+                    await reload()
+                }
+            } else {
+                TextEditSheet(title: variant?.name ?? "LinkedIn post", text: text, font: .system(size: 16), limit: 3000) { new in
+                    if let variant {
+                        try await model.postDraft(sessionID, ["action": "save", "slug": variant.slug, "text": new, "base": variant.text])
+                    } else {
+                        try await model.save("post", sessionID, text: new, base: post?.text ?? "")
+                    }
+                    await reload()
+                }
+            }
+        }
+    }
+
+    /// LinkedIn, X, YouTube, Vertical: the Mac's post tab switch.
+    private var platforms: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 6) {
+                platformChip("linkedin", "LinkedIn")
+                ForEach(others) { platformChip($0.platform, $0.name) }
+            }
+        }
+    }
+
+    private func platformChip(_ id: String, _ label: String) -> some View {
+        let on = platform == id
+        return Button { Brand.select(); withAnimation(.snappy) { platform = id; expanded = false } } label: {
+            Text(label).font(.inter(.subheadline, on ? .semibold : .medium))
+                .padding(.horizontal, 14).padding(.vertical, 7)
+                .background(on ? Palette.ink : Palette.paper, in: Capsule())
+                .overlay(Capsule().strokeBorder(on ? .clear : Palette.border))
+                .foregroundStyle(on ? Palette.paper : Palette.ink)
+        }
+        .buttonStyle(.plain)
+        .accessibilityAddTraits(on ? .isSelected : [])
+    }
+
+    private func statusRow(_ status: String?, count: Int?, limit: Int, write: Bool) -> some View {
+        HStack {
+            let posted = status == "posted"
+            Text((status ?? "No post").capitalized).font(.inter(.caption, .semibold))
+                .foregroundStyle(posted ? Palette.live : Palette.ink)
+                .padding(.horizontal, 10).padding(.vertical, 5)
+                .background(posted ? Palette.liveSoft : Palette.well, in: Capsule())
+            if let count { Text("\(count) / \(limit)").font(.inter(.caption, .medium)).monospacedDigit().foregroundStyle(Palette.faint) }
+            Spacer()
+            Button { editing = true } label: { Label(write ? "Write" : "Edit", systemImage: "pencil") }
+                .buttonStyle(.pill(.soft, small: true))
+        }
+    }
+
+    /// X, YouTube or Vertical: the cover (or the video), the title and the text. Comments and
+    /// variants for these stay on the Mac.
+    private func platformPost(_ p: PlatformPost) -> some View {
+        let vertical = p.platform == "vertical"
+        let picture = p.cover ?? p.media
+        return VStack(alignment: .leading, spacing: 14) {
+            statusRow(p.status, count: p.text.count, limit: p.limit, write: false)
+            VStack(alignment: .leading, spacing: 10) {
+                if let picture {
+                    let f = files.first { $0.path == picture } ?? Bubble.guess(picture)
+                    Button { show(f) } label: {
+                        RemoteImage(url: model.api.thumb(picture, width: 900)) { $0.resizable().scaledToFill() } placeholder: { Color.black.opacity(0.06) }
+                            .aspectRatio(vertical ? 9.0 / 16.0 : 16.0 / 9.0, contentMode: .fit)
+                            .frame(maxWidth: vertical ? 220 : .infinity)
+                            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.plain)
+                }
+                if !p.title.isEmpty {
+                    Text(p.title).font(.system(size: 17, weight: .semibold)).foregroundStyle(Palette.ink)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Text(p.text).font(.system(size: 15)).foregroundStyle(Palette.ink)
+                    .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
+            }
+            .padding(14)
+            .background(Palette.paper, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(Palette.border))
+        }
+    }
+
+    /// The thumbnails as covers for the post on show, as on the Mac's Post tab (2026-10-05).
+    private var covers: some View {
+        let thumbs = files.filter(\.canBeCover).sorted { $0.modified > $1.modified }
+        return VStack(alignment: .leading, spacing: 8) {
+            Text("COVER").font(.caption.weight(.semibold)).tracking(0.8).foregroundStyle(Palette.muted)
+            if thumbs.isEmpty {
+                Text("No thumbnails yet. Ask Takes to make one.").font(.inter(.footnote)).foregroundStyle(Palette.muted)
+            } else {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        ForEach(thumbs) { t in
+                            let on = coverNow.map { Self.same($0, t.path) } ?? false
+                            Button { useCover(t) } label: {
+                                RemoteImage(url: model.api.thumb(t.path, width: 300)) { $0.resizable().scaledToFill() } placeholder: { Palette.well }
+                                    .frame(width: 112, height: 63)
+                                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                                    .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                        .strokeBorder(on ? Palette.accent : Palette.border, lineWidth: on ? 2 : 1))
+                                    .overlay(alignment: .topTrailing) {
+                                        if on {
+                                            Image(systemName: "checkmark").font(.system(size: 9, weight: .heavy)).foregroundStyle(.white)
+                                                .frame(width: 17, height: 17).background(Palette.accent, in: Circle()).padding(4)
+                                        }
+                                    }
+                            }
+                            .buttonStyle(.press)
+                            .disabled(busy || on)
+                            .accessibilityLabel(on ? "Cover in use: \(t.name)" : "Use \(t.name) as the cover")
+                        }
+                    }
+                }
+            }
+        }
+        .padding(.top, 6)
+    }
+
+    /// The cover file is a copy Takes made from the thumbnail, so compare names without the folder.
+    private static func same(_ a: String, _ b: String) -> Bool {
+        a == b || (a as NSString).lastPathComponent == (b as NSString).lastPathComponent
+    }
+
+    private func useCover(_ t: RemoteFile) {
+        busy = true
+        Task {
+            defer { busy = false }
+            do {
+                try await model.cover(t.path, platform: platform)
+                failed = nil
+                Brand.select()
+                // The Mac makes the cover video in a few seconds.
+                try? await Task.sleep(for: .seconds(2))
+                await reload()
+            } catch {
+                failed = error.localizedDescription
+            }
+        }
+    }
+
+    @ViewBuilder private var linkedIn: some View {
+                statusRow(post?.status, count: post == nil ? nil : text.count, limit: 3000, write: post == nil)
+                if !variants.isEmpty { drafts }
                 if let post {
                     CommentedText(sessionID: sessionID, file: file, text: text, font: LinkedIn.body,
                                   what: "post", color: LinkedIn.uiInk) { shown in
@@ -895,22 +1151,6 @@ struct PostView: View {
                     MascotEmpty(title: "No post yet", message: "Ask Takes to write the LinkedIn post, or write it here.")
                         .padding(.top, 30)
                 }
-            }
-            .padding(16)
-        }
-        .background(LinkedIn.feed)
-        .refreshable { await reload() }
-        .onChange(of: variants.map(\.slug)) { _, slugs in if draft != "main" && !slugs.contains(draft) { draft = "main" } }
-        .sheet(isPresented: $editing) {
-            TextEditSheet(title: variant?.name ?? "LinkedIn post", text: text, font: .system(size: 16), limit: 3000) { new in
-                if let variant {
-                    try await model.postDraft(sessionID, ["action": "save", "slug": variant.slug, "text": new, "base": variant.text])
-                } else {
-                    try await model.save("post", sessionID, text: new, base: post?.text ?? "")
-                }
-                await reload()
-            }
-        }
     }
 
     /// Main and the variants as tabs, as on the Mac. A variant can become the post that goes out.

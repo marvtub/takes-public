@@ -370,8 +370,6 @@ struct AskBox: View {
     let cancel: () -> Void
     /// Take the keyboard when the box opens, so typed or pasted words (Handy) land here.
     var autofocus = true
-    /// False for a box that is always there (a storyboard shot's note): Esc still clears it.
-    var cancellable = true
     /// One row, like a message field: the words and the send arrow, no Voice button (a storyboard
     /// shot's note, 2026-10-04: the two-row box with a Voice pill looked sloppy there).
     var inline = false
@@ -381,13 +379,12 @@ struct AskBox: View {
 
     private var canSend: Bool { !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
 
-    // The words get the full width; the buttons sit on a row under them, so a narrow box
-    // (a storyboard shot) never squeezes the text into one letter a line (2026-10-03).
+    // The comment feedback and decline notes use the chat's own box (2026-10-05: The user wanted
+    // the same field as the chat, with the plain mic icon, not a box of its own).
     var body: some View {
-        Group { if inline { inlineBody } else { boxBody } }
+        Group { if inline { inlineBody } else { chatBody } }
             .animation(Theme.motion, value: focus.wrappedValue)
             .animation(Theme.spring, value: dictation.active)
-            .onChange(of: dictation.text) { _, words in text = before + words }
             .onChange(of: dictation.problem) { _, why in if let why { app.show(toast: why) } }
             .onDisappear { dictation.cancel() }
             // Ask again once the box is in the window: a request made while it is still being
@@ -398,6 +395,14 @@ struct AskBox: View {
                 DispatchQueue.main.async { focus.wrappedValue = true }
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { focus.wrappedValue = true }
             }
+    }
+
+    /// Esc that the field does not use (no voice note to stop) cancels the box.
+    private var chatBody: some View {
+        ChatField(draft: $text, focused: focus, dictation: dictation, spokenAfter: $before,
+                  placeholder: placeholder, running: false, canSend: canSend, micOff: app.isRecording,
+                  send: { if canSend { send?() } }, stop: {}, sends: send != nil)
+            .onKeyPress(.escape) { cancel(); return .handled }
     }
 
     private var field: some View {
@@ -455,54 +460,7 @@ struct AskBox: View {
                           lineWidth: focus.wrappedValue || dictation.active ? 1.5 : 1))
         .contentShape(RoundedRectangle(cornerRadius: 20))
         .onTapGesture { focus.wrappedValue = true }
-    }
-
-    private var boxBody: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            field
-                .padding(.horizontal, 4).padding(.top, 4)
-            HStack(spacing: 4) {
-                if dictation.active {
-                    VoiceNote(dictation: dictation, done: { Task { await dictation.stop() } },
-                              cancel: { dictation.cancel() })
-                } else {
-                    Button(action: listen) {
-                        Label("Voice", systemImage: "mic").font(Theme.sans(12, .medium))
-                            .labelStyle(.titleAndIcon)
-                            .padding(.horizontal, 9).frame(height: 26)
-                            .background(Theme.hover, in: Capsule())
-                    }
-                    .buttonStyle(PressStyle())
-                    .foregroundStyle(Theme.muted)
-                    .disabled(app.isRecording)
-                    .help(app.isRecording ? "Not while recording a take" : "Voice note: talk, and the words come into the box")
-                    .transition(.opacity)
-                }
-                Spacer(minLength: 4)
-                if !dictation.active && cancellable {
-                    Button("Cancel", action: cancel)
-                        .buttonStyle(.plain).font(Theme.sans(12)).foregroundStyle(Theme.muted)
-                        .padding(.horizontal, 6)
-                        .help("Cancel (Esc)")
-                }
-                if send != nil {
-                    Button(action: submit) {
-                        Image(systemName: "arrow.up").font(.system(size: 12, weight: .bold)).foregroundStyle(Theme.paper)
-                            .frame(width: 26, height: 26)
-                            .background(canSend || dictation.active ? Theme.ink : Theme.border, in: Circle())
-                            .contentShape(Circle())
-                    }
-                    .buttonStyle(PressStyle())
-                    .disabled(!canSend && !dictation.active)
-                    .help("Send (Return)")
-                }
-            }
-        }
-        .padding(8)
-        .background(Theme.canvas, in: RoundedRectangle(cornerRadius: 14))
-        .overlay(RoundedRectangle(cornerRadius: 14)
-            .strokeBorder(dictation.active ? Theme.accent.opacity(0.6) : focus.wrappedValue ? Theme.muted.opacity(0.5) : Theme.border,
-                          lineWidth: dictation.active ? 1 : 0.5))
+        .onChange(of: dictation.text) { _, words in text = before + words }
     }
 
     private func listen() {

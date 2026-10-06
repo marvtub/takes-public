@@ -194,7 +194,7 @@ struct Banner: View {
                     Image(nsImage: lockup).resizable().aspectRatio(contentMode: .fit).frame(width: 280)
                         .padding(.bottom, 6)
                 }
-                Text("Record takes.\nClaude Code does the rest.")
+                Text("You talk.\nTakes does the rest.")
                     .font(.custom("Nunito-Bold", size: 38)).foregroundStyle(Color(red: 0.96, green: 0.97, blue: 0.99))
                     .lineSpacing(2)
                 Text("Scripts, storyboards, edits and posts for\nLinkedIn, X, YouTube, TikTok, Reels and Shorts.")

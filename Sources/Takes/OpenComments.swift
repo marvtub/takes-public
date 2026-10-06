@@ -157,3 +157,94 @@ struct OpenCommentsChip: View {
         if open.isEmpty { shown = false }
     }
 }
+
+/// Feedback notes from the Comments board that wait to be sent, like open video comments: The user
+/// writes notes on several drafts, then sends them at once or drops one (2026-10-06).
+struct PendingFeedbackChip: View {
+    @ObservedObject var store: CopilotStore
+    @State private var shown = false
+
+    var body: some View {
+        let pending = store.pendingFeedback
+        if !pending.isEmpty {
+            HStack(spacing: 6) {
+                Button { shown.toggle() } label: {
+                    HStack(spacing: 5) {
+                        Image(systemName: "text.bubble")
+                        Text("\(pending.count) feedback \(pending.count == 1 ? "note" : "notes")")
+                        Image(systemName: "chevron.down").font(.system(size: 8.5, weight: .semibold))
+                    }
+                    .font(Theme.sans(11.5, .medium)).foregroundStyle(Theme.accentInk)
+                    .padding(.horizontal, 10).padding(.vertical, 5)
+                    .background(Theme.accentSoft, in: Capsule())
+                }
+                .buttonStyle(PressStyle())
+                .help("See your notes: send them to Takes or drop one")
+                .popover(isPresented: $shown, arrowEdge: .top) { list(pending) }
+                Button { store.sendFeedback(pending) } label: {
+                    Text("Send").font(Theme.sans(11.5, .semibold)).foregroundStyle(.white)
+                        .padding(.horizontal, 10).padding(.vertical, 5)
+                        .background(Theme.accent, in: Capsule())
+                }
+                .buttonStyle(PressStyle())
+                .help("Takes writes a new draft for each note")
+            }
+            .transition(.opacity.combined(with: .offset(y: 4)))
+        }
+    }
+
+    private func list(_ pending: [Suggestion]) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Text("Feedback notes").font(Theme.sans(12.5, .semibold)).foregroundStyle(Theme.ink)
+                Spacer()
+                Button {
+                    shown = false
+                    store.sendFeedback(pending)
+                } label: {
+                    Text("Send all").font(Theme.sans(11.5, .semibold)).foregroundStyle(.white)
+                        .padding(.horizontal, 10).padding(.vertical, 4)
+                        .background(Theme.accent, in: Capsule())
+                }
+                .buttonStyle(PressStyle())
+            }
+            .padding(.horizontal, 14).padding(.vertical, 10)
+            Divider()
+            ScrollView {
+                VStack(alignment: .leading, spacing: 0) {
+                    ForEach(pending) { s in
+                        row(s)
+                        if s.id != pending.last?.id { Divider().padding(.leading, 14) }
+                    }
+                }
+            }
+            .frame(maxHeight: 320)
+        }
+        .frame(width: 340)
+        .background(Theme.paper)
+    }
+
+    private func row(_ s: Suggestion) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(s.post.author ?? "A post").font(Theme.sans(11, .semibold)).foregroundStyle(Theme.muted)
+                Text(s.drafts.last?.feedback ?? "").font(Theme.sans(12.5)).foregroundStyle(Theme.ink).lineLimit(3)
+            }
+            Spacer(minLength: 4)
+            HStack(spacing: 2) {
+                icon("paperplane", "Send this note to Takes") { store.sendFeedback([s]) }
+                icon("xmark", "Drop the note: the draft goes back to Review") { store.dropFeedback(s) }
+            }
+        }
+        .padding(.horizontal, 14).padding(.vertical, 9)
+    }
+
+    private func icon(_ name: String, _ help: String, _ action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: name).font(.system(size: 12.5)).foregroundStyle(Theme.muted)
+                .frame(width: 26, height: 26).contentShape(Rectangle())
+        }
+        .buttonStyle(PressStyle())
+        .help(help)
+    }
+}

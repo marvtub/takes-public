@@ -272,6 +272,108 @@ final class ScreensTests: XCTestCase {
         shot(app, "34-post-video-later")
     }
 
+    /// Regression for the blank/jumping chat: tall streamed replies, keyboard and multiline
+    /// composer resizing, reading history during a stream, and explicitly returning to latest.
+    /// Run against the controlled stand-in with ios/check.sh chat.
+    func testChatStaysPut() throws {
+        let server = ProcessInfo.processInfo.environment["TAKES_SERVER"] ?? "http://127.0.0.1:8797"
+        func fixture(_ path: String) throws {
+            let done = expectation(description: path)
+            var status: Int?
+            URLSession.shared.dataTask(with: URL(string: server + path)!) { _, response, _ in
+                status = (response as? HTTPURLResponse)?.statusCode
+                done.fulfill()
+            }.resume()
+            wait(for: [done], timeout: 10)
+            XCTAssertEqual(status, 200)
+        }
+        try fixture("/test/chat/start")
+        let app = XCUIApplication()
+        app.launchEnvironment["TAKES_SERVER"] = server
+        // The chat keeps unsent text per session: start from an empty field, not the last run's draft.
+        app.launchArguments += ["-chatDraft.Tests/offline-video", ""]
+        app.launch()
+        if app.buttons["Connect"].waitForExistence(timeout: 5) { app.buttons["Connect"].tap() }
+        if app.buttons["Videos"].waitForExistence(timeout: 15) { app.buttons["Videos"].tap() }
+        let row = app.buttons.matching(NSPredicate(format: "label CONTAINS 'Offline video'")).firstMatch
+        XCTAssertTrue(row.waitForExistence(timeout: 15))
+        row.tap()
+        let transcript = app.scrollViews["chat-transcript"]
+        XCTAssertTrue(transcript.waitForExistence(timeout: 15))
+        let tail = app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH 'Latest reply marker'")).firstMatch
+        XCTAssertTrue(tail.waitForExistence(timeout: 10))
+
+        func assertTailVisible(file: StaticString = #filePath, line: UInt = #line) {
+            XCTAssertGreaterThan(tail.frame.maxY, transcript.frame.minY, file: file, line: line)
+            XCTAssertLessThanOrEqual(tail.frame.maxY, transcript.frame.maxY + 2, file: file, line: line)
+            XCTAssertTrue(tail.isHittable, file: file, line: line)
+        }
+        sleep(2)
+        assertTailVisible()
+        // Five tool steps in a row fold to one line, as on the Mac; two stay as they are.
+        let fold = app.buttons.matching(NSPredicate(format: "value BEGINSWITH '5 steps'")).firstMatch
+        XCTAssertTrue(fold.exists)
+        XCTAssertFalse(app.staticTexts["Grep · ascii"].exists)
+        XCTAssertTrue(app.staticTexts["Read · sheet5.jpg"].exists)
+        shot(app, "chat-1-bottom")
+        // XCUITest reports the multiline field as a TextField or a TextView, from one query to the next.
+        func messageField() -> XCUIElement {
+            let any = app.descendants(matching: .any).matching(NSPredicate(format:
+                "(elementType == %d OR elementType == %d) AND identifier == 'chat-input'",
+                XCUIElement.ElementType.textField.rawValue, XCUIElement.ElementType.textView.rawValue)).firstMatch
+            XCTAssertTrue(any.waitForExistence(timeout: 5))
+            return any
+        }
+        messageField().tap()
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
+        app.typeText("One line\nTwo lines\nThree lines\nFour lines")
+        sleep(2)
+        assertTailVisible()
+        try fixture("/test/chat/grow")
+        sleep(3)
+        assertTailVisible()
+        shot(app, "chat-2-keyboard-stream")
+
+        // Browsing dismisses the keyboard interactively; the stream must not pull us back.
+        func visibleEarlier() -> XCUIElement? {
+            app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH 'Earlier message'")).allElementsBoundByIndex
+                // Its top on screen: with the keyboard up, one message is taller than the transcript.
+                .first { $0.frame.minY >= transcript.frame.minY && $0.frame.minY <= transcript.frame.maxY - 40 }
+        }
+        for _ in 0..<16 {
+            if visibleEarlier() != nil { break }
+            transcript.swipeDown()
+        }
+        sleep(2)
+        let latest = app.buttons["Jump to latest message"]
+        XCTAssertTrue(latest.waitForExistence(timeout: 5))
+        let reading = try XCTUnwrap(visibleEarlier())
+        let readingY = reading.frame.minY
+        try fixture("/test/chat/grow")
+        sleep(3)
+        XCTAssertEqual(reading.frame.minY, readingY, accuracy: 2, "A streaming reply moved the reader")
+        XCTAssertTrue(latest.exists)
+        shot(app, "chat-3-reading-history")
+        latest.tap()
+        sleep(2)
+        assertTailVisible()
+        try fixture("/test/chat/finish")
+        sleep(3)
+        assertTailVisible()
+        shot(app, "chat-4-finished")
+
+        // Sending from history is another explicit request to return to the conversation.
+        for _ in 0..<3 { transcript.swipeDown() }
+        XCTAssertTrue(latest.waitForExistence(timeout: 5))
+        messageField().tap()
+        app.typeText(" and send")
+        app.buttons["Send"].tap()
+        sleep(2)
+        XCTAssertFalse(latest.exists)
+        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS 'Four lines and send'")).firstMatch.isHittable)
+        shot(app, "chat-5-sent-from-history")
+    }
+
     private func shot(_ app: XCUIApplication, _ name: String) {
         let png = XCUIScreen.main.screenshot().pngRepresentation
         let dir = ProcessInfo.processInfo.environment["TAKES_SHOTS"] ?? NSTemporaryDirectory()

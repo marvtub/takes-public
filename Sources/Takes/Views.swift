@@ -19,6 +19,9 @@ struct TakesApp: App {
                 .foregroundStyle(Theme.ink)
                 .frame(minWidth: 960, minHeight: 580)
                 .overlay(alignment: .top) { PhonePairBanner().environment(app) }
+                .overlay { ScreenFindLayer().ignoresSafeArea() }
+                .overlay { OnboardingLayer().environment(app) }
+                .task { Onboarding.shared.startIfNew(app.library) }
                 .onOpenURL { app.handle(url: $0) }
         }
         .handlesExternalEvents(matching: ["*"])
@@ -59,11 +62,16 @@ struct TakesApp: App {
                     .keyboardShortcut("0")
                 Divider()
             }
+            CommandGroup(after: .help) {
+                Button("Show Welcome Again") { Onboarding.shared.show() }
+            }
             CommandGroup(replacing: .newItem) {
                 Button("New Session") { app.library.createSession() }.keyboardShortcut("n")
+                    .disabled(Onboarding.shared.shown)
             }
             CommandMenu("Record") {
                 Button("Start / Stop Recording") { app.toggleRecord() }.keyboardShortcut("r")
+                    .disabled(Onboarding.shared.shown)
                 Button("Play / Pause Script") { app.scrolling.toggle() }.keyboardShortcut("p")
                 Button("Script to Top") { app.resetToken += 1 }.keyboardShortcut(.upArrow, modifiers: .command)
                 Divider()
@@ -101,6 +109,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Setup.shared.start()
         Look.shared.applyMode()
         _ = NSWindow.keepFullScreenOnEscape
+        ScreenFind.shared.install()
         // Design check without screen-recording rights and without taking focus: post
         // "de.marvinaziz.takes.snapshot" (object = output path) and Takes draws its window into a PNG.
         DistributedNotificationCenter.default().addObserver(forName: .init("de.marvinaziz.takes.snapshot"),
@@ -2677,6 +2686,8 @@ struct Prompter: NSViewRepresentable {
         scroll.drawsBackground = true
         scroll.scrollerStyle = .overlay
         tv.string = text
+        // The cursor starts at the top: left at the end, the view scrolls down to keep it in sight.
+        tv.setSelectedRange(NSRange(location: 0, length: 0))
         context.coordinator.scroll = scroll
         apply(to: tv, context: context)
         return scroll
@@ -2694,11 +2705,15 @@ struct Prompter: NSViewRepresentable {
             // Switched session or variant: always replace, even while the text view has focus.
             c.lastKey = contentKey
             tv.string = text
+            tv.setSelectedRange(NSRange(location: 0, length: 0))
             c.fontApplied = 0
             c.scrollToTop()
         } else if tv.string != text && !c.isEditing {
+            // A first script, written by the chat, starts at its first line, not at its end.
+            let first = tv.string.isEmpty
             tv.string = text
             c.fontApplied = 0
+            if first { tv.setSelectedRange(NSRange(location: 0, length: 0)); c.scrollToTop() }
         }
         apply(to: tv, context: context)
     }

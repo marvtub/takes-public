@@ -66,6 +66,9 @@ struct CommentsView: View {
     let root: URL
     @AppStorage("copilotTab") private var tab = "review"
     @AppStorage("copilotDrafts") private var drafts = 5
+    /// The card on the Review tab. Approve or skip takes the card out, so the same place then
+    /// shows the next one.
+    @State private var reviewAt = 0
 
     var body: some View {
         VStack(spacing: 0) {
@@ -236,6 +239,19 @@ struct CommentsView: View {
         let list = store.review
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
+                if !store.pendingFeedback.isEmpty {
+                    HStack(spacing: 8) {
+                        Label("\(store.pendingFeedback.count) \(store.pendingFeedback.count == 1 ? "note waits" : "notes wait") in the Comments chat",
+                              systemImage: "text.bubble")
+                            .font(Theme.sans(12, .medium)).foregroundStyle(Theme.accentInk)
+                        Spacer()
+                        Button("Open chat") { hub.commentsLane = "find"; hub.open = true }
+                            .buttonStyle(BracketButtonStyle())
+                        Button("Send now") { store.sendFeedback(store.pendingFeedback) }
+                            .buttonStyle(BracketButtonStyle())
+                            .help("Takes writes a new draft for each note")
+                    }
+                }
                 if !store.redrafting.isEmpty {
                     Label("\(store.redrafting.count) new \(store.redrafting.count == 1 ? "draft" : "drafts") on the way after your feedback",
                           systemImage: "arrow.triangle.2.circlepath")
@@ -251,8 +267,10 @@ struct CommentsView: View {
                     }
                     .transition(.opacity)
                 }
-                if let s = list.first {
-                    ReviewCard(store: store, hub: hub, suggestion: s, position: 1, total: list.count)
+                if !list.isEmpty {
+                    let at = min(reviewAt, list.count - 1), s = list[at]
+                    ReviewCard(store: store, hub: hub, suggestion: s, position: at + 1, total: list.count,
+                               go: { by in reviewAt = (at + by + list.count) % list.count })
                         .id("\(s.id)#\(s.drafts.count)")
                         .transition(.asymmetric(insertion: .opacity.combined(with: .offset(x: 24)), removal: .opacity))
                 } else {
@@ -265,7 +283,7 @@ struct CommentsView: View {
             .frame(maxWidth: 720 * TextSize.shared.factor, alignment: .leading)
             .padding(.horizontal, 32).padding(.vertical, 28)
             .frame(maxWidth: .infinity)
-            .animation(Theme.spring, value: list.first?.id)
+            .animation(Theme.spring, value: list.isEmpty ? nil : list[min(reviewAt, list.count - 1)].id)
         }
     }
 }
@@ -511,6 +529,8 @@ private struct ReviewCard: View {
     let suggestion: Suggestion
     let position: Int
     let total: Int
+    /// Back (-1) or on (+1) to another post; past the last one comes the first.
+    var go: (Int) -> Void = { _ in }
     /// One text per variant, so an edit survives switching between them.
     @State private var texts: [String] = []
     @State private var pick = 0
@@ -534,6 +554,19 @@ private struct ReviewCard: View {
         // numbers above it, the actions sit under it.
         VStack(alignment: .leading, spacing: 18) {
             HStack(spacing: 14) {
+                // ⌘[ and ⌘]: the arrow keys move the cursor in the comment box (2026-10-02).
+                HStack(spacing: 2) {
+                    Button { go(-1) } label: { Image(systemName: "chevron.left").frame(width: 22, height: 22).contentShape(Rectangle()) }
+                        .keyboardShortcut("[", modifiers: .command)
+                        .help("Previous post (⌘[)")
+                    Button { go(1) } label: { Image(systemName: "chevron.right").frame(width: 22, height: 22).contentShape(Rectangle()) }
+                        .keyboardShortcut("]", modifiers: .command)
+                        .help("Next post (⌘])")
+                }
+                .buttonStyle(PressStyle())
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(Theme.muted)
+                .disabled(total < 2)
                 Text("\(position) of \(total) · \(meta(s))").font(Theme.sans(12)).foregroundStyle(Theme.faint).lineLimit(1)
                 Spacer()
                 if s.options.count > 1 { variantPicker(s) }
@@ -624,8 +657,8 @@ private struct ReviewCard: View {
                 .help("Approve the variant you see (⌘↩). If you changed the text, your version is saved next to it.")
             Button("Feedback") { editorFocused = false; mode = .feedback; noteFocused = true }
                 .buttonStyle(AccentButtonStyle(kind: .quiet))
-                .keyboardShortcut("f", modifiers: .command)
-                .help("Tell the agent what to change; a new draft comes back (⌘F)")
+                .keyboardShortcut("f", modifiers: [.command, .shift])
+                .help("Tell the agent what to change; a new draft comes back (⇧⌘F). ⌘F finds on screen.")
             Button("Decline") { editorFocused = false; mode = .decline }
                 .buttonStyle(AccentButtonStyle(kind: .quiet))
                 .keyboardShortcut(editorFocused ? nil : KeyboardShortcut(.delete, modifiers: .command))
@@ -637,8 +670,13 @@ private struct ReviewCard: View {
         }
     }
 
+    // A reason button declines at once, with the note if one is typed. A typed note alone
+    // declines on Return as "other" (2026-10-05: The user typed a note, no reason fit, and could
+    // not tell if the note went anywhere).
     private func declinePanel(_ s: Suggestion) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
+        let reasons = DeclineReason.reasons(wrongPost: wrongPost)
+        let typed = !note.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        return VStack(alignment: .leading, spacing: 10) {
             Picker("", selection: $wrongPost) {
                 Text("Bad comment").tag(false)
                 Text("Wrong post").tag(true)
@@ -646,20 +684,24 @@ private struct ReviewCard: View {
             .pickerStyle(.segmented).labelsHidden().fixedSize()
             .help("Wrong post: you would not comment on this post at all. Bad comment: the post is fine, the draft is not.")
             HStack(spacing: 6) {
-                ForEach(Array(DeclineReason.allCases.enumerated()), id: \.element) { i, r in
+                ForEach(Array(reasons.enumerated()), id: \.element) { i, r in
                     Button { decline(s, r) } label: {
                         HStack(spacing: 4) {
                             Text("\(i + 1)").font(Theme.mono(10)).foregroundStyle(Theme.faint)
                             Text(r.rawValue)
                         }
+                        .fixedSize()
                     }
                     .buttonStyle(AccentButtonStyle(kind: .quiet))
+                    .help(typed ? "Decline as \u{201C}\(r.rawValue)\u{201D}, with your note" : "Decline as \u{201C}\(r.rawValue)\u{201D}")
                     // Not while typing the note: a digit there is text.
                     .keyboardShortcut(noteFocused ? nil : KeyboardShortcut(KeyEquivalent(Character("\(i + 1)")), modifiers: []))
                 }
             }
-            AskBox(placeholder: "Optional note: why, in a few words", text: $note, focus: $noteFocused,
-                   cancel: { mode = .none; note = "" }, autofocus: false)
+            AskBox(placeholder: "Or say why and press Return to decline", text: $note, focus: $noteFocused,
+                   send: { decline(s, .other) }, cancel: { mode = .none; note = "" }, autofocus: false)
+            Text(typed ? "Return declines with this note. A reason button adds the reason to it." : "Pick a reason, or type why. Esc closes.")
+                .font(Theme.sans(11.5)).foregroundStyle(Theme.faint)
         }
     }
 
@@ -669,19 +711,21 @@ private struct ReviewCard: View {
             return
         }
         store.decline(s, wrongPost: wrongPost, reason: r, note: note)
+        mode = .none
+        note = ""
     }
 
     private func feedbackPanel(_ s: Suggestion) -> some View {
-        AskBox(placeholder: "What should change? Type or talk: shorter, ask a question instead…", text: $note,
+        AskBox(placeholder: "What should change? Shorter, ask a question instead…", text: $note,
                focus: $noteFocused, send: { send(s) }, cancel: { mode = .none; note = "" })
     }
 
     private func send(_ s: Suggestion) {
         guard !note.trimmingCharacters(in: .whitespaces).isEmpty else { return }
         store.feedback(s, note: note, variant: s.options.count > 1 ? pick : nil)
-        hub.commentsLane = "find"
-        hub.open = true
-        app.show(toast: "Sent to the Comments chat. A new draft comes back here.")
+        mode = .none
+        note = ""
+        app.show(toast: "Note added. Send it from the Comments chat when you are done.")
     }
 }
 

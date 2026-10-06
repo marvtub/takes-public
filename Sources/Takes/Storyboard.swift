@@ -20,6 +20,9 @@ struct StoryShot: Decodable, Equatable, Identifiable {
     /// A real clip instead of the sketch, a path in the session (2026-10-03). Plays muted while shown.
     var video: String?
     var error: String?
+    /// A Higgsfield clip on its way (the file it lands in), and why the last one failed (2026-10-06).
+    var generating: String?
+    var clipError: String?
 
     /// The rows of the tab, top to bottom (2026-10-03).
     enum Section: String, Decodable, CaseIterable {
@@ -33,7 +36,7 @@ struct StoryShot: Decodable, Equatable, Identifiable {
         }
     }
 
-    enum CodingKeys: String, CodingKey { case id, section, kind, say, how = "do", sketch, seconds, image, video, error }
+    enum CodingKeys: String, CodingKey { case id, section, kind, say, how = "do", sketch, seconds, image, video, error, generating, clipError = "clip_error" }
 
     init(id: String = "", section: Section = .main, kind: String = "SHOT", say: String = "", seconds: Double? = nil) {
         self.id = id; self.section = section; self.kind = kind; self.say = say; self.seconds = seconds
@@ -52,6 +55,8 @@ struct StoryShot: Decodable, Equatable, Identifiable {
         image = try c.decodeIfPresent(String.self, forKey: .image)
         video = try c.decodeIfPresent(String.self, forKey: .video)
         error = try c.decodeIfPresent(String.self, forKey: .error)
+        generating = try c.decodeIfPresent(String.self, forKey: .generating)
+        clipError = try c.decodeIfPresent(String.self, forKey: .clipError)
     }
 
     /// The given length, else the time it takes to say the lines (2.6 words a second, 2 s at least).
@@ -64,6 +69,18 @@ struct StoryShot: Decodable, Equatable, Identifiable {
 
 struct Storyboard: Decodable, Equatable {
     var shots: [StoryShot] = []
+    /// The video's shape, "16:9", "9:16", "4:5" or "1:1" (2026-10-05). The sketches are drawn in it.
+    /// Nil in a storyboard from before: 4:5, the shape those sketches have.
+    var format: String?
+
+    /// Width over height.
+    var ratio: CGFloat { Self.ratio(format) }
+
+    static func ratio(_ format: String?) -> CGFloat {
+        let p = (format ?? "").split(separator: ":").compactMap { Double($0.trimmingCharacters(in: .whitespaces)) }
+        guard p.count == 2, p[0] > 0, p[1] > 0 else { return 4.0 / 5.0 }
+        return CGFloat(p[0] / p[1])
+    }
 
     static func folder(_ session: URL) -> URL { session.appending(path: "storyboard") }
     static func file(_ session: URL) -> URL { folder(session).appending(path: "storyboard.json") }
@@ -149,7 +166,7 @@ struct StoryboardPane: View {
                     if let shot {
                         let i = board.shots.firstIndex(of: shot) ?? 0
                         ShotDetail(doc: doc, shot: shot, number: i + 1, count: board.shots.count,
-                                   start: board.starts[i], image: shot.image.flatMap { images[$0] },
+                                   start: board.starts[i], ratio: board.ratio, image: shot.image.flatMap { images[$0] },
                                    takes: takes[shot.id] ?? [],
                                    comments: comments.all.filter { $0.shot == shot.id }, store: comments,
                                    step: { step(board, $0) })
@@ -240,7 +257,7 @@ struct StoryboardPane: View {
                                         ShotThumb(doc: doc, shot: s, image: s.image.flatMap { images[$0] },
                                                   recorded: t[s.id] != nil,
                                                   noted: comments.all.contains { $0.shot == s.id && $0.open },
-                                                  on: s.id == shot?.id, ns: ns)
+                                                  on: s.id == shot?.id, ratio: b.ratio, ns: ns)
                                         ShotTime(start: starts[s.id] ?? 0, length: s.length, on: s.id == shot?.id,
                                                  gap: s.id == last ? 0 : s.id == shots.last?.id ? 18 : 6,
                                                  end: s.id == last ? b.total : nil)
@@ -333,6 +350,15 @@ struct StoryboardPane: View {
         return img
     }
 
+    /// The fold's title: a motion graphic is made, not filmed.
+    static func howTitle(_ kind: String) -> String {
+        switch kind.uppercased() {
+        case "MG": return "What it shows"
+        case "SCREEN": return "What to record"
+        default: return "How to film it"
+        }
+    }
+
     static func color(_ kind: String) -> Color {
         switch kind {
         case "MG": return Theme.accent
@@ -396,6 +422,7 @@ private struct ShotThumb: View {
     var recorded: Bool
     var noted: Bool
     var on: Bool
+    var ratio: CGFloat
     var ns: Namespace.ID
     @State private var hover = false
     @State private var poster: NSImage?
@@ -412,7 +439,8 @@ private struct ShotThumb: View {
                 ProgressView().controlSize(.mini)
             }
         }
-        .frame(width: 76, height: 95)
+        // The video's shape, at the strip's width: 95 high for 4:5, 43 for 16:9.
+        .frame(width: 76, height: 76 / ratio)
         .clipShape(shape)
         .contentShape(shape)
         .overlay(shape.strokeBorder(Theme.border))
@@ -451,10 +479,12 @@ private struct ShotThumb: View {
 }
 
 /// The chosen shot, big: the sketch on the left; the line to say, one Record button, its takes
-/// and comments on the right. How to film it folds away under the line.
+/// and comments on the right. How to film it (What it shows, for a motion graphic) folds away under the line.
 /// The shot's sketch and its column, side by side. The sketch's size comes only from the space
 /// offered, never from what is inside, so one layout pass settles it.
 private struct ShotSplit: Layout {
+    /// The frame's width over its height.
+    var ratio: CGFloat = 4.0 / 5.0
     var gap: CGFloat = 40
     var column: CGFloat = 560
 
@@ -464,8 +494,10 @@ private struct ShotSplit: Layout {
 
     func placeSubviews(in b: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
         guard subviews.count == 2 else { return }
-        let w = max(220, min(b.height * 0.8, (b.width - gap) * 0.55))
-        subviews[0].place(at: b.origin, proposal: ProposedViewSize(width: w, height: w * 1.25))
+        // As big as the height allows, but never more than about half the width: a wide frame
+        // takes a little more, so the line still has room.
+        let w = max(220, min(b.height * ratio, (b.width - gap) * (ratio > 1 ? 0.62 : 0.55)))
+        subviews[0].place(at: b.origin, proposal: ProposedViewSize(width: w, height: w / ratio))
         let x = b.minX + w + gap
         subviews[1].place(at: CGPoint(x: x, y: b.minY),
                           proposal: ProposedViewSize(width: max(0, min(column, b.maxX - x)), height: b.height))
@@ -474,12 +506,15 @@ private struct ShotSplit: Layout {
 
 private struct ShotDetail: View {
     @Environment(AppModel.self) var app
+    @Environment(\.openSettings) private var openSettings
     @Environment(\.paneShown) private var shown
     var doc: SessionDoc
     var shot: StoryShot
     var number: Int
     var count: Int
     var start: Double
+    /// The storyboard's shape. A clip shows in its own shape.
+    var ratio: CGFloat
     var image: NSImage?
     var takes: [Take]
     var comments: [Comment]
@@ -495,12 +530,24 @@ private struct ShotDetail: View {
 
     private var clip: URL? { shot.video.map { doc.url.appending(path: $0) } }
 
+    /// The model that made what the frame shows: the clip, else the sketch (2026-10-06).
+    private var madeWith: String? {
+        if let clip { return MadeWith.label(for: clip) }
+        return shot.image.flatMap { MadeWith.label(for: Storyboard.folder(doc.url).appending(path: $0)) }
+    }
+
+    /// A clip's own shape, from its first frame, so a 16:9 clip is not cut to a 9:16 card.
+    private var frameRatio: CGFloat {
+        if clip != nil, let p = poster, p.size.width > 0, p.size.height > 0 { return p.size.width / p.size.height }
+        return ratio
+    }
+
     // The sketch takes the room there is (2026-10-04): half the width at most, all the height.
     // With the chat closed it grows; with it open it shrinks before the line does. A Layout, not a
     // GeometryReader (inside one the blur-in never started) and not a measured @State size: that
     // fed the sketch's width back into the size it was measured from and froze the app (2026-10-04).
     var body: some View {
-        ShotSplit {
+        ShotSplit(ratio: frameRatio) {
             frame
             ScrollView(.vertical) {
                 VStack(alignment: .leading, spacing: 18) {
@@ -511,6 +558,11 @@ private struct ShotDetail: View {
                             .textSelection(.enabled)
                     }
                     if !shot.how.isEmpty { how }
+                    if let e = shot.clipError, shot.generating == nil {
+                        Label("Higgsfield: \(e)", systemImage: "exclamationmark.triangle")
+                            .font(Theme.sans(12)).foregroundStyle(Theme.warn)
+                            .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
+                    }
                     if !takes.isEmpty { takeStrip }
                     notes.padding(.top, 10)
                 }
@@ -531,7 +583,12 @@ private struct ShotDetail: View {
             KindChip(kind: shot.kind)
             Text("\(Storyboard.clock(start)) · \(Int(shot.length.rounded())) s")
                 .font(Theme.mono(11)).foregroundStyle(Theme.faint)
+            if let m = madeWith {
+                Text(m).font(Theme.sans(11)).foregroundStyle(Theme.faint).lineLimit(1)
+                    .help(clip != nil ? "This clip was made with \(m)" : "This sketch was drawn with \(m)")
+            }
             Spacer()
+            generate
             record
             HStack(spacing: 2) {
                 arrow("chevron.left", -1, off: number == 1)
@@ -557,7 +614,7 @@ private struct ShotDetail: View {
                 HStack(spacing: 5) {
                     Image(systemName: "chevron.right").font(.system(size: 9, weight: .bold))
                         .rotationEffect(.degrees(showHow ? 90 : 0))
-                    Text("How to film it").font(Theme.sans(12, .medium))
+                    Text(StoryboardPane.howTitle(shot.kind)).font(Theme.sans(12, .medium))
                 }
                 .contentShape(Rectangle())
             }
@@ -618,6 +675,18 @@ private struct ShotDetail: View {
                         .help("This shot has a keeper take")
                 }
             }
+            .overlay(alignment: .bottomLeading) {
+                if shot.generating != nil {
+                    HStack(spacing: 7) {
+                        ProgressView().controlSize(.mini).tint(.white)
+                        Text("Generating with Higgsfield…").font(Theme.sans(11.5, .medium)).foregroundStyle(.white)
+                    }
+                    .padding(.horizontal, 11).padding(.vertical, 7)
+                    .background(.black.opacity(0.6), in: Capsule())
+                    .padding(12)
+                    .transition(.opacity)
+                }
+            }
             .overlay(alignment: .bottomTrailing) {
                 if clip != nil {
                     Button { sound.toggle() } label: {
@@ -633,6 +702,35 @@ private struct ShotDetail: View {
                     .help(sound ? "Mute the clips" : "Play the clips with sound (stays on)")
                 }
             }
+    }
+
+    /// ✦ next to the record dot (2026-10-06): Takes makes this shot's clip with Higgsfield. Not set up
+    /// yet: it opens Settings › Higgsfield.
+    private var generate: some View {
+        Button { makeClip() } label: {
+            Image(systemName: "sparkles").font(.system(size: 12, weight: .semibold))
+                .frame(width: 28, height: 28).contentShape(Circle())
+        }
+        .buttonStyle(PressStyle())
+        .foregroundStyle(Theme.accentInk)
+        .background(Theme.accentSoft, in: Circle())
+        .disabled(shot.generating != nil)
+        .opacity(shot.generating != nil ? 0.45 : 1)
+        .help(shot.generating != nil ? "Higgsfield is making this clip" : clip == nil ? "Make this shot's clip with Higgsfield" : "Make a new clip with Higgsfield")
+    }
+
+    private func makeClip() {
+        Task {
+            let hf = Higgsfield.shared
+            if !hf.ready { await hf.check() }
+            guard hf.ready else {
+                UserDefaults.standard.set(SettingsView.SettingsPage.higgsfield.rawValue, forKey: "settingsPage")
+                openSettings()
+                return
+            }
+            app.chats.chat(doc.url).send(Higgsfield.shotPrompt(shot), title: doc.meta.title, onStage: nil)
+            app.chats.open = true
+        }
     }
 
     /// One red record dot next to the arrows (2026-10-04): the script column shows only this shot's lines.
@@ -670,7 +768,7 @@ private struct ShotDetail: View {
             ForEach(open) { c in note(c) }
             if showResolved { ForEach(done) { c in note(c) } }
             AskBox(placeholder: "Note for Takes: what should change?", text: $draft, focus: $typing, send: send,
-                   cancel: { draft = ""; typing = false }, autofocus: false, cancellable: false, inline: true)
+                   cancel: { draft = ""; typing = false }, autofocus: false, inline: true)
             if !done.isEmpty {
                 Button { withAnimation(Theme.motion) { showResolved.toggle() } } label: {
                     Text(showResolved ? "Hide resolved" : "\(done.count) resolved")
@@ -718,6 +816,7 @@ private struct ShotDetail: View {
 
     @ViewBuilder private var menu: some View {
         Button("Record this shot") { app.record(shot: shot) }.disabled(app.isRecording)
+        Button("Make the clip with Higgsfield") { makeClip() }.disabled(shot.generating != nil)
         let others = doc.meta.takes.filter { $0.kind == .camera && $0.shot != shot.id }.sorted { $0.number > $1.number }
         if !others.isEmpty {
             Menu("File a take under this shot") {

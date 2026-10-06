@@ -564,8 +564,11 @@ final class Library {
         let url = root.appending(path: clean)
         try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         reload()
-        selectedProject = url
-        return url
+        // The list's own URL (a folder URL, with the slash): `url` never equals it, so the new
+        // project showed no sessions until the next rescan (2026-10-06, a new user's first video).
+        let made = projects.first { $0.name == clean }?.url ?? url
+        selectedProject = made
+        return made
     }
 
     /// New session in the selected project, or in `project` (creates an "Inbox" project if there

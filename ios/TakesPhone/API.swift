@@ -92,6 +92,20 @@ struct Post: Codable, Hashable {
     var hooks: [PostHook]?
 }
 
+/// One platform's post: LinkedIn, X, YouTube or Vertical. Nil list from a Mac before 2026-10-05.
+struct PlatformPost: Codable, Hashable, Identifiable {
+    var platform: String
+    var name: String
+    var text: String
+    var title: String
+    var media: String?
+    var cover: String?
+    var status: String
+    var url: String?
+    var limit: Int
+    var id: String { platform }
+}
+
 struct PostVariant: Codable, Hashable, Identifiable {
     var slug: String
     var name: String
@@ -132,6 +146,8 @@ struct SessionDetail: Codable, Hashable {
     var profile: Profile?
     /// Nil from a Mac before 2026-10-03, or when the session has no storyboard.
     var storyboard: [Shot]?
+    /// Every platform with a post, LinkedIn first. Nil from a Mac before 2026-10-05.
+    var posts: [PlatformPost]?
 }
 
 /// One storyboard shot: the sketch, the lines it covers, how to film it, the user's comments.
@@ -146,6 +162,21 @@ struct Shot: Codable, Identifiable, Hashable {
     var image: String?
     var error: String?
     var comments: [Comment]
+    /// Width over height: the storyboard's format, or the clip's own shape. Nil from an older Mac: the board reads it off the picture.
+    var ratio: Double?
+
+    var shape: CGFloat { CGFloat(ratio.flatMap { $0 > 0 ? $0 : nil } ?? 0.8) }
+
+    static func isClip(_ path: String) -> Bool { ["mp4", "mov", "m4v"].contains((path as NSString).pathExtension.lowercased()) }
+
+    /// The fold's title, as on the Mac: a motion graphic is made, not filmed.
+    var howTitle: String {
+        switch kind.uppercased() {
+        case "MG": return "What it shows"
+        case "SCREEN": return "What to record"
+        default: return "How to film it"
+        }
+    }
 }
 
 struct Comment: Codable, Identifiable, Hashable {
@@ -287,7 +318,8 @@ struct Copilot: Decodable {
     var profile: Profile?
 
     var review: [Suggestion] { items.filter { $0.status == "review" && $0.skipped == nil } }
-    var redraft: [Suggestion] { items.filter { $0.status == "redraft" } }
+    /// A note on the Mac that waits to be sent counts too: a new draft comes back for it.
+    var redraft: [Suggestion] { items.filter { $0.status == "redraft" || $0.status == "feedback" } }
     var approved: [Suggestion] { items.filter { $0.status == "approved" } }
     var posted: [Suggestion] { items.filter { $0.status == "posted" }.sorted { ($0.posted?.at ?? $0.created) > ($1.posted?.at ?? $1.created) } }
     var skipped: [Suggestion] { items.filter { $0.status == "review" && $0.skipped != nil }.sorted { $0.skipped! > $1.skipped! } }

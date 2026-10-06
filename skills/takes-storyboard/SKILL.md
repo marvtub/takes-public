@@ -10,8 +10,8 @@ who is in the frame, where the camera is, and what moves. They are not the final
 
 ## Before you start
 
-- The sketches need a Gemini API key: `GEMINI_API_KEY` or `GOOGLE_AI_API_KEY` in the environment
-  or in `~/.claude/.env`. Without one, the shots still save, but each shows an error instead of a
+- The sketches use Nano Banana 2.1 (`GEMINI_API_KEY` or `GOOGLE_AI_API_KEY`), with GPT Image 2.5
+  Flare (`OPENAI_API_KEY`) as the fallback, in the environment or in `~/.claude/.env`. Without either, the shots still save, but each shows an error instead of a
   drawing. Tell the user in one line if that happens.
 - All work goes through the `takes` MCP. Never write `session.json` or `storyboard/` by hand.
 
@@ -100,6 +100,12 @@ shot as it is now) and `frame` (the sketch). To fix one:
 - A script change: update `script.md` first, then the `say` of each shot it touches.
 - A real clip for a shot ("use the b-roll we have"): set the shot's `video`. Never paste a frame
   over a sketch PNG.
+- A generated clip for a shot ("make this shot", the ✦ button): call the `higgsfield` tool with
+  `shot`. Write a real-footage prompt from the shot's `do` and `say`; `image: "sketch"` with
+  `params: {mode: omni_reference}` keeps the sketch's framing. The clip lands on the shot by
+  itself. One job per ask: each one costs the user's Higgsfield credits.
+- An image (a thumbnail, a still, a changed frame): `make_image`, never `higgsfield` (direct costs much
+  less). Flare for a new image, Sunburst for a change, `nano-banana-2.1` when cheap matters most.
 - A shot shows an error (no key, quota): tell the user the reason in one line.
 
 ## Where it lives

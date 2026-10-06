@@ -1666,6 +1666,9 @@ private struct ChatComposer: View {
                 OpenCommentsChip(session: session, count: openComments) { send($0) }
                     .transition(.opacity.combined(with: .offset(y: 4)))
             }
+            if chat.boardName == "comments" {
+                PendingFeedbackChip(store: app.copilot)
+            }
             ForEach(Array(chat.queued.enumerated()), id: \.offset) { i, q in
                 QueuedChip(text: CopilotAsk.shown(q), help: "Queued: sent when Takes is done") {
                     if i < chat.queued.count { chat.queued.remove(at: i) }
@@ -1710,6 +1713,9 @@ private struct ChatComposer: View {
             if out == text, ClaudeChat.mentionsComments(text) { out = ClaudeChat.withoutCommentsToken(text) }
             if openComments > 0, let session = target.session, !ClaudeChat.isCompact(out) {
                 out = ClaudeChat.withComments(out, CommentStore.read(session).comments)
+            }
+            if chat.boardName == "comments", !ClaudeChat.isCompact(out) {
+                out = CopilotAsk.withFeedback(out, app.copilot.pendingFeedback)
             }
         }
         chat.send(out, title: target.title, onStage: target.session == nil ? nil : app.preview, now: now)
@@ -1770,6 +1776,8 @@ struct ChatField: View {
     var steer: (() -> Void)?
     /// ⌘V: true when it took the clipboard (files), so the field does not paste text too.
     var paste: (() -> Bool)?
+    /// False for a note another button uses (a decline reason): no send arrow.
+    var sends = true
 
     /// While a run goes, the button stops it; with text in the box it sends instead.
     private var stopping: Bool { running && !canSend }
@@ -1782,7 +1790,7 @@ struct ChatField: View {
                 .lineLimit(1...6)
                 .overlay(alignment: .topLeading) { CommandToken(draft: draft) }
                 .focused(focused)
-                .onSubmit { submit() }
+                .onSubmit { if sends { submit() } }
                 // Escape cancels dictation, else stops the run (as in Claude Code).
                 .onKeyPress(.escape) {
                     if dictation.active { dictation.cancel(); return .handled }
@@ -1820,7 +1828,7 @@ struct ChatField: View {
                 .help(micOff ? "Not while recording a take" : "Voice note: talk, and the words come into the box")
                 .transition(.opacity)
             }
-            Button {
+            if sends { Button {
                 if stopping { stop() } else { submit() }
             } label: {
                 ZStack {
@@ -1836,7 +1844,7 @@ struct ChatField: View {
             }
             .buttonStyle(PressStyle())
             .disabled(!canSend && !running && !dictation.active)
-            .help(stopping ? stopHelp : sendHelp)
+            .help(stopping ? stopHelp : sendHelp) }
         }
         .padding(.leading, 14).padding(.trailing, 6).padding(.vertical, 4)
         .background(Theme.canvas, in: RoundedRectangle(cornerRadius: 14))

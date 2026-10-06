@@ -31,6 +31,12 @@ struct CopilotTests {
         return try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
     }
 
+    @Test func eachDeclineKindHasItsOwnReasons() {
+        #expect(DeclineReason.reasons(wrongPost: true) == [.topic, .person, .other])
+        #expect(!DeclineReason.reasons(wrongPost: false).contains(.topic))
+        #expect(DeclineReason.reasons(wrongPost: false).last == .other)
+    }
+
     @Test func readsWhatTheServerWrites() throws {
         let (_, store) = try library(["a": "2026-10-02T16:00:00Z"])
         let s = try #require(store.review.first)
@@ -83,14 +89,42 @@ struct CopilotTests {
         let (root, store) = try library(["a": "2026-10-02T16:00:00Z"])
         var asked: [String] = []
         store.askChat = { asked.append($0) }
-        store.feedback(store.review[0], note: "shorter", variant: 1)
-        #expect(asked.count == 1)  // the redraft goes to the chat, where the user watches it
+        store.feedback(store.review[0], note: "shorter", variant: 1, send: true)
+        #expect(asked.count == 1)  // the phone's note goes to the chat at once
         #expect(asked.first?.contains("\"shorter\"") == true)
         #expect(asked.first?.contains("variant 2") == true)
         let s = try raw(root, "a")
         #expect(s["status"] as? String == "redraft")
         #expect((s["drafts"] as? [[String: Any]])?.last?["feedback"] as? String == "shorter")
         #expect(store.redrafting.count == 1)
+    }
+
+    @Test func feedbackWaitsUntilSent() throws {
+        let (root, store) = try library(["a": "2026-10-02T16:00:00Z", "b": "2026-10-02T16:01:00Z"])
+        var asked: [String] = []
+        store.askChat = { asked.append($0) }
+        store.feedback(store.review[0], note: "shorter", variant: 1)
+        store.feedback(store.review[0], note: "no question")
+        #expect(asked.isEmpty)  // a note does not start the agent
+        #expect(store.review.isEmpty)
+        #expect(store.pendingFeedback.map(\.id) == ["a", "b"])
+        #expect(store.pendingFeedback[0].drafts.last?.feedbackVariant == nil)  // the fixture has no variants
+        let typed = CopilotAsk.withFeedback("hi", store.pendingFeedback)
+        #expect(typed.contains("\"no question\"") && CopilotAsk.shown(typed) == "hi")
+        store.sendFeedback(store.pendingFeedback)
+        #expect(asked.count == 1)  // one message for both notes
+        #expect(asked[0].contains("\"shorter\"") && asked[0].contains("\"no question\""))
+        #expect(store.redrafting.count == 2 && store.pendingFeedback.isEmpty)
+        #expect(try raw(root, "b")["status"] as? String == "redraft")
+    }
+
+    @Test func droppedFeedbackGoesBackToReview() throws {
+        let (root, store) = try library(["a": "2026-10-02T16:00:00Z"])
+        store.feedback(store.review[0], note: "shorter", variant: 1)
+        store.dropFeedback(store.pendingFeedback[0])
+        #expect(store.review.count == 1 && store.pendingFeedback.isEmpty)
+        let last = (try raw(root, "a")["drafts"] as? [[String: Any]])?.last
+        #expect(last?["feedback"] == nil && last?["feedback_variant"] == nil)
     }
 
     @Test func skippedCardsLeaveReviewUntilSentBack() throws {

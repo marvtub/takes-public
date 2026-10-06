@@ -38,6 +38,13 @@ struct CommentDraft: Decodable, Hashable {
     var by: String?
     /// The user's note on this draft. The next draft answers it.
     var feedback: String?
+    /// The variant he looked at when he wrote the note.
+    var feedbackVariant: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case text, variants, at, by, feedback
+        case feedbackVariant = "feedback_variant"
+    }
 }
 
 struct CommentDecision: Decodable, Hashable {
@@ -60,7 +67,7 @@ struct CommentStat: Decodable, Hashable {
 struct Suggestion: Decodable, Identifiable, Hashable {
     var id: String
     var created: Date
-    /// review, redraft, approved, posted, declined
+    /// review, feedback (a note not sent yet), redraft, approved, posted, declined
     var status: String
     var post: CommentPost
     var angle: String?
@@ -139,6 +146,11 @@ struct PostedTally: Equatable {
 enum DeclineReason: String, CaseIterable {
     case offVoice = "off-voice", soundsAI = "sounds AI", generic = "too generic", long = "too long"
     case facts = "wrong facts", topic = "not my topic", person = "wrong person", other = "other"
+
+    /// The reasons that fit each kind, as on the phone: "too long" says nothing about a wrong post.
+    static func reasons(wrongPost: Bool) -> [DeclineReason] {
+        wrongPost ? [.topic, .person, .other] : [.offVoice, .soundsAI, .generic, .long, .facts, .other]
+    }
 }
 
 @MainActor
@@ -206,6 +218,8 @@ final class CopilotStore: ObservableObject {
         items.filter { $0.status == "review" && $0.skipped != nil }.sorted { $0.skipped! > $1.skipped! }
     }
     var redrafting: [Suggestion] { items.filter { $0.status == "redraft" } }
+    /// Notes the user wrote but did not send yet. They wait in the Comments chat as a pill.
+    var pendingFeedback: [Suggestion] { items.filter { $0.status == "feedback" } }
     var approved: [Suggestion] { items.filter { $0.status == "approved" } }
     var posted: [Suggestion] { items.filter { $0.status == "posted" }.sorted { ($0.posted?.at ?? $0.created) > ($1.posted?.at ?? $1.created) } }
     var declined: [Suggestion] { items.filter { $0.status == "declined" } }
@@ -244,22 +258,53 @@ final class CopilotStore: ObservableObject {
 
     /// The note goes on the newest draft; the agent writes the next one.
     /// `variant`: the one he looked at when he wrote the note.
-    func feedback(_ s: Suggestion, note: String, variant: Int? = nil) {
+    /// A note waits in the Comments chat until the user sends it (2026-10-06: each note started
+    /// the agent at once and broke his review flow). `send`: the phone still sends at once.
+    func feedback(_ s: Suggestion, note: String, variant: Int? = nil, send: Bool = false) {
         let n = note.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !n.isEmpty else { return }
+        lastSkipped = nil
         update(s.id) { d in
-            d["status"] = "redraft"
+            d["status"] = send ? "redraft" : "feedback"
             var drafts = d["drafts"] as? [[String: Any]] ?? []
             if var last = drafts.popLast() {
                 last["feedback"] = n
                 if let variant, (last["variants"] as? [Any])?.indices.contains(variant) == true {
                     last["feedback_variant"] = variant
+                } else {
+                    last["feedback_variant"] = nil
                 }
                 drafts.append(last)
             }
             d["drafts"] = drafts
         }
-        askChat?(CopilotAsk.redraft(s, note: n, variant: variant))
+        if send { askChat?(CopilotAsk.redraft(s, note: n, variant: variant)) }
+    }
+
+    /// Send waiting notes to the chat in one message.
+    func sendFeedback(_ list: [Suggestion]) {
+        let notes = list.compactMap { s -> (Suggestion, String, Int?)? in
+            guard s.status == "feedback", let n = s.drafts.last?.feedback else { return nil }
+            return (s, n, s.drafts.last?.feedbackVariant)
+        }
+        guard !notes.isEmpty else { return }
+        for (s, _, _) in notes { update(s.id) { $0["status"] = "redraft" } }
+        askChat?(notes.count == 1 ? CopilotAsk.redraft(notes[0].0, note: notes[0].1, variant: notes[0].2)
+                                  : CopilotAsk.redraft(notes))
+    }
+
+    /// Take a waiting note back: the draft returns to Review as it was.
+    func dropFeedback(_ s: Suggestion) {
+        update(s.id) { d in
+            d["status"] = "review"
+            var drafts = d["drafts"] as? [[String: Any]] ?? []
+            if var last = drafts.popLast() {
+                last["feedback"] = nil
+                last["feedback_variant"] = nil
+                drafts.append(last)
+            }
+            d["drafts"] = drafts
+        }
     }
 
     /// The card the user skipped last, so he can take it back.
@@ -460,9 +505,32 @@ enum CopilotAsk {
     }
 
     static func redraft(_ s: Suggestion, note: String, variant: Int?) -> String {
-        let whose = s.post.author.map { "\($0)'s post" } ?? "the post \(s.post.url)"
+        "Feedback on the draft for \(about(s, variant)): \"\(note)\" Write a new draft that follows it and save it with redraft_comment."
+    }
+
+    /// Several notes sent at once from the chat's feedback pill.
+    static func redraft(_ notes: [(Suggestion, String, Int?)]) -> String {
+        "Feedback on \(notes.count) drafts. Write a new draft for each that follows its note and save it with redraft_comment:\n"
+            + notes.map { "- \(about($0.0, $0.2)): \"\($0.1)\"" }.joined(separator: "\n")
+    }
+
+    private static func about(_ s: Suggestion, _ variant: Int?) -> String {
+        let whose = s.post.author.map { "\($0)'s post" } ?? "the post \(s.post.url ?? s.id)"
         let which = variant.map { " (I looked at variant \($0 + 1))" } ?? ""
-        return "Feedback on the draft for \(whose)\(which): \"\(note)\" Write a new draft that follows it and save it with redraft_comment."
+        return whose + which
+    }
+
+    /// Notes not sent yet go after a typed message, so the chat knows them (as open video comments do).
+    static let feedbackMark = "\n\n[Feedback notes I wrote on the Comments board and did not send yet: "
+
+    static func withFeedback(_ text: String, _ pending: [Suggestion]) -> String {
+        let notes = pending.compactMap { s -> String? in
+            guard let n = s.drafts.last?.feedback else { return nil }
+            return "\(s.id) (\(about(s, s.drafts.last?.feedbackVariant))): \"\(n)\""
+        }
+        guard !notes.isEmpty else { return text }
+        return text + feedbackMark + notes.joined(separator: "; ")
+            + ". I may mean one of them. Redraft one only when I ask: redraft_comment takes it.]"
     }
 
     /// The iPhone puts what is on its screen after the message, behind this marker (CopilotFocus).
@@ -470,7 +538,7 @@ enum CopilotAsk {
     static func shown(_ text: String) -> String {
         var t = text
         // The open comments sent with a message (ClaudeChat.withComments) are for Claude too.
-        for mark in ["\n\n[On screen on my phone: ", ClaudeChat.commentsMark] {
+        for mark in ["\n\n[On screen on my phone: ", ClaudeChat.commentsMark, feedbackMark] {
             if let r = t.range(of: mark, options: .backwards) { t = String(t[..<r.lowerBound]) }
         }
         return t

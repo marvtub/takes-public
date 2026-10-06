@@ -47,6 +47,26 @@ class Storyboard(unittest.TestCase):
         # The storyboard folder is not an asset.
         self.assertFalse(any("storyboard" in a.get("path", "") for a in t.t_get_session({"session": self.s})["assets"]))
 
+    def test_the_format_is_kept_and_a_new_one_draws_again(self):
+        shots = [{"say": "Hi.", "sketch": "A man at a desk."}]
+        # A storyboard from before formats: 4:5, and its sketches keep their names.
+        self.assertEqual(t.sketch_name("A man at a desk."), t.sketch_name("A man at a desk.", "4:5"))
+        r = t.t_set_storyboard({"session": self.s, "shots": shots, "format": "16:9"})
+        self.assertEqual((r["format"], r["drawing"]), ("16:9", 1))
+        t.sketch_run(self.s)
+        # Left out on a later call: kept, and the drawn sketch stays.
+        r = t.t_set_storyboard({"session": self.s, "shots": shots})
+        self.assertEqual((r["format"], r["drawing"]), ("16:9", 0))
+        self.assertEqual(t.t_get_session({"session": self.s})["storyboard"]["format"], "16:9")
+        r = t.t_set_storyboard({"session": self.s, "shots": shots, "format": "9:16"})
+        self.assertEqual(r["drawing"], 1)
+        # Any shape: 1920x1080 is 16:9; 21:9 and 7:5 are drawn in the nearest Gemini shape.
+        self.assertEqual(t.t_set_storyboard({"session": self.s, "shots": shots, "format": "1920x1080"})["format"], "16:9")
+        self.assertEqual(t.t_set_storyboard({"session": self.s, "shots": shots, "format": "21:9"})["format"], "21:9")
+        self.assertEqual((t.draw_format("21:9"), t.draw_format("7:5"), t.draw_format("9:16")), ("21:9", "4:3", "9:16"))
+        with self.assertRaises(ValueError):
+            t.t_set_storyboard({"session": self.s, "shots": shots, "format": "wide"})
+
     def test_a_failed_sketch_says_why(self):
         os.environ["TAKES_SKETCH_CMD"] = json.dumps([sys.executable, "-c", "import sys; sys.exit('quota')"])
         t.t_set_storyboard({"session": self.s, "shots": [{"sketch": "A man."}]})

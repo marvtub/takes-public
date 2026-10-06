@@ -33,6 +33,7 @@ cp .build/release/Takes "$APP/Contents/MacOS/Takes"
 cp mcp/takes_mcp.py "$APP/Contents/Resources/takes_mcp.py"
 cp assets/Takes.icns "$APP/Contents/Resources/Takes.icns"
 mkdir -p "$APP/Contents/Resources/Fonts" && cp assets/fonts/*.ttf "$APP/Contents/Resources/Fonts/"
+mkdir -p "$APP/Contents/Resources/Onboarding" && cp assets/onboarding/creator.jpg "$APP/Contents/Resources/Onboarding/"
 mkdir -p "$APP/Contents/Resources/Article"
 mkdir -p "$APP/Contents/Resources/Brand" && cp assets/brand/mascot-512.png "$APP/Contents/Resources/Brand/mascot.png" && cp assets/brand/mascot-body-512.png "$APP/Contents/Resources/Brand/mascot-body.png"
 cp Info.plist "$APP/Contents/Info.plist"
@@ -43,7 +44,7 @@ INSTALLED="$HOME/Applications/Takes.app"
 STAMP="$(git rev-parse --short HEAD)$(git diff --quiet HEAD -- Sources Package.swift 2>/dev/null || echo +) $(date '+%b %-d %H:%M')"
 WAS="$(/usr/libexec/PlistBuddy -c 'Print :BuildStamp' "$INSTALLED/Contents/Info.plist" 2>/dev/null | cut -d' ' -f1 | tr -d +)" || WAS=""
 if [[ -n "$WAS" ]] && git cat-file -e "$WAS^{commit}" 2>/dev/null; then
-  CHANGES="$(git log --format=%s "$WAS..HEAD" | head -8)"
+  CHANGES="$(git log -8 --format=%s "$WAS..HEAD")"  # -8, not | head: pipefail stops on git's SIGPIPE
 else
   CHANGES="$(git log -1 --format=%s)"
 fi
@@ -68,7 +69,7 @@ fi
 plutil -insert BuildChanges -string "$CHANGES" "$APP/Contents/Info.plist"
 # The repo Takes > Release to GitHub releases from (only where the release script exists).
 if [[ -x scripts/public/release.sh ]]; then
-  plutil -insert ReleaseRepo -string "$(git worktree list --porcelain | head -1 | cut -d' ' -f2-)" "$APP/Contents/Info.plist"
+  plutil -insert ReleaseRepo -string "$(git worktree list --porcelain | sed -n 1p | cut -d' ' -f2-)" "$APP/Contents/Info.plist"
 fi
 # A stable certificate keeps camera, mic and screen permissions across installs (scripts/setup-signing.sh).
 # Without it, fall back to ad-hoc signing, and macOS asks for the permissions again after each install.

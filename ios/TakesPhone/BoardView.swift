@@ -17,11 +17,35 @@ struct BoardView: View {
     @State private var picked: String?
     @Namespace private var ns
     @State private var asked = false
+    /// Width over height read off each picture, by its path: a Mac from before 2026-10-05 sends no shape.
+    @State private var measured: [String: Double] = [:]
     @Environment(\.scenePhase) private var scene
 
     private static let sections = [("hook", "Hook"), ("main", "Main"), ("end", "End")]
 
-    private var shots: [Shot] { detail.storyboard ?? [] }
+    /// The shots, each with its shape: from the Mac, else from its picture, else from the other
+    /// sketches (a sketch still drawing has the storyboard's format too).
+    private var shots: [Shot] {
+        let all = detail.storyboard ?? []
+        guard all.contains(where: { $0.ratio == nil }) else { return all }
+        let sketches = all.compactMap { s in s.image.flatMap { Shot.isClip($0) ? nil : measured[$0] } }
+        let format = sketches.first ?? all.compactMap { $0.image.flatMap { measured[$0] } }.first
+        return all.map { s in
+            var s = s
+            if s.ratio == nil { s.ratio = s.image.flatMap { measured[$0] } ?? format }
+            return s
+        }
+    }
+
+    /// Reads the shape of each picture the Mac sent no shape for, from its small thumbnail.
+    private func measure() async {
+        for s in detail.storyboard ?? [] where s.ratio == nil {
+            guard let p = s.image, measured[p] == nil,
+                  let img = await ImageCache.shared.load(model.api.thumb(p, width: 160), maxPixels: 1600),
+                  img.size.width > 0, img.size.height > 0 else { continue }
+            measured[p] = img.size.width / img.size.height
+        }
+    }
 
     /// Camera takes per shot, oldest first.
     private var takes: [String: [RemoteFile]] {
@@ -41,6 +65,7 @@ struct BoardView: View {
                 if scene == .active { await reload() }
             }
         }
+        .task(id: (detail.storyboard ?? []).compactMap(\.image)) { await measure() }
         .onReceive(model.uploads.$items.map { [sessionID] in $0.filter { $0.session == sessionID && $0.done }.count }.removeDuplicates().dropFirst()) { _ in
             Task { await reload() }
         }
@@ -197,7 +222,8 @@ private struct ShotThumb: View {
                 WorkingDots(color: Palette.faint)
             }
         }
-        .frame(width: 60, height: 75)
+        // The video's shape (16:9, 9:16…): the same height for every card, as on the Mac.
+        .frame(width: min(133, max(42, 75 * shot.shape)), height: 75)
         .clipShape(shape)
         .overlay(shape.strokeBorder(Palette.border))
         .overlay(alignment: .topTrailing) {
@@ -241,10 +267,7 @@ private struct ShotPage: View {
     @State private var showResolved = false
 
     private var section: String { BoardView.sectionTitle(shot.section) }
-    private var clip: String? {
-        guard let p = shot.image, ["mp4", "mov", "m4v"].contains((p as NSString).pathExtension.lowercased()) else { return nil }
-        return p
-    }
+    private var clip: String? { shot.image.flatMap { Shot.isClip($0) ? $0 : nil } }
 
     var body: some View {
         ScrollView {
@@ -291,7 +314,7 @@ private struct ShotPage: View {
                 HStack(spacing: 5) {
                     Image(systemName: "chevron.right").font(.system(size: 10, weight: .bold))
                         .rotationEffect(.degrees(showHow ? 90 : 0))
-                    Text("How to film it").font(.inter(.footnote, .medium))
+                    Text(shot.howTitle).font(.inter(.footnote, .medium))
                 }
                 .foregroundStyle(Palette.muted)
                 .padding(.vertical, 4)
@@ -304,6 +327,12 @@ private struct ShotPage: View {
                     .transition(.opacity.combined(with: .offset(y: -4)))
             }
         }
+    }
+
+    /// 264 × 330 for a 4:5 shot; a wide one takes the screen's width, a tall one stays as high.
+    private var frameSize: CGSize {
+        let w = min(340, 330 * shot.shape)
+        return CGSize(width: w, height: w / shot.shape)
     }
 
     private var frame: some View {
@@ -325,7 +354,7 @@ private struct ShotPage: View {
             // The clip plays on its own, muted and looping, while its page shows.
             if let clip, on { ClipLoop(url: model.api.media(clip), sound: sound) }
         }
-        .frame(width: 264, height: 330)
+        .frame(width: frameSize.width, height: frameSize.height)
         .clipShape(shape)
             .overlay(shape.strokeBorder(Palette.border))
             .shadow(color: Palette.shadow, radius: 14, y: 6)

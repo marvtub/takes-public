@@ -397,6 +397,15 @@ struct AssetsPane: View {
                 }
             }
         }
+        if a.kind == .video || a.kind == .image {
+            // Puts the ask in the chat box; the user types what to change (2026-10-06).
+            // Images go to GPT Image directly, videos to Higgsfield.
+            Button(a.kind == .video ? "Change with Higgsfield…" : "Change Image…") {
+                let chat = app.chats.chat(doc.url)
+                chat.draft = a.kind == .video ? Higgsfield.changeDraft(a.rel) : Higgsfield.imageDraft(a.rel)
+                app.chats.open = true
+            }
+        }
         Button("Open") { NSWorkspace.shared.open(a.url) }
         Button("Reveal in Finder") { reveal(a.url) }
         Button("Copy Path") {
@@ -636,6 +645,8 @@ struct AssetTile: View {
     @State private var image: NSImage?
     @State private var duration: Double?
     @State private var hover = false
+    /// The AI model that made it (generated/), in small grey type.
+    @State private var model: String?
 
     init(asset: Asset, selected: Bool, picked: Bool = false, openComments: Int = 0, inPost: [PostPlatform] = [],
          pinned: [PostPlatform] = [], isCover: Bool = false,
@@ -721,14 +732,19 @@ struct AssetTile: View {
                 Text(fileTitle).font(Theme.sans(12.5, .medium)).foregroundStyle(Theme.ink)
                     .lineLimit(1).truncationMode(.middle)
                 Spacer(minLength: 0)
+                if let model {
+                    Text(model).font(Theme.sans(11)).foregroundStyle(Theme.faint).lineLimit(1)
+                        .layoutPriority(-1)
+                }
                 if let badge { Text(badge).font(Theme.mono(12)).foregroundStyle(Theme.faint).fixedSize() }
             }
         }
         .contentShape(Rectangle())
         .onHover { hover = $0 }
         .animation(Theme.motion, value: hover)
-        .help("\(asset.url.path)\n\(ByteCountFormatter.string(fromByteCount: asset.size, countStyle: .file)) · \(SessionList.when(asset.modified))")
+        .help("\(asset.url.path)\n\(ByteCountFormatter.string(fromByteCount: asset.size, countStyle: .file)) · \(SessionList.when(asset.modified))\(model.map { "\nMade with \($0)" } ?? "")")
         .task(id: asset) {
+            model = asset.group == "generated" ? MadeWith.label(for: asset.url) : nil
             if let hit = Thumbs.shared.cached(asset) {
                 if image !== hit { image = hit }
                 if asset.kind == .video || asset.kind == .audio { duration = await Thumbs.shared.duration(asset) }
