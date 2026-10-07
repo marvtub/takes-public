@@ -51,7 +51,7 @@ final class Onboarding {
         "Write a short video script about: \(idea). Keep it under a minute, in my words, and put it in the session's script."
     }
 
-    /// The idea goes to the chat of a new session, and the window opens on Record with the chat
+    /// The idea goes to the chat of a new session, and the window opens on Script with the chat
     /// open, so the script shows up where it will be read.
     func write(_ idea: String, app: AppModel) {
         let idea = idea.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -59,12 +59,11 @@ final class Onboarding {
         // Named after the idea, before the chat starts: a rename moves the folder the chat works in.
         app.rename(doc, to: idea, named: true)
         app.chats.open = true
-        // With the chat docked, Record hides the script unless it sits beside the chat: the
-        // script Takes writes must show up where the new user is looking.
+        // On the Script tab, beside the docked chat: the script Takes writes shows up where the
+        // new user is looking.
         app.chats.docked = true
-        UserDefaults.standard.set(true, forKey: "scriptBeside")
         app.chats.chat(doc.url).send(Self.ask(idea), title: doc.meta.title, onStage: nil)
-        SessionMode.set(.record)
+        SessionMode.set(.write)
         finish()
     }
 

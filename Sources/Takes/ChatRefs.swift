@@ -1,3 +1,4 @@
+import AVFoundation
 import AppKit
 import SwiftUI
 
@@ -263,6 +264,7 @@ struct FileRefCard: View {
     @State private var postText: String?
     /// The video plays in the card, with sound and controls (2026-10-03).
     @State private var playing = false
+    @ObservedObject private var chatAudio = ChatAudio.shared
 
     init(url: URL) {
         self.url = url
@@ -299,7 +301,7 @@ struct FileRefCard: View {
 
     var body: some View {
         Group {
-            if visual { mediaCard } else { refCard }
+            if visual { mediaCard } else if asset.kind == .audio, postPlatform == nil { audioCard } else { refCard }
         }
         // A vertical or square frame makes a narrow card; a wide one takes the chat's width.
         .frame(maxWidth: visual && ratio < 1.2 ? (ratio < 0.9 ? 210 : 280) : .infinity)
@@ -321,7 +323,7 @@ struct FileRefCard: View {
 
     /// In Takes when the file is in a session; else (a file dropped into the chat) in its own app.
     private func open() {
-        if AppModel.session(containing: url) == nil { NSWorkspace.shared.open(url); return }
+        if AppModel.session(containing: url) == nil { NSWorkspace.shared.openSoon(url); return }
         app.follow(url)
     }
 
@@ -355,6 +357,50 @@ struct FileRefCard: View {
             .buttonStyle(.plain)
             .help("Open \(url.lastPathComponent) in Takes")
         }
+        .modifier(CardShell())
+    }
+
+    /// A sound: it plays right here (2026-10-06). A click on the card plays or stops it; the
+    /// arrow opens the file in Takes.
+    private var audioCard: some View {
+        let on = chatAudio.url == url
+        return Button { chatAudio.toggle(url) } label: {
+            HStack(spacing: 10) {
+                Image(systemName: on && chatAudio.playing ? "pause.fill" : "play.fill")
+                    .font(.system(size: 13)).foregroundStyle(on ? Theme.accentInk : Theme.muted)
+                    .frame(width: 34, height: 34)
+                    .background(Theme.hover, in: RoundedRectangle(cornerRadius: 8))
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text((url.lastPathComponent as NSString).deletingPathExtension)
+                            .font(Theme.sans(12.5, .medium)).foregroundStyle(Theme.ink)
+                            .lineLimit(1).truncationMode(.middle)
+                        if let session { Text(session).font(Theme.sans(11)).foregroundStyle(Theme.faint).lineLimit(1) }
+                    }
+                    Spacer(minLength: 0)
+                    Text(on && chatAudio.playing ? SessionDoc.clock(chatAudio.time) : duration.map(SessionDoc.clock) ?? url.pathExtension.uppercased())
+                        .font(Theme.mono(11.5)).foregroundStyle(Theme.faint).monospacedDigit().fixedSize()
+                }
+                Button(action: open) {
+                    Image(systemName: "arrow.up.right").font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(Theme.faint).frame(width: 24, height: 24).contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("Open \(url.lastPathComponent) in Takes")
+            }
+            .padding(10)
+            .overlay(alignment: .bottomLeading) {
+                if on, chatAudio.length > 0 {
+                    GeometryReader { g in
+                        Theme.accent.frame(width: g.size.width * min(1, chatAudio.time / chatAudio.length), height: 2)
+                    }
+                    .frame(height: 2)
+                }
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(on && chatAudio.playing ? "Stop" : "Play here")
         .modifier(CardShell())
     }
 
@@ -417,6 +463,52 @@ struct FileRefCard: View {
     }
 }
 
+/// The one sound that plays from the chat. A new one stops the last.
+@MainActor
+final class ChatAudio: ObservableObject {
+    static let shared = ChatAudio()
+    @Published private(set) var url: URL?
+    @Published private(set) var playing = false
+    @Published private(set) var time: Double = 0
+    @Published private(set) var length: Double = 0
+    private var audio: AVAudioPlayer?
+    private var watch: Timer?
+
+    func toggle(_ file: URL) {
+        if url == file, let audio {
+            if audio.isPlaying { audio.pause(); playing = false; watch?.invalidate() } else { play() }
+            return
+        }
+        stop()
+        audio = try? AVAudioPlayer(contentsOf: file)
+        guard let audio else { url = nil; return }
+        url = file
+        length = audio.duration
+        play()
+    }
+
+    private func play() {
+        guard let audio else { return }
+        if audio.currentTime >= audio.duration - 0.01 { audio.currentTime = 0 }
+        audio.play()
+        playing = true
+        watch?.invalidate()
+        watch = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, let a = self.audio else { return }
+                self.time = a.currentTime
+                if !a.isPlaying { self.playing = false; self.time = 0; self.url = nil; self.watch?.invalidate() }
+            }
+        }
+    }
+
+    func stop() {
+        audio?.stop(); audio = nil
+        watch?.invalidate(); watch = nil
+        playing = false; time = 0; url = nil
+    }
+}
+
 /// A published post: its text and numbers when Takes or the dashboard knows it.
 struct PostRefCard: View {
     @Environment(AppModel.self) var app
@@ -467,7 +559,7 @@ struct PostRefCard: View {
             }
             .padding(12)
         } action: {
-            NSWorkspace.shared.open(url)
+            NSWorkspace.shared.openSoon(url)
         }
         .task(id: url) { found = lookup() }
     }

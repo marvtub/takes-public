@@ -302,7 +302,7 @@ struct PostSideTabs: View {
         .frame(width: 290)
         .background(Theme.paper, in: RoundedRectangle(cornerRadius: 12))
         .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Theme.border, lineWidth: 0.5))
-        .shadow(color: .black.opacity(0.14), radius: 24, y: 12)
+        .cardShadow(RoundedRectangle(cornerRadius: 12), fill: Theme.paper, color: .black.opacity(0.14), radius: 24, y: 12)
         .onHover { if !$0 { preview(nil) } }
     }
 }

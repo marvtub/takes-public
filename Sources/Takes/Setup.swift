@@ -98,7 +98,7 @@ final class Setup {
         do {
             try text.write(to: script, atomically: true, encoding: .utf8)
             try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: script.path)
-            NSWorkspace.shared.open(script)
+            NSWorkspace.shared.openSoon(script)
         } catch {
             signedIn = .failed("Could not open Terminal. Run claude auth login in Terminal.")
         }

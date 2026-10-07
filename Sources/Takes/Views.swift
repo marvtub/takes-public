@@ -20,6 +20,7 @@ struct TakesApp: App {
                 .frame(minWidth: 960, minHeight: 580)
                 .overlay(alignment: .top) { PhonePairBanner().environment(app) }
                 .overlay { ScreenFindLayer().ignoresSafeArea() }
+                .overlay { SearchPalette().environment(app) }
                 .overlay { OnboardingLayer().environment(app) }
                 .task { Onboarding.shared.startIfNew(app.library) }
                 .onOpenURL { app.handle(url: $0) }
@@ -43,7 +44,12 @@ struct TakesApp: App {
                     Button(p.title) { app.toggle(.plugin(p.id)) }.keyboardShortcut(KeyEquivalent(p.key), modifiers: [.command, .shift])
                 }
                 Button("Styles") { app.toggle(.styles) }.keyboardShortcut("y", modifiers: [.command, .shift])
-                Button("Chat with Takes") { app.chats.open.toggle() }.keyboardShortcut("l", modifiers: [.command, .shift])
+                Button("Chat with Takes") {
+                    // Record shows no docked chat: open it on Script.
+                    if app.chats.docked, UserDefaults.standard.string(forKey: "rightTab") == "script", app.board == nil {
+                        SessionMode.set(.write); app.chats.open = true
+                    } else { app.chats.open.toggle() }
+                }.keyboardShortcut("l", modifiers: [.command, .shift])
             }
             CommandGroup(before: .sidebar) {
                 Button("Toggle Sidebar") { app.toggleSidebars() }.keyboardShortcut("b")
@@ -68,6 +74,8 @@ struct TakesApp: App {
             CommandGroup(replacing: .newItem) {
                 Button("New Session") { app.library.createSession() }.keyboardShortcut("n")
                     .disabled(Onboarding.shared.shown)
+                Button("Search…") { MediaSearch.shared.shown.toggle() }.keyboardShortcut("k")
+                    .disabled(Onboarding.shared.shown || app.isRecording)
             }
             CommandMenu("Record") {
                 Button("Start / Stop Recording") { app.toggleRecord() }.keyboardShortcut("r")
@@ -110,6 +118,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Look.shared.applyMode()
         _ = NSWindow.keepFullScreenOnEscape
         ScreenFind.shared.install()
+        MediaSearch.shared.start()
         // Design check without screen-recording rights and without taking focus: post
         // "de.marvinaziz.takes.snapshot" (object = output path) and Takes draws its window into a PNG.
         DistributedNotificationCenter.default().addObserver(forName: .init("de.marvinaziz.takes.snapshot"),
@@ -277,6 +286,7 @@ struct BoardRows: View {
         VStack(alignment: .leading, spacing: 2) {
             SetupButton()
             UpdateButton(library: app.library)
+            ReleaseRow()
             if Features.socialBoards {
                 PerformanceRow(board: app.performance, selected: app.board == .performance) { app.board = .performance }
                 CommentsRow(store: app.copilot, runner: app.copilot.runner, chat: app.chats.comments, post: app.chats.commentsPost, selected: app.board == .comments) { app.board = .comments }
@@ -622,7 +632,7 @@ struct SessionList: View {
         .contextMenu {
             let links = s.posts.compactMap { p in p.url.flatMap(URL.init(string:)).map { (p.label, $0) } }
             ForEach(links, id: \.1) { label, url in
-                Button("Open on \(label)") { NSWorkspace.shared.open(url) }
+                Button("Open on \(label)") { NSWorkspace.shared.openSoon(url) }
             }
             if !links.isEmpty { Divider() }
             BulkMenu(library: library, urls: sel.contains(s.url) ? sel : [s.url])
@@ -796,9 +806,15 @@ struct DetailView: View {
 
     /// Tabs that hide the camera and the stage player for as long as they show.
     private var stageCovered: Bool {
-        ["post", "storyboard", "broll"].contains(rightTab) && !app.isRecording && library.current != nil
+        (["post", "storyboard", "broll"].contains(rightTab) || writing) && !app.isRecording && library.current != nil
             && !(library.selectedSessions.count > 1)
     }
+
+    private var writing: Bool { rightTab == "write" }
+
+    /// Record: the docked chat does not take the script and takes column (2026-10-06). It shows
+    /// on the Script tab instead.
+    private var recordOnly: Bool { rightTab == "script" }
 
     var body: some View {
         let _ = Perf.body("DetailView")
@@ -818,7 +834,7 @@ struct DetailView: View {
     /// then the file plays on the stage and the list sits beside it.
     private var cover: String? {
         guard !app.isRecording, library.current != nil, !(library.selectedSessions.count > 1) else { return nil }
-        if rightTab == "post" || rightTab == "storyboard" || rightTab == "broll" { return rightTab }
+        if rightTab == "post" || rightTab == "storyboard" || rightTab == "broll" || writing { return rightTab }
         if (rightTab == "assets" || rightTab == "sounds") && app.preview == nil { return rightTab }
         return nil
     }
@@ -858,7 +874,7 @@ struct DetailView: View {
                                 // Under the pages as they cross-fade: never the Record stage and
                                 // its camera between two tabs (2026-10-04).
                                 Theme.canvas
-                                ForEach(["storyboard", "assets", "sounds", "broll", "post"], id: \.self) { k in
+                                ForEach(["storyboard", "write", "assets", "sounds", "broll", "post"], id: \.self) { k in
                                     if k == cover || kept.contains(k) { pane(k, doc) }
                                 }
                             }
@@ -874,7 +890,7 @@ struct DetailView: View {
         .overlay(alignment: .bottomTrailing) {
             if let doc = library.current, !app.isRecording {
                 // Above the Assets footer bar, clear of its buttons.
-                ChatCorner(hub: app.chats, doc: doc)
+                ChatCorner(hub: app.chats, doc: doc, away: recordOnly && cover == nil)
                     .padding(.trailing, 18).padding(.bottom, 52)
                     .transition(.opacity)
             }
@@ -896,6 +912,7 @@ struct DetailView: View {
             switch k {
             case "post": PostPane(doc: doc)
             case "storyboard": StoryboardPane(doc: doc)
+            case "write": ScriptPage(doc: doc)
             case "assets": AssetsPane(doc: doc, wide: true)
             case "broll": BrollPane(doc: doc)
             default: SoundsPane(doc: doc, bed: app.bed, wide: true)
@@ -973,11 +990,6 @@ struct DetailView: View {
                         }
                     }
                     .animation(Theme.motion, value: app.preview)
-                    .overlay {
-                        if let doc = library.current, rightTab == "script" {
-                            ScriptBeside(hub: app.chats, doc: doc)
-                        }
-                    }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 // The stage, the pill and its popover all follow the lights.
@@ -985,7 +997,7 @@ struct DetailView: View {
             } right: {
                 // Not under a full-window tab: that tab shows the chat, and a second copy out of
                 // sight drew every streamed word twice.
-                ChatSlot(hub: app.chats, doc: library.current, replace: true, active: !app.isRecording && cover == nil) {
+                ChatSlot(hub: app.chats, doc: library.current, replace: true, active: !app.isRecording && cover == nil && !recordOnly) {
                     if let doc = library.current {
                         // The column lists files only while one plays on the stage. Under a full-window
                         // tab it keeps the script and takes: before, it built a second copy of the
@@ -1041,7 +1053,6 @@ struct CameraCard: View {
     @ObservedObject var camera: CameraRecorder
     var doc: SessionDoc?
     @AppStorage("rightTab") private var rightTab = "script"
-    @AppStorage("scriptBeside") private var scriptBeside = false
 
     private static let corner: CGFloat = 18
     private var shape: RoundedRectangle { RoundedRectangle(cornerRadius: Self.corner, style: .continuous) }
@@ -1081,14 +1092,6 @@ struct CameraCard: View {
                 .font(Theme.sans(13)).foregroundStyle(Theme.muted)
                 .contentTransition(.opacity)
             Spacer(minLength: 8)
-            // In the caption row, not on the stage: a pill there covered "Take 01 up next" (2026-10-04).
-            if doc != nil, rightTab == "script", app.chats.open, app.chats.docked, !app.isRecording, !scriptBeside {
-                Button { scriptBeside = true } label: {
-                    Label("Script beside chat", systemImage: "doc.text").font(Theme.sans(11.5, .medium)).foregroundStyle(Theme.muted)
-                }
-                .buttonStyle(.plain)
-                .help("Show the script in this half, next to the chat")
-            }
             if app.mode == .cameraScreen {
                 Label("Screen too", systemImage: "display").font(Theme.sans(11.5, .medium)).foregroundStyle(Theme.muted)
             }
@@ -1253,6 +1256,26 @@ struct RecordPill: View {
                       help: "Record your screen too, as a second file") {
                     app.mode = app.mode == .cameraScreen ? .camera : .cameraScreen
                 }
+                // With two displays, which one records shows here, not only in the device panel
+                // (Jeremy could not find it, 2026-10-06).
+                if app.mode == .cameraScreen && screen.displays.count > 1 {
+                    Menu {
+                        Picker("Record", selection: $screen.displayID) {
+                            ForEach(screen.displays) { Text($0.name).tag(Optional($0.id)) }
+                        }
+                        .pickerStyle(.inline)
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "display")
+                            Text(screen.displays.first { $0.id == screen.displayID }?.name ?? "Display")
+                                .lineLimit(1).frame(maxWidth: 110)
+                        }
+                        .font(Theme.sans(12, .medium))
+                        .padding(.horizontal, 8).frame(height: 28)
+                    }
+                    .menuStyle(.button).buttonStyle(PillGhostStyle()).menuIndicator(.hidden).fixedSize()
+                    .help("Which display to record")
+                }
                 Button { devices.toggle() } label: {
                     Image(systemName: "slider.horizontal.3").font(.system(size: 12, weight: .medium))
                         .frame(width: 28, height: 28)
@@ -1335,68 +1358,104 @@ struct LivePill: View {
     }
 }
 
-/// The devices behind the pill's slider button.
+/// The devices behind the pill's slider button: one quiet row each, like Control Center. Shape
+/// is on the pill itself; the hints live in tooltips (the user, 2026-10-06: "pretty ugly").
 struct DevicePanel: View {
     @Environment(AppModel.self) var app
     @ObservedObject var camera: CameraRecorder
     @ObservedObject var screen: ScreenRecorder
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            row("Camera") {
-                Picker("", selection: Binding(get: { camera.videoID }, set: { camera.chooseVideo($0) })) {
-                    ForEach(camera.videoDevices, id: \.uniqueID) { Text($0.localizedName).tag(Optional($0.uniqueID)) }
-                }
-                .labelsHidden()
+        VStack(alignment: .leading, spacing: 2) {
+            row("video", "Camera") {
+                pick(camera.videoDevices.map { ($0.uniqueID, $0.localizedName) },
+                     camera.videoID, set: { camera.chooseVideo($0) })
             }
-            row("Shape") {
-                Picker("", selection: $camera.orientation) {
-                    Text("Horizontal").tag(Orientation.horizontal)
-                    Text("Vertical").tag(Orientation.vertical)
+            VStack(spacing: 0) {
+                row("mic", "Microphone") {
+                    pick(camera.audioDevices.map { ($0.uniqueID, $0.localizedName) },
+                         camera.audioID, set: { camera.chooseAudio($0) })
                 }
-                .pickerStyle(.segmented).labelsHidden()
-            }
-            row("Microphone") {
-                VStack(alignment: .leading, spacing: 6) {
-                    Picker("", selection: Binding(get: { camera.audioID }, set: { camera.chooseAudio($0) })) {
-                        ForEach(camera.audioDevices, id: \.uniqueID) { Text($0.localizedName).tag(Optional($0.uniqueID)) }
-                    }
-                    .labelsHidden()
-                    LevelMeter(meter: camera.meter, track: Theme.border, fill: Theme.live)
-                        .frame(height: 3).clipShape(Capsule())
-                }
+                LevelMeter(meter: camera.meter, track: Theme.border, fill: Theme.live)
+                    .frame(height: 2).clipShape(Capsule())
+                    .padding(.leading, 36).padding(.trailing, 10).padding(.bottom, 4)
             }
             if app.mode == .cameraScreen {
-                row("Screen") {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Picker("", selection: $screen.displayID) {
-                            ForEach(screen.displays) { Text($0.name).tag(Optional($0.id)) }
+                row("display", "Screen") {
+                    pick(screen.displays.map { (String($0.id), $0.name) }, screen.displayID.map { String($0) },
+                         set: { screen.displayID = $0.flatMap { UInt32($0) } })
+                }
+                .help("Takes hides itself from the screen file.")
+            }
+            Rectangle().fill(Theme.border).frame(height: 1).padding(.vertical, 4).padding(.horizontal, 8)
+            // Apps can't turn Portrait on: only the macOS Video Effects menu can. The row opens it
+            // (Jeremy looked for a blur in Takes, 2026-10-06).
+            TimelineView(.periodic(from: .now, by: 1)) { _ in
+                let on = AVCaptureDevice.isPortraitEffectEnabled
+                Button { AVCaptureDevice.showSystemUserInterface(.videoEffects) } label: {
+                    row("person.and.background.dotted", "Background blur") {
+                        HStack(spacing: 4) {
+                            Text(on ? "On" : "Off")
+                            Image(systemName: "chevron.right").font(.system(size: 9, weight: .semibold))
                         }
-                        .labelsHidden()
-                        Text("Takes hides itself from the screen file.").font(Theme.sans(11)).foregroundStyle(Theme.faint)
+                        .font(Theme.sans(12)).foregroundStyle(on ? Theme.accent : Theme.faint)
                     }
                 }
+                .buttonStyle(PanelRowStyle())
+                .help("macOS blurs the background behind you (Portrait, in Video Effects).")
             }
-            Rectangle().fill(Theme.border).frame(height: 1)
-            Toggle(isOn: Binding(get: { !camera.paused }, set: { camera.setPaused(!$0) })) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Camera on").font(Theme.sans(12.5, .medium))
-                    Text("Off turns the light off. Record turns it back on.").font(Theme.sans(11)).foregroundStyle(Theme.faint)
-                }
+            row("lightbulb", "Camera on") {
+                Toggle("", isOn: Binding(get: { !camera.paused }, set: { camera.setPaused(!$0) }))
+                    .toggleStyle(.switch).controlSize(.mini).labelsHidden()
             }
-            .toggleStyle(.switch).controlSize(.small)
+            .help("Off turns the camera light off. Record turns it back on.")
         }
-        .padding(16)
-        .frame(width: 300)
+        .padding(6)
+        .frame(width: 270)
         .foregroundStyle(Theme.ink)
         .tint(Theme.accent)
     }
 
-    private func row(_ label: String, @ViewBuilder _ content: () -> some View) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(label).font(Theme.sans(11.5, .medium)).foregroundStyle(Theme.muted)
-            content()
+    private func row(_ icon: String, _ label: String, @ViewBuilder _ trailing: () -> some View) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: icon).font(.system(size: 12.5, weight: .medium)).foregroundStyle(Theme.muted)
+                .frame(width: 18)
+            Text(label).font(Theme.sans(12.5, .medium))
+            Spacer(minLength: 8)
+            trailing()
         }
+        .padding(.horizontal, 8).frame(height: 32)
+        .contentShape(Rectangle())
+    }
+
+    /// The device's name in grey; a click lists the others.
+    private func pick(_ items: [(id: String, name: String)], _ current: String?, set: @escaping (String?) -> Void) -> some View {
+        Menu {
+            ForEach(items, id: \.id) { item in
+                Button { set(item.id) } label: {
+                    if item.id == current { Label(item.name, systemImage: "checkmark") } else { Text(item.name) }
+                }
+            }
+        } label: {
+            HStack(spacing: 4) {
+                Text(items.first { $0.id == current }?.name ?? "None").lineLimit(1).truncationMode(.middle)
+                Image(systemName: "chevron.up.chevron.down").font(.system(size: 8, weight: .semibold))
+            }
+            .font(Theme.sans(12)).foregroundStyle(Theme.muted)
+            .frame(maxWidth: 140, alignment: .trailing)
+        }
+        .menuStyle(.button).buttonStyle(.plain).menuIndicator(.hidden).fixedSize()
+    }
+}
+
+/// A whole panel row as a button: a soft well on hover.
+private struct PanelRowStyle: ButtonStyle {
+    @State private var hover = false
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .background(RoundedRectangle(cornerRadius: 8).fill(hover || configuration.isPressed ? Theme.hover : .clear))
+            .onHover { hover = $0 }
+            .animation(Theme.motion, value: hover)
     }
 }
 
@@ -1523,8 +1582,8 @@ struct TakeRow: View {
                 .disabled(app.isRecording)
                 .help("Play \(t.file)")
                 .contextMenu {
-                    Button("Open in QuickTime") { NSWorkspace.shared.open(url) }
-                    Button("Reveal in Finder") { NSWorkspace.shared.activateFileViewerSelecting([url]) }
+                    Button("Open in QuickTime") { NSWorkspace.shared.openSoon(url) }
+                    Button("Reveal in Finder") { NSWorkspace.shared.revealSoon([url]) }
                     Divider()
                     trashButton
                 }
@@ -2060,32 +2119,18 @@ struct StagePill: View {
     }
 }
 
-/// Script and chat side by side (2026-10-02): with the chat docked, the script can take the
-/// camera's half. The preview stays mounted under it (removing its layer deadlocks AVFoundation).
-struct ScriptBeside: View {
-    @Environment(AppModel.self) var app
-    var hub: ChatHub
+/// The Script tab (2026-10-06): the script as a page of its own, for writing
+/// it with Takes. The chat docks beside it, as on the other full-window tabs. Record shows the
+/// same text as the prompter.
+struct ScriptPage: View {
     var doc: SessionDoc
-    @AppStorage("scriptBeside") private var on = false
 
     var body: some View {
-        let _ = Perf.body("ScriptBeside")
-        let docked = hub.open && hub.docked && !app.isRecording
-        ZStack(alignment: .topLeading) {
-            if docked && on {
-                ScriptPane(doc: doc, onShowCamera: { on = false })
-                    .background(Theme.paper)
-                    .transition(.opacity)
-            } else if docked && app.preview != nil {
-                // Over the camera, the button sits in the card's caption row instead (CameraCard).
-                Button { on = true } label: { StagePill(text: "Script beside chat", icon: "doc.text") }
-                    .buttonStyle(.plain).padding(12)
-                    .help("Show the script in this half, next to the chat")
-                    .transition(.opacity)
-            }
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .animation(Theme.motion, value: docked && on)
+        ScriptPane(doc: doc, onRecord: { SessionMode.set(.record) })
+            .frame(maxWidth: 860)
+            .overlay { HStack { Rule(vertical: true); Spacer(); Rule(vertical: true) } }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(Theme.canvas)
     }
 }
 
@@ -2093,8 +2138,8 @@ struct ScriptPane: View {
     @Environment(AppModel.self) var app
     @Environment(\.colorScheme) private var scheme
     var doc: SessionDoc
-    /// Beside the chat, the bar gets a button that puts the camera back.
-    var onShowCamera: (() -> Void)? = nil
+    /// On the Script tab, the bar gets a button that opens Record.
+    var onRecord: (() -> Void)? = nil
     @State private var showHistory = false
     @StateObject private var comments = CommentStore()
     @State private var selection = ""
@@ -2171,7 +2216,7 @@ struct ScriptPane: View {
             .tint(Theme.accent)
             .padding(.leading, 12).padding(.vertical, 8)
             // The round chat button sits over the bar's right end, except beside the chat.
-            .padding(.trailing, onShowCamera == nil ? 64 : 12)
+            .padding(.trailing, 64)
             .background(Theme.paper)
         }
         .background(Theme.paper)
@@ -2187,12 +2232,12 @@ struct ScriptPane: View {
 
     private func controls(compact: Bool) -> some View {
         HStack(spacing: 8) {
-            if let onShowCamera {
-                Button(action: onShowCamera) {
-                    Label("Camera", systemImage: "video").labelStyle(.titleAndIcon).padding(.horizontal, 6).frame(height: 28)
+            if let onRecord {
+                Button(action: onRecord) {
+                    Label("Record", systemImage: "record.circle").labelStyle(.titleAndIcon).padding(.horizontal, 6).frame(height: 28)
                 }
                 .buttonStyle(PillGhostStyle())
-                .help("Put the camera back in this half")
+                .help("Open Record: the camera, this script as the prompter, and the takes (⌘1)")
             }
             Button { app.scrolling.toggle() } label: {
                 Image(systemName: app.scrolling ? "pause.fill" : "play.fill")

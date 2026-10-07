@@ -16,7 +16,9 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import unicodedata
+import urllib.error
 import urllib.parse
 from datetime import datetime, timezone
 
@@ -1556,6 +1558,551 @@ def t_make_image(a):
     return {"file": rel, "model": label, "note": "Shows on the Assets tab with the model's name. Look at it before you reply."}
 
 
+# ---------- ElevenLabs: voice-over, fixed words, other voices (2026-10-06) ----------
+#
+# The user's voice clone (or any voice of his ElevenLabs account) reads a script, says new words into a
+# take, or replaces the voice of a clip. The key sits in the macOS Keychain (Takes › Settings ›
+# Voices saves it there), else ELEVENLABS_API_KEY. The default voice is in <root>/_library/voices.json.
+# New files land in <session>/generated/ with the voice's name in .models.json, so the Assets tab shows
+# which voice made them.
+
+ELEVEN_API = "https://api.elevenlabs.io"
+ELEVEN_TTS_MODEL = "eleven_multilingual_v2"
+ELEVEN_STS_MODEL = "eleven_multilingual_sts_v2"
+ELEVEN_STT_MODEL = "scribe_v1"
+ELEVEN_KEYCHAIN = "Takes ElevenLabs"
+ELEVEN_SETUP = "Open Takes › Settings › Voices and paste your ElevenLabs API key."
+ELEVEN_CHUNK = 2500  # characters per text-to-speech call; neighbours go along as previous/next text
+ELEVEN_FIT = (0.8, 1.25)  # how far fix_words may speed up or slow down new words to fit the old slot
+
+
+def eleven_key():
+    for k in ("ELEVENLABS_API_KEY", "ELEVEN_API_KEY"):
+        if os.environ.get(k):
+            return os.environ[k]
+    if not os.environ.get("TAKES_NO_KEYCHAIN"):
+        try:
+            r = subprocess.run(["security", "find-generic-password", "-s", ELEVEN_KEYCHAIN, "-a", "api-key", "-w"],
+                               capture_output=True, text=True, timeout=10)
+            if r.returncode == 0 and r.stdout.strip():
+                return r.stdout.strip()
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    try:
+        for line in open(os.path.expanduser("~/.claude/.env")):
+            k, _, v = line.strip().partition("=")
+            if k.strip().removeprefix("export ").strip() == "ELEVENLABS_API_KEY":
+                return v.strip().strip('"').strip("'") or None
+    except OSError:
+        pass
+    return None
+
+
+def eleven_save_key(key):
+    """Keep the key in the login Keychain through the security tool, which then reads it without asking.
+    The key goes on security's stdin, never in its arguments."""
+    key = key.strip()
+    if not key:
+        cmd = 'delete-generic-password -s "%s" -a api-key\n' % ELEVEN_KEYCHAIN
+    else:
+        if not re.fullmatch(r"[A-Za-z0-9_\-]{10,200}", key):
+            raise ValueError("That does not look like an ElevenLabs API key.")
+        cmd = 'add-generic-password -U -s "%s" -a api-key -w "%s"\n' % (ELEVEN_KEYCHAIN, key)
+    r = subprocess.run(["security", "-i"], input=cmd, capture_output=True, text=True, timeout=20)
+    if key and r.returncode != 0:
+        raise ValueError("The Keychain did not take the key.")
+
+
+def eleven_problem(code, body):
+    try:
+        d = json.loads(body).get("detail")
+        msg = d.get("message") or d.get("status") if isinstance(d, dict) else d if isinstance(d, str) else body
+    except (ValueError, AttributeError):
+        msg = body
+    msg = str(msg).strip()[:240]
+    if code == 401:
+        return "ElevenLabs did not take the API key (%s). %s" % (msg, ELEVEN_SETUP)
+    return "ElevenLabs said %s: %s" % (code, msg)
+
+
+def eleven_http(method, path, body=None, files=None, query=None, raw=False):
+    """One ElevenLabs call. body: a JSON dict, or with files (field -> path) a multipart form.
+    raw=True returns the bytes (audio), else the parsed JSON."""
+    import urllib.request
+    import uuid
+    key = eleven_key()
+    if not key:
+        raise ValueError("No ElevenLabs API key. " + ELEVEN_SETUP)
+    url = ELEVEN_API + path + ("?" + urllib.parse.urlencode(query) if query else "")
+    headers = {"xi-api-key": key}
+    data = None
+    if files:
+        b = uuid.uuid4().hex
+        parts = [b'--%s\r\nContent-Disposition: form-data; name="%s"\r\n\r\n%s\r\n'
+                 % (b.encode(), k.encode(), (json.dumps(v) if isinstance(v, (dict, list)) else
+                                             str(v).lower() if isinstance(v, bool) else str(v)).encode())
+                 for k, v in (body or {}).items() if v is not None]
+        for field, f in files.items():
+            parts.append(b'--%s\r\nContent-Disposition: form-data; name="%s"; filename="%s"\r\n'
+                         b'Content-Type: application/octet-stream\r\n\r\n' % (b.encode(), field.encode(),
+                                                                             os.path.basename(f).encode())
+                         + open(f, "rb").read() + b"\r\n")
+        data = b"".join(parts) + b"--%s--\r\n" % b.encode()
+        headers["Content-Type"] = "multipart/form-data; boundary=" + b
+    elif body is not None:
+        data = json.dumps(body).encode()
+        headers["Content-Type"] = "application/json"
+    req = urllib.request.Request(url, data=data, method=method, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=600) as r:
+            out = r.read()
+    except urllib.error.HTTPError as e:
+        raise ValueError(eleven_problem(e.code, e.read().decode(errors="replace")))
+    except urllib.error.URLError as e:
+        raise ValueError("ElevenLabs did not answer: %s" % e.reason)
+    return out if raw else json.loads(out or b"{}")
+
+
+def eleven_audio(path, body=None, files=None, query=None):
+    """Audio bytes, in the best MP3 the plan gives (192 kbps needs Creator, else 128)."""
+    last = None
+    for fmt in ("mp3_44100_192", "mp3_44100_128"):
+        try:
+            return eleven_http("POST", path, body, files, dict(query or {}, output_format=fmt), raw=True)
+        except ValueError as e:
+            last = e
+            if "192" not in str(e) and "format" not in str(e).lower() and "tier" not in str(e).lower():
+                raise
+    raise last
+
+
+# Voices
+
+def voices_config_path():
+    return os.path.join(root(), LIB, "voices.json")
+
+
+def read_voices_config():
+    try:
+        with open(voices_config_path()) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def write_voices_config(cfg):
+    p = voices_config_path()
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    with open(p + ".tmp", "w") as f:
+        json.dump(cfg, f, indent=2, sort_keys=True)
+    os.replace(p + ".tmp", p)
+
+
+def eleven_voices():
+    """The voices of the account: own clones, designed voices, saved library voices, the premade ones."""
+    out, token = [], None
+    for _ in range(5):
+        q = {"page_size": 100}
+        if token:
+            q["next_page_token"] = token
+        res = eleven_http("GET", "/v2/voices", query=q)
+        for v in res.get("voices") or []:
+            out.append({"id": v.get("voice_id"), "name": v.get("name"), "category": v.get("category"),
+                        "description": (v.get("description") or "")[:160] or None,
+                        "labels": v.get("labels") or {}, "preview": v.get("preview_url")})
+        token = res.get("next_page_token")
+        if not res.get("has_more") or not token:
+            break
+    return out
+
+
+def pick_voice(voices, ref):
+    """A voice by id, by full name, or by the start of its name ('The user' finds 'The user PVC')."""
+    ref = ref.strip()
+    low = ref.casefold()
+    for test in (lambda v: v["id"] == ref, lambda v: (v["name"] or "").casefold() == low,
+                 lambda v: (v["name"] or "").casefold().startswith(low),
+                 lambda v: low in (v["name"] or "").casefold()):
+        hits = [v for v in voices if test(v)]
+        if hits:
+            return hits[0]
+    return None
+
+
+def resolve_voice(ref):
+    """(voice_id, name): the asked voice, else the default from Settings › Voices."""
+    if not ref:
+        d = read_voices_config().get("default")
+        if d and d.get("id"):
+            return d["id"], d.get("name") or d["id"]
+        raise ValueError("No default voice yet. Pick one in Takes › Settings › Voices, or pass voice.")
+    voices = eleven_voices()
+    v = pick_voice(voices, ref)
+    if not v:
+        names = ", ".join(sorted(x["name"] for x in voices if x.get("name"))[:30])
+        raise ValueError("No voice '%s' in the ElevenLabs account. Voices: %s. Find more with voices search=..."
+                         % (ref, names))
+    return v["id"], v["name"]
+
+
+def eleven_account():
+    try:
+        sub = eleven_http("GET", "/v1/user/subscription")
+    except ValueError as e:
+        return {"error": str(e)}
+    used, limit = sub.get("character_count") or 0, sub.get("character_limit") or 0
+    return {"plan": sub.get("tier"), "characters_left": max(0, limit - used), "characters_per_month": limit,
+            "voice_slots": "%s of %s" % (sub.get("voice_slots_used"), sub.get("voice_limit"))}
+
+
+def t_voices(a):
+    """List, search, add and pick voices."""
+    if a.get("add"):
+        owner, _, vid = str(a["add"]).partition("/")
+        if not vid:
+            raise ValueError("add is '<public_owner_id>/<voice_id>' from voices search.")
+        name = (a.get("name") or "").strip() or "Library voice"
+        res = eleven_http("POST", "/v1/voices/add/%s/%s" % (owner, vid), {"new_name": name})
+        out = {"added": {"id": res.get("voice_id"), "name": name}}
+        if a.get("set_default"):
+            write_voices_config(dict(read_voices_config(), default={"id": res.get("voice_id"), "name": name}))
+            out["default"] = out["added"]
+        return out
+    if a.get("set_default"):
+        vid, name = resolve_voice(a["set_default"])
+        write_voices_config(dict(read_voices_config(), default={"id": vid, "name": name}))
+        return {"default": {"id": vid, "name": name}}
+    out = {"default": read_voices_config().get("default"), "account": eleven_account()}
+    if "error" in out["account"]:
+        return out
+    if a.get("search") is not None:
+        q = {"page_size": 12, "search": a["search"]}
+        for k in ("gender", "accent", "language", "age", "use_case"):
+            if a.get(k):
+                q[k] = a[k]
+        res = eleven_http("GET", "/v1/shared-voices", query=q)
+        out["library"] = [{"add": "%s/%s" % (v.get("public_owner_id"), v.get("voice_id")), "name": v.get("name"),
+                           "accent": v.get("accent"), "gender": v.get("gender"), "age": v.get("age"),
+                           "use_case": v.get("use_case"), "description": (v.get("description") or "")[:160] or None,
+                           "preview": v.get("preview_url")} for v in res.get("voices") or []]
+        out["note"] = "Add one with voices add=<add> name=<name>; then use its name as voice."
+    else:
+        out["mine"] = eleven_voices()
+    return out
+
+
+def t_design_voice(a):
+    """Design a voice from a description (three samples), or save one sample as a voice."""
+    if a.get("save"):
+        name = (a.get("name") or "").strip()
+        if not name:
+            raise ValueError("Give the new voice a name.")
+        res = eleven_http("POST", "/v1/text-to-voice", {
+            "voice_name": name, "voice_description": (a.get("description") or name)[:1000],
+            "generated_voice_id": a["save"]})
+        out = {"saved": {"id": res.get("voice_id"), "name": name}}
+        if a.get("set_default"):
+            write_voices_config(dict(read_voices_config(), default=out["saved"]))
+            out["default"] = out["saved"]
+        return out
+    desc = (a.get("description") or "").strip()
+    if len(desc) < 20:
+        raise ValueError("Describe the voice in at least 20 characters: age, accent, tone, pace.")
+    body = {"voice_description": desc[:1000]}
+    text = (a.get("text") or "").strip()
+    if len(text) >= 100:
+        body["text"] = text[:1000]
+    else:
+        body["auto_generate_text"] = True
+    res = eleven_http("POST", "/v1/text-to-voice/design", body)
+    s = resolve_session(a["session"]) if a.get("session") else None
+    d = os.path.join(s, GENERATED_DIR) if s else os.path.join(root(), LIB, "voices")
+    os.makedirs(d, exist_ok=True)
+    import base64
+    base = "voice-" + (slug(a.get("name") or " ".join(desc.split()[:4])) or "design")
+    samples = []
+    for i, p in enumerate(res.get("previews") or []):
+        f = os.path.join(d, "%s-%d.mp3" % (base, i + 1))
+        with open(f, "wb") as fh:
+            fh.write(base64.b64decode(p.get("audio_base_64") or ""))
+        if s:
+            note_model(s, os.path.relpath(f, s), "ElevenLabs voice design")
+        samples.append({"save": p.get("generated_voice_id"), "file": os.path.relpath(f, s) if s else f})
+    return {"samples": samples, "note": "The user listens on the Assets tab. Save his pick with design_voice "
+                                        "save=<save> name=<name>."}
+
+
+# Audio
+
+def need_ffmpeg():
+    ffmpeg = find_tool("ffmpeg")
+    if not ffmpeg:
+        raise ValueError("ffmpeg is not installed. Open Takes and click Finish setup, or run brew install ffmpeg.")
+    return ffmpeg
+
+
+def ff(*args):
+    r = subprocess.run([need_ffmpeg(), "-v", "error", "-y"] + [str(x) for x in args],
+                       capture_output=True, text=True, timeout=900)
+    if r.returncode != 0:
+        raise ValueError("ffmpeg: " + ((r.stderr or "").strip().splitlines() or ["failed"])[-1])
+
+
+def mean_db(path, start=None, end=None):
+    """Mean loudness in dB (ffmpeg volumedetect) of path, or of start..end in it."""
+    cut = []
+    if start is not None:
+        cut = ["-ss", "%.3f" % max(0, start), "-to", "%.3f" % end]
+    r = subprocess.run([need_ffmpeg(), "-v", "info", "-nostats"] + cut + ["-i", path, "-af", "volumedetect",
+                                                                          "-f", "null", "-"],
+                       capture_output=True, text=True, timeout=300)
+    m = re.search(r"mean_volume:\s*(-?[\d.]+) dB", r.stderr or "")
+    return float(m.group(1)) if m else None
+
+
+def to_wav(src, out, extra=()):
+    """48 kHz mono float WAV, like the voice cleanup writes."""
+    ff("-i", src, *extra, "-vn", "-ac", "1", "-ar", "48000", "-c:a", "pcm_f32le", out)
+
+
+def next_generated(s, name, ext):
+    d = os.path.join(s, GENERATED_DIR)
+    os.makedirs(d, exist_ok=True)
+    have = versions_in(d, name)
+    return os.path.join(GENERATED_DIR, "%s-v%d%s" % (name, (have[-1] if have else 0) + 1, ext))
+
+
+def chunks(text, size=ELEVEN_CHUNK):
+    """Paragraphs packed into calls of at most size characters (a long paragraph splits at sentences)."""
+    out, cur = [], ""
+    for para in [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]:
+        pieces = [para] if len(para) <= size else re.split(r"(?<=[.!?])\s+", para)
+        for piece in pieces:
+            if cur and len(cur) + len(piece) + 2 > size:
+                out.append(cur)
+                cur = ""
+            cur = (cur + ("\n\n" if cur else "") + piece)
+    if cur:
+        out.append(cur)
+    return out
+
+
+def tts(text, voice_id, out, model=None, settings=None, before="", after=""):
+    body = {"text": text, "model_id": model or ELEVEN_TTS_MODEL}
+    if before:
+        body["previous_text"] = before[-1000:]
+    if after:
+        body["next_text"] = after[:1000]
+    if settings:
+        body["voice_settings"] = settings
+    with open(out, "wb") as f:
+        f.write(eleven_audio("/v1/text-to-speech/%s" % voice_id, body))
+
+
+def voice_settings(a):
+    s = {k: float(a[k]) for k in ("stability", "similarity", "style", "speed") if a.get(k) is not None}
+    if "similarity" in s:
+        s["similarity_boost"] = s.pop("similarity")
+    return s or None
+
+
+def t_voiceover(a):
+    """Read text (or the session's script.md) in a voice; a WAV at -14 LUFS in generated/."""
+    s = resolve_session(a["session"])
+    text = (a.get("text") or "").strip() or read_text(os.path.join(s, "script.md")).strip()
+    if not text:
+        raise ValueError("Give text, or write script.md first.")
+    vid, vname = resolve_voice(a.get("voice"))
+    name = slug(a.get("name") or "voiceover-" + vname) or "voiceover"
+    rel = next_generated(s, name, ".wav")
+    parts = chunks(text)
+    with tempfile.TemporaryDirectory() as tmp:
+        files = []
+        for i, p in enumerate(parts):
+            f = os.path.join(tmp, "%03d.mp3" % i)
+            tts(p, vid, f, a.get("model"), voice_settings(a),
+                before=parts[i - 1] if i else "", after=parts[i + 1] if i + 1 < len(parts) else "")
+            files.append(f)
+        lst = os.path.join(tmp, "list.txt")
+        with open(lst, "w") as fh:
+            fh.write("".join("file '%s'\n" % f for f in files))
+        ff("-f", "concat", "-safe", "0", "-i", lst, "-af", "loudnorm=I=-14:TP=-1.5:LRA=11", "-ac", "1",
+           "-ar", "48000", "-c:a", "pcm_f32le", os.path.join(s, rel))
+    note_model(s, rel, "ElevenLabs · " + vname)
+    return {"file": rel, "voice": vname, "seconds": media_duration(os.path.join(s, rel)), "characters": len(text),
+            "note": "On the Assets tab with the voice's name. -14 LUFS, 48 kHz mono."}
+
+
+# Words in a take
+
+def norm_word(w):
+    return re.sub(r"[^\w']+", "", w.casefold())
+
+
+def find_words(words, old, near=None):
+    """(first, last) index of the words that say old, the match nearest to near seconds."""
+    want = [norm_word(w) for w in old.split() if norm_word(w)]
+    have = [norm_word(t) for _, _, t in words]
+    hits = [i for i in range(len(have) - len(want) + 1) if want and have[i:i + len(want)] == want]
+    if not hits:
+        raise ValueError("The take never says '%s'. Copy the words from the transcript (get_comments quotes "
+                         "it), or pass start and end in seconds." % old)
+    i = min(hits, key=lambda i: abs(words[i][0] - near)) if near is not None else hits[0]
+    return i, i + len(want) - 1, len(hits)
+
+
+def eleven_transcribe(src):
+    """Word times from ElevenLabs Scribe, saved as <stem>.words.json next to the file."""
+    with tempfile.TemporaryDirectory() as tmp:
+        mp3 = os.path.join(tmp, "a.mp3")
+        ff("-i", src, "-vn", "-ac", "1", "-ar", "16000", "-b:a", "64k", mp3)
+        res = eleven_http("POST", "/v1/speech-to-text", {"model_id": ELEVEN_STT_MODEL,
+                                                          "timestamps_granularity": "word"}, files={"file": mp3})
+    words = [{"word": w.get("text", "").strip(), "start": w.get("start"), "end": w.get("end")}
+             for w in res.get("words") or [] if w.get("type", "word") == "word" and w.get("text", "").strip()]
+    with open(os.path.splitext(src)[0] + ".words.json", "w") as f:
+        json.dump({"words": words, "source": "elevenlabs " + ELEVEN_STT_MODEL}, f)
+    return transcript_words(src)
+
+
+def voice_source(s, src):
+    """The audio edits use for this file: the take's cleaned voice when it is done, else the file itself."""
+    t = next((t for t in read_meta(s).get("takes", []) if os.path.join(s, t["file"]) == src), None)
+    if t:
+        v = read_voice(s, voice_key(t["number"], t["kind"]))
+        f = voice_files(s, voice_key(t["number"], t["kind"]))["mix"]
+        if v and v.get("state") == "done" and v.get("on", True) and os.path.exists(f):
+            return f, True
+    return src, False
+
+
+def splice(base, piece, start, end, out, length):
+    """base with start..end replaced by piece (length seconds), 10 ms fades at both seams."""
+    ff("-i", base, "-i", piece, "-filter_complex",
+       "[0:a]atrim=0:%.4f,asetpts=N/SR/TB,afade=t=out:st=%.4f:d=0.01[a];"
+       "[1:a]aresample=48000,pan=mono|c0=c0,apad,atrim=0:%.4f,asetpts=N/SR/TB,"
+       "afade=t=in:d=0.01,afade=t=out:st=%.4f:d=0.01[b];"
+       "[0:a]atrim=start=%.4f,asetpts=N/SR/TB,afade=t=in:d=0.01[c];"
+       "[a][b][c]concat=n=3:v=0:a=1[o]" % (start, max(0, start - 0.01), length, max(0, length - 0.01), end),
+       "-map", "[o]", "-ac", "1", "-ar", "48000", "-c:a", "pcm_f32le", out)
+
+
+def with_audio(video, wav, out):
+    ff("-i", video, "-i", wav, "-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy", "-c:a", "aac", "-b:a", "256k",
+       "-shortest", "-movflags", "+faststart", out)
+
+
+def t_fix_words(a):
+    """Say new words in place of old ones in a take or clip, in the take's voice (the default voice)."""
+    s = resolve_session(a["session"])
+    src = session_file(s, a.get("file") or a.get("take") or "")
+    new = (a.get("new") or "").strip()
+    if not new:
+        raise ValueError("Give new: the words to say instead.")
+    words = transcript_words(src)
+    if not words and (a.get("old") or a.get("start") is None):
+        words = eleven_transcribe(src)
+    many = 1
+    if a.get("old"):
+        i, j, many = find_words(words, a["old"], a.get("near"))
+        start, end = words[i][0], words[j][1]
+        before = " ".join(t for _, _, t in words[max(0, i - 40):i])
+        after = " ".join(t for _, _, t in words[j + 1:j + 41])
+        old = " ".join(t for _, _, t in words[i:j + 1])
+    else:
+        if a.get("start") is None or a.get("end") is None:
+            raise ValueError("Give old (the words as said) or start and end in seconds.")
+        start, end = float(a["start"]), float(a["end"])
+        ws = words or []
+        before = " ".join(t for b, e, t in ws if e <= start)[-600:]
+        after = " ".join(t for b, e, t in ws if b >= end)[:600]
+        old = " ".join(t for b, e, t in ws if e > start and b < end) or None
+    if end <= start:
+        raise ValueError("end must come after start.")
+    vid, vname = resolve_voice(a.get("voice"))
+    base, cleaned = voice_source(s, src)
+    stem = slug(os.path.splitext(os.path.basename(src))[0]) + "-fix"
+    rel = next_generated(s, stem, ".wav")
+    with tempfile.TemporaryDirectory() as tmp:
+        raw, speech = os.path.join(tmp, "new.mp3"), os.path.join(tmp, "speech.wav")
+        tts(new, vid, raw, a.get("model"), voice_settings(a), before=before, after=after)
+        trim = "silenceremove=start_periods=1:start_threshold=-45dB"
+        ff("-i", raw, "-af", "%s,areverse,%s,areverse" % (trim, trim), "-ac", "1", "-ar", "48000",
+           "-c:a", "pcm_f32le", speech)
+        length = media_duration(speech) or 0.0
+        slot = end - start
+        ratio = length / slot if slot else 0
+        fit = ELEVEN_FIT[0] <= ratio <= ELEVEN_FIT[1]
+        gain = 0.0
+        a_db, b_db = mean_db(base, start, end), mean_db(speech)
+        if a_db is not None and b_db is not None:
+            gain = max(-12.0, min(12.0, a_db - b_db))
+        piece = os.path.join(tmp, "piece.wav")
+        chain = ["volume=%.2fdB" % gain]
+        if fit and abs(ratio - 1) > 0.01:
+            chain.insert(0, "atempo=%.4f" % ratio)
+        ff("-i", speech, "-af", ",".join(chain), "-ac", "1", "-ar", "48000", "-c:a", "pcm_f32le", piece)
+        out_len = slot if fit else (media_duration(piece) or length)
+        splice(base, piece, start, end, os.path.join(s, rel), out_len)
+    note_model(s, rel, "ElevenLabs · " + vname)
+    out = {"file": rel, "voice": vname, "replaced": old, "with": new, "start": round(start, 3), "end": round(end, 3),
+           "fits": fit, "speed": round(ratio, 3) if fit else None,
+           "audio": "the take's cleaned voice" if cleaned else "the file's own audio"}
+    if media_kind(src) == "video" and fit:
+        vrel = rel[:-4] + ".mp4"
+        with_audio(src, os.path.join(s, rel), os.path.join(s, vrel))
+        note_model(s, vrel, "ElevenLabs · " + vname)
+        out["video"] = vrel
+        out["note"] = ("Same length as the take, so its times still hold. The lips do not match the new words: "
+                       "best over b-roll, a screen or a cutaway.")
+    elif not fit:
+        out["note"] = ("The new words take %.2f s; the old ones took %.2f s. The WAV is %+.2f s longer or shorter "
+                       "from %.2f s on, so there is no video; cut it in the edit." % (length, slot, length - slot, end))
+    if many > 1:
+        out["warning"] = "The take says those words %d times; this changed the one at %.1f s. Pass near=<seconds> for another." % (many, start)
+    return out
+
+
+def t_change_voice(a):
+    """Say a clip again in another voice (ElevenLabs voice changer): same timing, emotion and words."""
+    s = resolve_session(a["session"])
+    src = session_file(s, a.get("file") or a.get("take") or "")
+    vid, vname = resolve_voice(a.get("voice"))
+    base, cleaned = voice_source(s, src)
+    total = media_duration(base) or 0.0
+    start = float(a["start"]) if a.get("start") is not None else 0.0
+    end = float(a["end"]) if a.get("end") is not None else total
+    if end <= start:
+        raise ValueError("end must come after start.")
+    if end - start > 300:
+        raise ValueError("At most 5 minutes at a time. Pass start and end.")
+    stem = slug(os.path.splitext(os.path.basename(src))[0]) + "-" + (slug(vname) or "voice")
+    rel = next_generated(s, stem, ".wav")
+    with tempfile.TemporaryDirectory() as tmp:
+        seg, raw, piece = (os.path.join(tmp, n) for n in ("seg.wav", "new.mp3", "piece.wav"))
+        ff("-ss", "%.3f" % start, "-to", "%.3f" % end, "-i", base, "-ac", "1", "-ar", "44100", seg)
+        body = {"model_id": a.get("model") or ELEVEN_STS_MODEL}
+        if a.get("remove_noise"):
+            body["remove_background_noise"] = True
+        with open(raw, "wb") as f:
+            f.write(eleven_audio("/v1/speech-to-speech/%s" % vid, body, files={"audio": seg}))
+        gain = 0.0
+        a_db, b_db = mean_db(seg), mean_db(raw)
+        if a_db is not None and b_db is not None:
+            gain = max(-12.0, min(12.0, a_db - b_db))
+        ff("-i", raw, "-af", "volume=%.2fdB" % gain, "-ac", "1", "-ar", "48000", "-c:a", "pcm_f32le", piece)
+        splice(base, piece, start, end, os.path.join(s, rel), end - start)
+    note_model(s, rel, "ElevenLabs · " + vname)
+    out = {"file": rel, "voice": vname, "start": round(start, 3), "end": round(end, 3),
+           "audio": "the take's cleaned voice" if cleaned else "the file's own audio"}
+    if media_kind(src) == "video":
+        vrel = rel[:-4] + ".mp4"
+        with_audio(src, os.path.join(s, rel), os.path.join(s, vrel))
+        note_model(s, vrel, "ElevenLabs · " + vname)
+        out["video"] = vrel
+    return out
+
+
 # ---------- Higgsfield: AI video (2026-10-06) ----------
 #
 # Video only: images go to GPT Image directly (make_image), much cheaper. Takes runs the official `higgsfield` CLI (signed in once from Takes › Settings › Higgsfield, the
@@ -1887,7 +2434,7 @@ ARTICLE_COMPONENTS = (
     "for a $ prompt); <TLDR>- bullet list</TLDR> (the posts put it at the end); <Prompt title=\"...\">a prompt</Prompt>; "
     "<Flowchart steps={[\"step\", {decision: \"q?\", yes: \"a\", no: \"b\"}]} caption=\"...\" />; "
     "<Steps><Step title=\"...\">text</Step></Steps>; <FileTree>{`tree`}</FileTree>; <Ascii caption=\"...\">{`art`}</Ascii>; "
-    "<Collapse title=\"...\">text</Collapse>; <Tweet id=\"123\" />; inline <Tooltip text=\"meaning\">word</Tooltip>.")
+    "<Collapse title=\"...\">text</Collapse>; <Tweet id=\"123\" />; <Video src=\"thumbnails/x.mp4\" poster=\"thumbnails/x.jpg\" title=\"...\" /> (a 16:9 video with sound, plays on click); inline <Tooltip text=\"meaning\">word</Tooltip>.")
 VERTICAL_PLACES = ["tiktok", "reels", "shorts"]
 VERTICAL_NAMES = {"tiktok": "TikTok", "reels": "Instagram Reels", "shorts": "YouTube Shorts"}
 TITLE_LIMIT = 100
@@ -3058,6 +3605,61 @@ def t_list_broll(a):
     return {"library": broll_dir(), "clips": out}
 
 
+
+# ---------- search by meaning ----------
+#
+# The app's ⌘K search (Sources/Takes/Search.swift): EmbeddingGemma 2 on this Mac, in the takes-embed
+# helper inside Takes.app. Takes downloads the model in the background and keeps the index in
+# <root>/_library/search/index.json. This tool asks the same helper.
+
+def embed_helper():
+    here = os.path.dirname(os.path.abspath(__file__))
+    for p in (os.environ.get("TAKES_EMBED"), os.path.join(here, "..", "MacOS", "takes-embed"),
+              os.path.expanduser("~/Applications/Takes.app/Contents/MacOS/takes-embed"),
+              "/Applications/Takes.app/Contents/MacOS/takes-embed"):
+        if p and os.access(p, os.X_OK):
+            return os.path.realpath(p)
+    return None
+
+
+def embed_models():
+    return os.environ.get("TAKES_EMBED_MODELS") or os.path.expanduser(
+        "~/Library/Application Support/Takes/Models/embeddinggemma-2-q8")
+
+
+def t_search_media(a):
+    q = (a.get("query") or "").strip()
+    if not q:
+        return {"error": "Say what to look for."}
+    helper = embed_helper()
+    if not helper:
+        return {"error": "This Takes build has no search helper. Use list_broll or get_session instead."}
+    if not os.path.exists(os.path.join(embed_models(), "text-q8", "model.safetensors")):
+        return {"error": "The search model is still downloading (Takes > Settings > Search). Use list_broll for now."}
+    cmd = [helper, "search", "--models", embed_models(), "--root", root(), "--limit", str(int(a.get("limit") or 12))]
+    if a.get("kinds"):
+        cmd += ["--kind", ",".join(a["kinds"])]
+    try:
+        out = subprocess.run(cmd + [q], capture_output=True, text=True, timeout=120)
+    except subprocess.TimeoutExpired:
+        return {"error": "The search took too long."}
+    if out.returncode != 0:
+        return {"error": (out.stderr.strip() or "The search failed.")[-400:]}
+    data = json.loads(out.stdout)
+    hits = []
+    for r in data.get("results", []):
+        h = {"path": r["path"], "kind": r["kind"]}
+        if r["kind"] in ("video", "speech"):
+            h["at"] = round(r.get("start", 0), 1)
+        if r.get("text"):
+            h["text"] = r["text"]
+        hits.append(h)
+    out = {"results": hits, "indexed_files": (data.get("status") or {}).get("files")}
+    if not hits:
+        out["note"] = "Nothing indexed yet. Takes indexes the library in the background once the model is downloaded."
+    return out
+
+
 def t_add_broll(a):
     s = resolve_session(a["session"])
     dst = os.path.join(s, "broll")
@@ -4091,7 +4693,7 @@ def t_get_comment_context(a):
                      reason=s["decision"].get("reason"), note=s["decision"].get("note"))
                 for s in decided if s["decision"].get("kind") in ("wrong_post", "bad_comment")][-10:]
     feedback = [{"draft": d.get("text"), "variants": d.get("variants"), "feedback": d.get("feedback"),
-                 "about_variant": d.get("feedback_variant")}
+                 "about_variant": d.get("feedback_variant"), "his_edit": d.get("edit")}
                 for s in sugg for d in s.get("drafts", []) if d.get("feedback")][-10:]
     best = [dict(post_brief(s), comment=s.get("final"), impressions=(s.get("stats") or [{}])[-1].get("impressions"))
             for s in sugg if s.get("best")][-10:]
@@ -4286,7 +4888,8 @@ TOOLS = [
                    "shape (story, question, counterpoint, tip) and length. He picks one."}},
      ["post_url", "author", "post_text", "angle", "variants"], t_add_comment_suggestion),
     ("redraft_comment", "Save a new draft for a suggestion the user gave feedback on (get_comment_context lists "
-     "them under waiting_for_redraft, each draft with its variants and feedback note). Three new variants that "
+     "them under waiting_for_redraft, each draft with its variants and feedback note, and his own edit if he "
+     "typed one: keep that edit as variant 1, changed only as the note asks). Three new variants that "
      "follow the note; same slop gate as add_comment_suggestion.",
      {"id": S, "variants": {"type": "array", "items": {"type": "string"}, "minItems": 3, "maxItems": 3,
                    "description": "Three different comments, plain text as the user would type them. Each a different "
@@ -4494,6 +5097,61 @@ TOOLS = [
       "model": {"type": "string", "enum": list(IMAGE_MODELS), "description": "Default flare, or sunburst with images."},
       "name": {"type": "string", "description": "Short file name. Default: the prompt's first words."}},
      ["session", "prompt"], t_make_image),
+    ("voices", "ElevenLabs voices: the account's own voices (the user's clone, designed and saved voices), the "
+     "default voice, the plan and characters left. search=<words> searches the ElevenLabs voice library "
+     "(with gender, accent, language, age, use_case); add=<add id from search> with name saves one to the "
+     "account; set_default=<voice> makes a voice the default. Not set up: tell him to open Settings › Voices.",
+     {"search": S, "gender": S, "accent": S, "language": S, "age": S, "use_case": S,
+      "add": {"type": "string", "description": "'<public_owner_id>/<voice_id>' from a search result."},
+      "name": {"type": "string", "description": "With add: the name the voice gets in the account."},
+      "set_default": {"type": "string", "description": "A voice name or id to make the default."}},
+     [], t_voices),
+    ("design_voice", "Design a new ElevenLabs voice from a description ('warm German woman, 40s, calm, slow'): "
+     "writes three samples (generated/voice-<name>-1..3.mp3 with session, else _library/voices/) for the user "
+     "to hear on the Assets tab. Then save his pick: save=<the sample's save id> with name.",
+     {"session": SESSION, "description": {"type": "string", "description": "Age, gender, accent, tone, pace, use."},
+      "text": {"type": "string", "description": "Optional sample text, 100-1000 characters."},
+      "save": {"type": "string", "description": "A sample's save id: keep that voice."},
+      "name": {"type": "string", "description": "Name of the voice (save) or of the sample files."},
+      "set_default": {"type": "boolean", "description": "With save: make it the default voice."}},
+     [], t_design_voice),
+    ("voiceover", "Make a voice-over with ElevenLabs: reads text (default: the session's script.md) in a voice "
+     "(default: The user's default voice, usually his clone) and writes generated/<name>-vN.wav (48 kHz mono, "
+     "-14 LUFS), shown on the Assets tab with the voice's name. Write the text as spoken words only. Costs "
+     "ElevenLabs characters (about one per letter): one voice-over per ask.",
+     {"session": SESSION, "text": {"type": "string", "description": "The words to say. Leave out for script.md."},
+      "voice": {"type": "string", "description": "A voice name or id from the ElevenLabs account (voices). Leave out for the default voice (the user picks it in Settings › Voices)."}, "name": {"type": "string", "description": "Short file name. Default voiceover-<voice>."},
+      "model": {"type": "string", "description": "ElevenLabs model id. Default eleven_multilingual_v2; eleven_v3 is more expressive."},
+      "stability": {"type": "number", "description": "0-1. Lower = more emotion, higher = steadier."},
+      "similarity": {"type": "number", "description": "0-1. How close to the original voice."},
+      "style": {"type": "number", "description": "0-1. Style exaggeration."},
+      "speed": {"type": "number", "description": "0.7-1.2. Default 1."}},
+     ["session"], t_voiceover),
+    ("fix_words", "Correct what was said in a take or clip: ElevenLabs says the new words in the voice "
+     "(default: The user's default voice, his clone) with the sentences around them for the same tone, and "
+     "Takes cuts them in at the word edges with the take's cleaned voice when there is one. old = the words "
+     "as said (from the transcript; Takes transcribes the file first when it has no <stem>.words.json), or "
+     "start/end in seconds. Writes generated/<file>-fix-vN.wav, plus an .mp4 with the video when the new "
+     "words fit the old time (speed 0.8-1.25x), so the take's times still hold. The lips do not move with "
+     "the new words: say so when the fix is on camera.",
+     {"session": SESSION, "take": {"type": "string", "description": "Take number."},
+      "file": {"type": "string", "description": "Or a session file (an edit, an audio file)."},
+      "old": {"type": "string", "description": "The words to replace, as said."},
+      "new": {"type": "string", "description": "The words to say instead."},
+      "near": {"type": "number", "description": "When old is said more than once: about where, in seconds."},
+      "start": {"type": "number"}, "end": {"type": "number"}, "voice": {"type": "string", "description": "A voice name or id from the ElevenLabs account (voices). Leave out for the default voice (the user picks it in Settings › Voices)."},
+      "model": {"type": "string"}, "stability": {"type": "number"}, "similarity": {"type": "number"},
+      "style": {"type": "number"}, "speed": {"type": "number"}},
+     ["session", "new"], t_fix_words),
+    ("change_voice", "Say a clip again in another voice with the ElevenLabs voice changer: same words, timing "
+     "and emotion. The user acts the line, a character voice comes out. Whole file or start/end (at most "
+     "5 minutes); writes generated/<file>-<voice>-vN.wav, and an .mp4 with the video for a video.",
+     {"session": SESSION, "take": {"type": "string", "description": "Take number."},
+      "file": {"type": "string", "description": "Or a session file."}, "voice": {"type": "string", "description": "A voice name or id from the ElevenLabs account (voices). Leave out for the default voice (the user picks it in Settings › Voices)."},
+      "start": {"type": "number"}, "end": {"type": "number"},
+      "remove_noise": {"type": "boolean", "description": "Remove background noise first."},
+      "model": {"type": "string", "description": "Default eleven_multilingual_sts_v2."}},
+     ["session"], t_change_voice),
     ("higgsfield", "Make or change a video with Higgsfield (Seedance, Kling, Veo and 30+ more video "
      "models) from inside Takes. Video only: images go to make_image. Returns at once; the job runs in the background and "
      "the file lands in <session>/generated/<name>-vN, where the Assets tab shows it. With shot=<id> the "
@@ -4658,6 +5316,16 @@ TOOLS = [
      {"query": {"type": "string", "description": "Words that must all be in the title, description or keywords."},
       "folder": {"type": "string", "description": "e.g. Desk work, Hands close-up, Reactions, Lifestyle, Outdoor."},
       "orientation": {"type": "string", "enum": ["vertical", "horizontal"]}}, [], t_list_broll),
+    ("search_media", "Find footage by meaning across the whole library, on this Mac: clips by what they "
+     "show ('hands typing', 'walking outside at night', 'close-up of a phone'), stills and thumbnails, and "
+     "the words said in transcripts and scripts ('where I talk about pricing'). Each hit has path, kind "
+     "(video, image, speech, script) and, for video and speech, 'at' (seconds into the file). Best hit "
+     "first. Use it to find b-roll for a storyboard shot or an edit before asking the user to film it, and "
+     "to find an old take or clip he describes. Same search as ⌘K in the app.",
+     {"query": {"type": "string", "description": "What to find, in plain words."},
+      "kinds": {"type": "array", "items": {"type": "string", "enum": ["video", "image", "speech", "script"]},
+                "description": "Only these kinds. Omit for all."},
+      "limit": {"type": "integer", "description": "Default 12."}}, ["query"], t_search_media),
     ("add_broll", "Put b-roll clips into a session's broll/ folder (an APFS clone: no extra disk space), so "
      "they show on its Assets tab next to the takes. Use the file from list_broll.",
      {"session": SESSION, "files": {"type": "array", "items": {"type": "string"},
@@ -4840,6 +5508,16 @@ if __name__ == "__main__":
         sketch_run(sys.argv[2])
     elif sys.argv[1:2] == ["--higgsfield-run"]:
         higgsfield_run(sys.argv[2], sys.argv[3])
+    elif sys.argv[1:2] == ["--eleven"]:  # the app's Settings › Voices: one tool, JSON in and out
+        try:
+            if sys.argv[2] == "save_key":
+                eleven_save_key(sys.stdin.read())
+                res = {"saved": True}
+            else:
+                res = {"voices": t_voices, "design_voice": t_design_voice}[sys.argv[2]](json.loads(sys.argv[3] if len(sys.argv) > 3 else "{}"))
+        except (ValueError, KeyError) as e:
+            res = {"error": str(e)}
+        print(json.dumps(res))
     elif sys.argv[1:2] == ["--voice-mix"]:
         voice_mix(*sys.argv[2:4])
     else:

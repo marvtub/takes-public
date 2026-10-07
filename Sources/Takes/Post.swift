@@ -254,18 +254,37 @@ enum PostFile {
     private static var portraitCache: [String: Bool] = [:]
     private static let portraitLock = NSLock()
 
-    /// Reads the video track's size once per file and version (path + modified date).
+    /// Reads the video track's size once per file and version (path + modified date). The read
+    /// runs outside the lock, so the main thread never waits for a read on another thread.
     static func isPortrait(_ url: URL) -> Bool {
         let key = url.path + "|" + String(Store.modified(url)?.timeIntervalSince1970 ?? 0)
-        portraitLock.lock(); defer { portraitLock.unlock() }
-        if let hit = portraitCache[key] { return hit }
+        portraitLock.lock()
+        let hit = portraitCache[key]
+        portraitLock.unlock()
+        if let hit { return hit }
         var portrait = false
         if let track = AVURLAsset(url: url).tracks(withMediaType: .video).first {
             let r = CGRect(origin: .zero, size: track.naturalSize).applying(track.preferredTransform)
             portrait = abs(r.height) > abs(r.width)
         }
+        portraitLock.lock()
         portraitCache[key] = portrait
+        portraitLock.unlock()
         return portrait
+    }
+
+    /// Reads the shape of every edit in the library in the background after launch. The first read
+    /// on the main thread cost 60–130 ms when a session's Post or Assets tab opened (2026-10-06).
+    static func warmPortraits(_ root: URL) {
+        Task.detached(priority: .utility) {
+            let fm = FileManager.default
+            let kids = { (u: URL) in (try? fm.contentsOfDirectory(at: u, includingPropertiesForKeys: nil, options: .skipsHiddenFiles)) ?? [] }
+            for project in kids(root) {
+                for session in kids(project) {
+                    for f in kids(session.appending(path: "edits")) where Asset.kind(of: f) == .video { _ = isPortrait(f) }
+                }
+            }
+        }
     }
 
     /// Picks the video or image the post shows (`rel` inside the session). nil goes back to the
@@ -939,16 +958,12 @@ struct PlatformPostPane: View {
                 .font(Theme.sans(12.5)).foregroundStyle(Theme.muted).multilineTextAlignment(.center)
                 .frame(maxWidth: 300)
             HStack(spacing: 8) {
-                if platform == .article {
-                    Button("Draft it with Takes") {
-                        app.chats.chat(doc.url).send(
-                            "Draft the blog article for this video (set_post platform=article, with title, description and category). "
-                            + "Read two or three of my blog posts first for my voice. Use the blog's components where they help.",
-                            title: doc.meta.title, onStage: nil)
-                        app.chats.open = true
-                    }
-                    .buttonStyle(AccentButtonStyle(kind: .accent))
+                // Takes drafts first: Jeremy read the empty post as "write it yourself" (2026-10-06).
+                Button("Draft it with Takes") {
+                    app.chats.chat(doc.url).send(draftAsk, title: doc.meta.title, onStage: nil)
+                    app.chats.open = true
                 }
+                .buttonStyle(AccentButtonStyle(kind: .accent))
                 Button("Write one yourself") {
                     post.create(in: doc.url)
                     expanded = true
@@ -972,11 +987,23 @@ struct PlatformPostPane: View {
 
     private var emptyHint: String {
         switch platform {
-        case .x: "Ask Takes to write one: it calls set_post with platform x (one post or a thread), and it shows here as on X."
-        case .youtube: "For the long wide video: a title and a description. Ask Takes (set_post with platform youtube), or write it here."
-        case .vertical: "One caption for TikTok, Instagram Reels and YouTube Shorts, with the vertical edit. Ask Takes (set_post with platform vertical), or write it here."
-        case .linkedin: "Ask Takes to write one: it calls set_post, and the post shows here with the video."
-        case .article: "A post for your blog, shown as your blog shows it. Write it here in markdown with the blog's components, or ask Takes (set_post with platform article). Later it goes out as a LinkedIn and an X article."
+        case .x: "Takes writes the post (one post or a thread) from your video, and it shows here as on X."
+        case .youtube: "For the long wide video: Takes writes a title and a description from your video."
+        case .vertical: "One caption for TikTok, Instagram Reels and YouTube Shorts, with the vertical edit. Takes writes it from your video."
+        case .linkedin: "Takes writes the post from your video, and it shows here as on LinkedIn."
+        case .article: "A post for your blog, shown as your blog shows it, in markdown with the blog's components. Later it goes out as a LinkedIn and an X article."
+        }
+    }
+
+    /// What "Draft it with Takes" asks the chat.
+    private var draftAsk: String {
+        switch platform {
+        case .linkedin: "Draft the LinkedIn post for this video (set_post). Use the script and the takes for what I say."
+        case .x: "Draft the X post for this video (set_post platform=x): one post, or a short thread if it needs one."
+        case .youtube: "Draft the YouTube title and description for this video (set_post platform=youtube)."
+        case .vertical: "Draft the caption for the vertical video (set_post platform=vertical), for TikTok, Reels and Shorts."
+        case .article: "Draft the blog article for this video (set_post platform=article, with title, description and category). "
+            + "Read two or three of my blog posts first for my voice. Use the blog's components where they help."
         }
     }
 

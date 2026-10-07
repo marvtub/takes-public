@@ -130,7 +130,7 @@ final class SessionDoc {
     var script: String {
         didSet {
             if script != oldValue && !loadingFromDisk {
-                lastEdit = Date(); dirtyDrafts.insert("main"); scheduleScriptSave()
+                lastEdit = Date(); dirtyDrafts.insert("main"); scriptUnsaved = true; scheduleScriptSave()
             }
         }
     }
@@ -148,6 +148,11 @@ final class SessionDoc {
     @ObservationIgnored var historyStamp: Date?
     @ObservationIgnored private var saveTask: Task<Void, Never>?
     @ObservationIgnored var lastEdit = Date.distantPast
+    /// The script was edited here and not written yet. Closing the session writes it only then:
+    /// a write on every switch made an empty script.md in sessions without one, and could put
+    /// back an older script over an edit from the chat or an editor (2026-10-06).
+    @ObservationIgnored var scriptUnsaved = false
+    @ObservationIgnored var variantUnsaved: Set<String> = []
     @ObservationIgnored private var metaStamp: Date?
     @ObservationIgnored private var scriptStamp: Date?
     @ObservationIgnored private var loadingFromDisk = false
@@ -197,7 +202,13 @@ final class SessionDoc {
     func flushScript() {
         saveTask?.cancel()
         try? script.write(to: url.appending(path: "script.md"), atomically: true, encoding: .utf8)
+        scriptUnsaved = false
         scriptStamp = Store.modified(url.appending(path: "script.md"))
+    }
+
+    /// Writes the script only if it was edited here since the last write; drops a pending save either way.
+    func flushScriptIfEdited() {
+        if scriptUnsaved { flushScript() } else { saveTask?.cancel() }
     }
 
     /// Pick up edits made outside the app (Claude via MCP, or an editor). Returns false if the folder is gone.
@@ -413,6 +424,8 @@ final class Library {
     }
     private(set) var current: SessionDoc?
     @ObservationIgnored var onOpen: ((SessionDoc) -> Void)?
+    /// A new, empty session (after onOpen).
+    @ObservationIgnored var onCreate: ((SessionDoc) -> Void)?
     @ObservationIgnored var isRecording = false
 
     init() {
@@ -598,6 +611,7 @@ final class Library {
         current = doc
         selectedSessions = [url]
         onOpen?(doc)
+        onCreate?(doc)
         return doc
     }
 
@@ -687,8 +701,8 @@ final class Library {
         if selectedProject == url { selectedProject = projects.first?.url }
     }
 
-    func reveal(_ url: URL) { NSWorkspace.shared.activateFileViewerSelecting([url]) }
-    func reveal(_ urls: Set<URL>) { NSWorkspace.shared.activateFileViewerSelecting(Array(urls)) }
+    func reveal(_ url: URL) { NSWorkspace.shared.revealSoon([url]) }
+    func reveal(_ urls: Set<URL>) { NSWorkspace.shared.revealSoon(Array(urls)) }
 
     static func slug(_ s: String) -> String {
         let folded = s.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current).lowercased()
@@ -702,5 +716,23 @@ extension Array where Element == (number: Int, takes: [Take]) {
     func reorderedBy(_ order: [Int]?) -> Self {
         guard let order else { return self }
         return Store.arrange(self, saved: order.map(String.init), name: { String($0.number) }, newFirst: true)
+    }
+}
+
+/// Opening a link or a file in another app can take seconds while Launch Services and the other
+/// app wake up. The plain NSWorkspace calls wait for that on the main thread, and Takes froze for
+/// 1.5–4 s on "Open post" (2026-10-06). These return at once.
+extension NSApplication {
+    /// The click that ends now is the first of its run, not the second click of a double-click.
+    var firstClick: Bool { (currentEvent?.clickCount ?? 1) <= 1 }
+}
+
+extension NSWorkspace {
+    func openSoon(_ url: URL) {
+        open(url, configuration: NSWorkspace.OpenConfiguration()) { _, _ in }
+    }
+
+    func revealSoon(_ urls: [URL]) {
+        DispatchQueue.global(qos: .userInitiated).async { NSWorkspace.shared.activateFileViewerSelecting(urls) }
     }
 }

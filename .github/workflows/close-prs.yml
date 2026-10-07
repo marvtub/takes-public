@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - run: |
-          gh pr close "$PR" --repo "$REPO" --comment "Thanks for the interest. Takes is shared as is and does not take pull requests. Fork it and make it yours."
+          gh pr close "$PR" --repo "$REPO" --comment "Thanks for the interest. Takes does not take pull requests, so one person keeps it consistent. Ideas are welcome in Discussions, or fork it and make it yours."
         env:
           GH_TOKEN: ${{ github.token }}
           PR: ${{ github.event.pull_request.number }}

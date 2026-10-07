@@ -215,6 +215,19 @@ struct ChatRefTests {
         #expect(p == [.text("Look"), .file(files[0]), .file(files[1])])
     }
 
+    /// Muse's chat keeps its own files: a dropped Finder file reaches it through the closure.
+    @MainActor @Test func aDroppedFileReachesAnyChat() async throws {
+        let file = FileManager.default.temporaryDirectory.appending(path: "drop-\(UUID().uuidString).txt")
+        try "hi".write(to: file, atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(at: file) }
+        var got: [URL] = []
+        #expect(ChatAttach.take([NSItemProvider(contentsOf: file)!]) { got.append($0) })
+        #expect(!ChatAttach.take([NSItemProvider(object: "text" as NSString)]) { got.append($0) })
+        let end = Date().addingTimeInterval(3)
+        while got.isEmpty && Date() < end { try await Task.sleep(for: .milliseconds(20)) }
+        #expect(got.map(\.standardizedFileURL) == [file.standardizedFileURL])
+    }
+
     @Test func pastedImageIsSavedLossless() throws {
         let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 4, pixelsHigh: 4, bitsPerSample: 8,
                                    samplesPerPixel: 4, hasAlpha: true, isPlanar: false,

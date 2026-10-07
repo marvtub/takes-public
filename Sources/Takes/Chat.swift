@@ -392,8 +392,16 @@ final class ClaudeChat {
         if let saved = UserDefaults.standard.string(forKey: "claudeFolder"), fm.fileExists(atPath: saved) {
             return URL(fileURLWithPath: saved)
         }
-        let life = fm.homeDirectoryForCurrentUser.appending(path: "Documents/Takes Notes")
-        return fm.fileExists(atPath: life.path) ? life : fm.homeDirectoryForCurrentUser
+        if Plugins.own {
+            let life = fm.homeDirectoryForCurrentUser.appending(path: "Documents/Takes Notes")
+            if fm.fileExists(atPath: life.path) { return life }
+        }
+        // The library, never the home folder: Claude looks through its folder, and in the home
+        // folder macOS then asks for Downloads, Photos and Music (Jeremy's first launch, 2026-10-06).
+        let root = UserDefaults.standard.string(forKey: "root").map { URL(fileURLWithPath: $0) }
+            ?? fm.homeDirectoryForCurrentUser.appending(path: "Movies/Takes")
+        try? fm.createDirectory(at: root, withIntermediateDirectories: true)
+        return root
     }
 
     /// Every chat runs in the user's own Chrome next to the others (scouts, the poster, stats
@@ -1083,11 +1091,12 @@ final class ClaudeChat {
 @Observable
 final class ChatHub {
     /// Open or shut, as at the last quit.
-    var open = UserDefaults.standard.bool(forKey: "chatOpen") {
+    /// Open and in the half screen on the first launch.
+    var open = UserDefaults.standard.object(forKey: "chatOpen") as? Bool ?? true {
         didSet { UserDefaults.standard.set(open, forKey: "chatOpen") }
     }
     /// Half screen: the chat takes the right side of the window instead of floating.
-    var docked = UserDefaults.standard.bool(forKey: "chatDocked") {
+    var docked = UserDefaults.standard.object(forKey: "chatDocked") as? Bool ?? true {
         didSet { UserDefaults.standard.set(docked, forKey: "chatDocked") }
     }
     private var chats: [URL: ClaudeChat] = [:]
@@ -1134,9 +1143,12 @@ struct ChatCorner: View {
     @Environment(AppModel.self) var app
     var hub: ChatHub
     var doc: SessionDoc
+    /// Record: the docked chat does not show there, so the button opens
+    /// it on the Script tab.
+    var away = false
 
     var body: some View {
-        ChatCornerBody(hub: hub, target: ChatTarget(hub: hub, doc: doc))
+        ChatCornerBody(hub: hub, target: ChatTarget(hub: hub, doc: doc), away: away && hub.docked)
             .id(doc.url)
     }
 }
@@ -1246,11 +1258,15 @@ private struct ChatCornerBody: View {
     var hub: ChatHub
     var chat: ClaudeChat
     let target: ChatTarget
+    var away = false
     @State private var hover = false
 
-    init(hub: ChatHub, target: ChatTarget) {
-        self.hub = hub; self.chat = target.chat; self.target = target
+    init(hub: ChatHub, target: ChatTarget, away: Bool = false) {
+        self.hub = hub; self.chat = target.chat; self.target = target; self.away = away
     }
+
+    /// The chat shows here, open.
+    private var open: Bool { hub.open && !away }
     @State private var openComments = 0
 
     var body: some View {
@@ -1261,12 +1277,12 @@ private struct ChatCornerBody: View {
                     .transition(.scale(scale: 0.92, anchor: .bottomTrailing).combined(with: .opacity))
             }
             HStack(spacing: 10) {
-                if openComments > 0 && !chat.running && !hub.open { handOff }
+                if openComments > 0 && !chat.running && !open { handOff }
                 button
             }
         }
-        .opacity(hub.open && hub.docked ? 0 : 1)
-        .allowsHitTesting(!(hub.open && hub.docked))
+        .opacity(open && hub.docked ? 0 : 1)
+        .allowsHitTesting(!(open && hub.docked))
         .animation(Theme.spring, value: hub.open)
         .animation(Theme.spring, value: hub.docked)
         .animation(Theme.spring, value: hover)
@@ -1301,10 +1317,12 @@ private struct ChatCornerBody: View {
     }
 
     private var button: some View {
-        Button { hub.open.toggle() } label: {
+        Button {
+            if away { SessionMode.set(.write); hub.open = true } else { hub.open.toggle() }
+        } label: {
             ZStack {
-                Rectangle().fill(hub.open ? Theme.ink : Theme.accent)
-                if hub.open {
+                Rectangle().fill(open ? Theme.ink : Theme.accent)
+                if open {
                     Image(systemName: "xmark").font(.system(size: 13, weight: .semibold))
                         .foregroundStyle(Theme.paper)
                         .transition(.scale.combined(with: .opacity))
@@ -1320,7 +1338,7 @@ private struct ChatCornerBody: View {
             // thin blue ring around the white (2026-10-03).
             .clipShape(Circle())
             .overlay(alignment: .topTrailing) {
-                if chat.unread && !hub.open {
+                if chat.unread && !open {
                     Circle().fill(Theme.accent).frame(width: 11, height: 11)
                         .overlay(Circle().strokeBorder(Theme.paper, lineWidth: 2))
                         .offset(x: 1, y: -1)
@@ -1333,7 +1351,7 @@ private struct ChatCornerBody: View {
         }
         .buttonStyle(.plain)
         .onHover { hover = $0 }
-        .help(hub.open ? "Close the chat (⇧⌘L)" : "Talk to Takes about this session (⇧⌘L)")
+        .help(away ? "Talk to Takes on the Script tab" : open ? "Close the chat (⇧⌘L)" : "Talk to Takes about this session (⇧⌘L)")
     }
 }
 
@@ -1354,9 +1372,8 @@ private struct ChatPanel: View {
     /// Hides the tools 2.5 s after the pointer leaves them, unless it comes back first.
     @State private var hideTools: Task<Void, Never>?
     @State private var showHistory = false
+    @State private var showMeter = false
     @AppStorage("claudeAccess") private var access = "bypassPermissions"
-    @AppStorage("scriptBeside") private var scriptBeside = false
-    @AppStorage("rightTab") private var rightTab = "script"
     @State private var dropping = false
 
     var body: some View {
@@ -1375,7 +1392,8 @@ private struct ChatPanel: View {
         .overlay(RoundedRectangle(cornerRadius: 16).strokeBorder(Theme.border, lineWidth: 0.5).opacity(docked ? 0 : 1))
         .overlay { if dropping { DropHint() } }
         .onDrop(of: ChatAttach.types, isTargeted: $dropping) { ChatAttach.take($0, into: chat) }
-        .shadow(color: .black.opacity(docked ? 0 : 0.16), radius: 28, y: 14)
+        // Docked, the panel has no shadow at all (a clear one still costs a full trace).
+        .background { if !docked { Color.clear.cardShadow(RoundedRectangle(cornerRadius: 16), fill: Theme.raised, color: .black.opacity(0.16), radius: 28, y: 14) } }
         .onAppear { countComments() }
         .onReceive(NotificationCenter.default.publisher(for: .takesFilesChanged)) { n in
             if let session = target.session, FileWatch.touches(n, session) { countComments() }
@@ -1422,7 +1440,7 @@ private struct ChatPanel: View {
                     }
                     Divider()
                     Button("Runs in \(ClaudeChat.folder.lastPathComponent)") {
-                        NSWorkspace.shared.open(ClaudeChat.folder)
+                        NSWorkspace.shared.openSoon(ClaudeChat.folder)
                     }
                 } label: {
                     Image(systemName: "slider.horizontal.3").font(.system(size: 12.5, weight: .medium)).frame(width: 26, height: 26)
@@ -1431,19 +1449,6 @@ private struct ChatPanel: View {
                 .help("Conversations and access")
                 .popover(isPresented: $showHistory, arrowEdge: .bottom) {
                     ChatHistory(chat: chat) { showHistory = false }
-                }
-                if target.session != nil {
-                    // Script on the left, chat on the right: for working on the script, not recording.
-                    let on = docked && scriptBeside && rightTab == "script"
-                    Button {
-                        if on { scriptBeside = false } else { scriptBeside = true; rightTab = "script"; hub.docked = true }
-                    } label: {
-                        Image(systemName: "doc.text").font(.system(size: 13, weight: on ? .bold : .medium))
-                            .foregroundStyle(on ? Theme.accent : Theme.ink)
-                            .frame(width: 26, height: 26)
-                    }
-                    .buttonStyle(IconButtonStyle())
-                    .help(on ? "Show the camera again" : "Script beside the chat: each takes half the screen")
                 }
                 Button { hub.docked.toggle() } label: {
                     Image(systemName: docked ? "rectangle.inset.bottomright.filled" : "rectangle.righthalf.inset.filled")
@@ -1496,12 +1501,13 @@ private struct ChatPanel: View {
         }
     }
 
-    /// How full Claude's context is. A click compacts it (after the run, when Claude works).
+    /// How full Claude's context is. A click opens the details with a Compact button: a click that
+    /// compacted at once looked like Takes started work by itself (Jeremy, 2026-10-06).
     private func meter(_ c: ChatContext?) -> some View {
         let f = c?.fraction ?? 0
         let tint = f >= 0.7 ? Theme.accentInk : Theme.muted
         let size = c.map { "\(ChatContext.short($0.used)) of \(ChatContext.short($0.window)) tokens" }
-        return Button { send("/compact") } label: {
+        return Button { showMeter.toggle() } label: {
             HStack(spacing: 5) {
                 ZStack {
                     Circle().stroke(Theme.border, lineWidth: 2)
@@ -1521,10 +1527,33 @@ private struct ChatPanel: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(IconButtonStyle())
-        .help(chat.compacting ? "Compacting the conversation"
-              : size.map { "Context \(Int((f * 100).rounded()))% full: \($0). Click to compact it\(chat.running ? " when Takes is done" : "")." }
-              ?? "The context size shows after the next reply. Click to compact the conversation.")
+        .help(chat.compacting ? "Compacting the conversation" : "How much of this conversation Takes keeps in mind")
         .disabled(chat.compacting)
+        .popover(isPresented: $showMeter, arrowEdge: .bottom) {
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Conversation memory").font(Theme.sans(13, .semibold))
+                GeometryReader { g in
+                    ZStack(alignment: .leading) {
+                        Capsule().fill(Theme.border)
+                        Capsule().fill(tint).frame(width: g.size.width * min(f, 1))
+                    }
+                }
+                .frame(height: 5)
+                Text(size.map { "\(Int((f * 100).rounded()))% full: \($0)." } ?? "The size shows after the next reply.")
+                    .font(Theme.sans(12, .medium)).monospacedDigit()
+                Text("This is the conversation itself, not work that runs. When it is full, Takes compacts it: it keeps a short summary and drops the details. Compact earlier to start a new topic with a clean slate.")
+                    .font(Theme.sans(12)).foregroundStyle(Theme.muted)
+                    .fixedSize(horizontal: false, vertical: true)
+                Button(chat.running ? "Compact when Takes is done" : "Compact now") {
+                    showMeter = false
+                    send("/compact")
+                }
+                .buttonStyle(AccentButtonStyle(kind: .quiet))
+                .disabled(!chat.hasMessages)
+            }
+            .padding(14)
+            .frame(width: 260)
+        }
     }
 
     /// A plain VStack, not a LazyVStack. On 2026-10-01 Takes froze at 100% CPU as a reply with a
@@ -1631,7 +1660,9 @@ private struct ChatComposer: View {
 
     var body: some View {
         let _ = Perf.body("ChatComposer")
-        composer
+        // The copy out of sight draws an empty box: the draft is shared, so its own box redrew on
+        // every key typed in the copy you see (two composers per key; 2026-10-06 audit).
+        Group { if live { composer } else { Color.clear.frame(height: 56) } }
             // On the next turn: while the panel animates in, the box is not in the window yet and
             // AppKit gave focus to the first field it found, the session title (2026-10-02).
             // The copy out of sight never takes the keys; it takes them, as a new panel did, when it shows.
@@ -1902,6 +1933,10 @@ struct CommandToken: View {
 struct ChatRows: View {
     var chat: ClaudeChat
     static let page = 40
+    /// Items in the first frame. The rest of the page follows a moment later, above the fold,
+    /// while the chat still sits at the bottom (2026-10-06: a switch drew 40 items, ~100 ms, before
+    /// anything showed). Loading on scroll-up instead made the view jump: SwiftUI keeps the top.
+    static let first = 12
     @Environment(\.chatLive) private var live
     /// What the chat showed when it went out of sight. While set, the body does not read
     /// `chat.messages`, so a streamed word does not redraw this copy (2026-10-04).
@@ -1922,7 +1957,7 @@ struct ChatTranscript: View {
     let messages: [ChatMessage]
     let running: Bool
     var mood: LiveMascot.Mood = .thinking
-    @State private var limit = ChatRows.page
+    @State private var limit = ChatRows.first
 
     var body: some View {
         let all = ChatItem.group(messages)
@@ -1953,6 +1988,11 @@ struct ChatTranscript: View {
             }
         }
         .animation(Theme.motion, value: messages.count)
+        .task {
+            guard limit < ChatRows.page else { return }
+            try? await Task.sleep(for: .milliseconds(60))
+            limit = max(limit, ChatRows.page)
+        }
     }
 }
 

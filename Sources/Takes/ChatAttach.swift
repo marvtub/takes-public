@@ -24,17 +24,22 @@ enum ChatAttach {
 
     /// Adds the dropped items to the chat's files. False when none of them is a file or an image.
     @MainActor static func take(_ providers: [NSItemProvider], into chat: ClaudeChat) -> Bool {
+        take(providers) { add($0, to: chat) }
+    }
+
+    /// The same for any chat that keeps its own files, like Muse's (2026-10-06).
+    @MainActor static func take(_ providers: [NSItemProvider], add: @escaping @MainActor (URL) -> Void) -> Bool {
         let usable = providers.filter { p in types.contains { p.hasItemConformingToTypeIdentifier($0.identifier) } }
         for p in usable {
             if p.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) {
                 _ = p.loadObject(ofClass: URL.self) { url, _ in
                     guard let url, url.isFileURL else { return }
-                    Task { @MainActor in add(url, to: chat) }
+                    Task { @MainActor in add(url) }
                 }
             } else {
                 p.loadDataRepresentation(forTypeIdentifier: UTType.image.identifier) { data, _ in
                     guard let data, let url = save(data) else { return }
-                    Task { @MainActor in add(url, to: chat) }
+                    Task { @MainActor in add(url) }
                 }
             }
         }
@@ -44,17 +49,21 @@ enum ChatAttach {
     /// ⌘V: files or an image on the clipboard become files of the chat. False when the clipboard
     /// has text, so the box pastes it as usual. Reads the clipboard; never writes it.
     @MainActor static func paste(into chat: ClaudeChat) -> Bool {
+        paste { add($0, to: chat) }
+    }
+
+    @MainActor static func paste(add: @escaping @MainActor (URL) -> Void) -> Bool {
         let pb = NSPasteboard.general
         let urls = (pb.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL]) ?? []
         if !urls.isEmpty {
-            urls.forEach { add($0, to: chat) }
+            urls.forEach { add($0) }
             return true
         }
         guard pb.string(forType: .string) == nil,
               let image = NSImage(pasteboard: pb), let tiff = image.tiffRepresentation else { return false }
         Task.detached {
             guard let url = save(tiff) else { return }
-            await MainActor.run { add(url, to: chat) }
+            await MainActor.run { add(url) }
         }
         return true
     }
@@ -104,13 +113,17 @@ enum ChatAttach {
 /// The files waiting to go with the next message, above the box: a small frame for an image,
 /// an icon and the name for anything else. × takes one out.
 struct AttachedFiles: View {
-    var chat: ClaudeChat
+    let files: [URL]
+    let remove: (URL) -> Void
+
+    init(files: [URL], remove: @escaping (URL) -> Void) { self.files = files; self.remove = remove }
+    init(chat: ClaudeChat) { self.init(files: chat.attachments) { url in chat.attachments.removeAll { $0 == url } } }
 
     var body: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 6) {
-                ForEach(chat.attachments, id: \.self) { url in
-                    AttachedFile(url: url) { chat.attachments.removeAll { $0 == url } }
+                ForEach(files, id: \.self) { url in
+                    AttachedFile(url: url) { remove(url) }
                 }
             }
             .padding(.top, 6).padding(.trailing, 6)

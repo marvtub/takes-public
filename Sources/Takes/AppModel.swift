@@ -216,7 +216,7 @@ final class AppModel {
         }
         // Tests leave the app's logs alone: their perf lines and stall samples went into
         // ~/Library/Logs/Takes beside the app's and read as the app's own (2026-10-04).
-        if !Self.testing { HangWatch.start(); Perf.start() }
+        if !Self.testing { HangWatch.start(); Perf.start(); PostFile.warmPortraits(library.root) }
         copilot.askChat = { [chats] text in chats.comments.send(text, title: "Comments", onStage: nil) }
         library.onOpen = { [weak self] doc in
             guard let self else { return }
@@ -226,6 +226,13 @@ final class AppModel {
             self.wire(doc)
             self.showView(of: doc)
             self.loadSong(doc)
+        }
+        // A new session opens with the chat in the half screen beside the recorder: on his first
+        // launch Jeremy did not find the chat (2026-10-06).
+        library.onCreate = { [weak self] _ in
+            guard let self, !self.isRecording else { return }
+            self.chats.docked = true
+            self.chats.open = true
         }
         if let doc = library.current { _ = chats.chat(doc.url); wire(doc); loadSong(doc); shown = doc.url }
         screen.refreshDisplays()
@@ -368,21 +375,24 @@ final class AppModel {
 
     /// A file a notice or a link asked for, waiting for its session to open.
     @ObservationIgnored private var opening: URL?
+    /// Where that file starts playing (a ⌘K search hit).
+    @ObservationIgnored private var openingTime: Double?
 
     /// A file of the session on screen, on the tab that shows it, with the session's chat open
-    /// beside it: a script on Record, a storyboard on Storyboard, anything else plays on the
+    /// beside it: a script on Script, a storyboard on Storyboard, anything else plays on the
     /// stage with the Assets list.
     private func present(_ f: URL) {
         opening = nil
+        defer { openingTime = nil }
         let parts = f.pathComponents
         if parts.contains("storyboard") {
             SessionMode.set(.storyboard)
         } else if f.lastPathComponent == "script.md" || parts.contains("variants") {
             preview = nil
-            SessionMode.set(.record)
+            SessionMode.set(.write)
         } else {
             SessionMode.set(.assets)
-            pendingSeek = nil
+            pendingSeek = Asset.kind(of: f) == .video ? openingTime : nil
             preview = f
         }
         chats.open = true
@@ -593,6 +603,12 @@ final class AppModel {
 
     /// A time to seek to when the next video opens (a reply's "v4 @ 0:15" link).
     var pendingSeek: Double?
+
+    /// Opens a file of any session, at a time for a video (a ⌘K search hit).
+    func open(_ url: URL, at time: Double?) {
+        openingTime = time
+        follow(url)
+    }
 
     /// Opens a file in the stage, at a time for a video.
     func jump(to url: URL, at time: Double?) {

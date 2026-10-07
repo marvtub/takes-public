@@ -98,15 +98,20 @@ final class Updater {
     /// What quitting now would cut off, if anything.
     private func busy(recording: () -> Bool) -> String? {
         if recording() { return "the recording" }
-        // Claude replies, exports and voice cleanup run as child processes; idle Takes has none.
+        // Claude replies, exports and voice cleanup run as child processes. The ⌘K search helper
+        // runs all the time and only holds an index it saves as it goes, so it does not count.
         let p = Process()
+        let out = Pipe()
         p.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
         p.arguments = ["-P", "\(getpid())"]
-        p.standardOutput = FileHandle.nullDevice
+        p.standardOutput = out
         p.standardError = FileHandle.nullDevice
         guard (try? p.run()) != nil else { return nil }
+        let data = out.fileHandleForReading.readDataToEndOfFile()
         p.waitUntilExit()
-        return p.terminationStatus == 0 ? "a chat reply or an export" : nil
+        let helper = MediaSearch.shared.helperPID
+        let kids = String(decoding: data, as: UTF8.self).split(whereSeparator: \.isNewline).compactMap { Int32($0) }
+        return kids.contains { $0 != helper } ? "a chat reply or an export" : nil
     }
 
     /// Waits until nothing records or runs, then a small shell swaps the bundles after this
@@ -120,6 +125,7 @@ final class Updater {
                 try? await Task.sleep(for: .seconds(2))
             }
             waitingFor = nil
+            MediaSearch.shared.stopHelper()   // it saves its index and quits
             let old = waiting.deletingLastPathComponent().appendingPathComponent("previous.app")
             let script = """
             while kill -0 \(getpid()) 2>/dev/null; do sleep 0.2; done

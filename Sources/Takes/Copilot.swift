@@ -40,9 +40,12 @@ struct CommentDraft: Decodable, Hashable {
     var feedback: String?
     /// The variant he looked at when he wrote the note.
     var feedbackVariant: Int?
+    /// His own edit of that variant, typed before the note. The next draft keeps it
+    /// (2026-10-06: a redraft threw away an edit he liked better).
+    var edit: String?
 
     enum CodingKeys: String, CodingKey {
-        case text, variants, at, by, feedback
+        case text, variants, at, by, feedback, edit
         case feedbackVariant = "feedback_variant"
     }
 }
@@ -260,9 +263,13 @@ final class CopilotStore: ObservableObject {
     /// `variant`: the one he looked at when he wrote the note.
     /// A note waits in the Comments chat until the user sends it (2026-10-06: each note started
     /// the agent at once and broke his review flow). `send`: the phone still sends at once.
-    func feedback(_ s: Suggestion, note: String, variant: Int? = nil, send: Bool = false) {
+    /// `edit`: the text he typed in the comment box, if it differs from the variant.
+    func feedback(_ s: Suggestion, note: String, variant: Int? = nil, edit: String? = nil, send: Bool = false) {
         let n = note.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !n.isEmpty else { return }
+        let e = edit?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let base = s.options.indices.contains(variant ?? 0) ? s.options[variant ?? 0] : ""
+        let kept = e.flatMap { $0.isEmpty || $0 == base.trimmingCharacters(in: .whitespacesAndNewlines) ? nil : $0 }
         lastSkipped = nil
         update(s.id) { d in
             d["status"] = send ? "redraft" : "feedback"
@@ -274,11 +281,12 @@ final class CopilotStore: ObservableObject {
                 } else {
                     last["feedback_variant"] = nil
                 }
+                last["edit"] = kept
                 drafts.append(last)
             }
             d["drafts"] = drafts
         }
-        if send { askChat?(CopilotAsk.redraft(s, note: n, variant: variant)) }
+        if send { askChat?(CopilotAsk.redraft(s, note: n, variant: variant, edit: kept)) }
     }
 
     /// Send waiting notes to the chat in one message.
@@ -289,7 +297,8 @@ final class CopilotStore: ObservableObject {
         }
         guard !notes.isEmpty else { return }
         for (s, _, _) in notes { update(s.id) { $0["status"] = "redraft" } }
-        askChat?(notes.count == 1 ? CopilotAsk.redraft(notes[0].0, note: notes[0].1, variant: notes[0].2)
+        askChat?(notes.count == 1 ? CopilotAsk.redraft(notes[0].0, note: notes[0].1, variant: notes[0].2,
+                                                        edit: notes[0].0.drafts.last?.edit)
                                   : CopilotAsk.redraft(notes))
     }
 
@@ -301,6 +310,7 @@ final class CopilotStore: ObservableObject {
             if var last = drafts.popLast() {
                 last["feedback"] = nil
                 last["feedback_variant"] = nil
+                last["edit"] = nil
                 drafts.append(last)
             }
             d["drafts"] = drafts
@@ -489,7 +499,8 @@ final class CopilotRunner: ObservableObject {
     static let redraftPrompt = """
         The user gave feedback on LinkedIn comment drafts in his Takes app. Call get_comment_context. \
         For each item in waiting_for_redraft, read the newest draft's variants and feedback note and \
-        write 3 new variants that follow it, each a different shape, keeping to lessons.md and the \
+        write 3 new variants that follow it (if the draft has an edit, that is the user's own text: \
+        keep it as variant 1, changed only as the note asks), each a different shape, keeping to lessons.md and the \
         style guide it names. Save each with redraft_comment. Do not use the browser. End with one short line.
         """
 }
@@ -504,14 +515,20 @@ enum CopilotAsk {
         "Find up to \(count) LinkedIn posts worth a comment and draft one comment for each."
     }
 
-    static func redraft(_ s: Suggestion, note: String, variant: Int?) -> String {
-        "Feedback on the draft for \(about(s, variant)): \"\(note)\" Write a new draft that follows it and save it with redraft_comment."
+    static func redraft(_ s: Suggestion, note: String, variant: Int?, edit: String? = nil) -> String {
+        "Feedback on the draft for \(about(s, variant)): \"\(note)\"\(edited(edit)) Write a new draft that follows it and save it with redraft_comment."
+    }
+
+    /// His own edit goes with the note: the new draft starts from his words, not the old variant.
+    private static func edited(_ edit: String?) -> String {
+        guard let edit, !edit.isEmpty else { return "" }
+        return " I had edited that variant to: \"\(edit)\". Keep my edit as variant 1, changed only as the note asks."
     }
 
     /// Several notes sent at once from the chat's feedback pill.
     static func redraft(_ notes: [(Suggestion, String, Int?)]) -> String {
         "Feedback on \(notes.count) drafts. Write a new draft for each that follows its note and save it with redraft_comment:\n"
-            + notes.map { "- \(about($0.0, $0.2)): \"\($0.1)\"" }.joined(separator: "\n")
+            + notes.map { "- \(about($0.0, $0.2)): \"\($0.1)\"\(edited($0.0.drafts.last?.edit))" }.joined(separator: "\n")
     }
 
     private static func about(_ s: Suggestion, _ variant: Int?) -> String {
@@ -571,7 +588,8 @@ enum CopilotAsk {
         1. Call get_comment_context. Read lessons, rules, targets and examples (edited_by_user \
         shows what he changes: study it most). Read the style guide file it names.
         2. If waiting_for_redraft lists drafts, first write a new draft for each that follows its \
-        feedback note, and save it with redraft_comment.
+        feedback note, and save it with redraft_comment. A draft's edit is the user's own text: keep \
+        it as variant 1, changed only as the note asks.
         3. Start every scout in scouts at once: one Agent call each, all in one message, \
         subagent_type general-purpose, model sonnet, descriptions "Feed scout", "List scout", \
         "Search scout" and "Commenter scout". Each prompt is exactly its brief from scouts in the \

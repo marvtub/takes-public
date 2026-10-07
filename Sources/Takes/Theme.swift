@@ -154,7 +154,8 @@ struct BracketButtonStyle: ButtonStyle {
     }
 }
 
-/// The primary action (solid ink) or a quiet outlined button.
+/// The primary action (solid ink), an accent button (white type in light and dark, 2026-10-06)
+/// or a quiet outlined button.
 struct AccentButtonStyle: ButtonStyle {
     enum Kind { case solid, quiet, accent }
     var kind: Kind = .solid
@@ -165,7 +166,7 @@ struct AccentButtonStyle: ButtonStyle {
         configuration.label
             .font(Theme.sans(13, .semibold))
             .padding(.horizontal, 16).frame(minHeight: 32)
-            .foregroundStyle(kind == .quiet ? Theme.ink : Theme.paper)
+            .foregroundStyle(kind == .quiet ? Theme.ink : kind == .accent ? Color.white : Theme.paper)
             .background(Capsule().fill(fill))
             .overlay(Capsule().strokeBorder(kind == .quiet ? Theme.border : .clear))
             .shadow(color: kind != .quiet && hover ? (kind == .accent ? Theme.accent : Theme.ink).opacity(0.3) : .clear, radius: 10, y: 4)
@@ -248,6 +249,24 @@ struct Mascot: View {
                 .frame(width: size)
                 .shadow(color: Theme.shadow, radius: size * 0.12, y: size * 0.06)
                 .accessibilityHidden(true)
+        }
+    }
+}
+
+extension View {
+    /// A soft drop shadow traced from `shape` alone and drawn in one GPU pass. A plain .shadow on a
+    /// whole card traces every text run and video inside it, and the ⌘F snapshot draws that in
+    /// software: 790 ms for 16 Storyboard-like cards, against 40 ms this way (2026-10-06).
+    /// `fill` is the card's own colour; it sits under the card, so only the shadow shows.
+    func cardShadow<S: Shape>(_ shape: S, fill: Color, color: Color = Theme.shadow, radius: CGFloat, y: CGFloat = 0) -> some View {
+        let room = radius * 2 + abs(y)   // the offscreen pass is this much larger, so the blur is not cut
+        return background {
+            shape.fill(fill)
+                .shadow(color: color, radius: radius, y: y)
+                .padding(room)
+                .drawingGroup()
+                .padding(-room)
+                .allowsHitTesting(false)
         }
     }
 }

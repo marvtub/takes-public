@@ -291,7 +291,7 @@ struct VerticalCard: View {
         }
         .background(.white, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).strokeBorder(Theme.border))
-        .shadow(color: Theme.shadow, radius: 14, y: 6)
+        .cardShadow(RoundedRectangle(cornerRadius: 16, style: .continuous), fill: .white, radius: 14, y: 6)
         .animation(Theme.motion, value: places)
     }
 

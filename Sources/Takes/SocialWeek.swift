@@ -89,7 +89,7 @@ struct WeekCard: View {
         }
         .padding(.vertical, 8)
         .contentShape(Rectangle())
-        .onTapGesture { if let u = URL(string: e.url), !e.url.isEmpty { NSWorkspace.shared.open(u) } }
+        .onTapGesture { if let u = URL(string: e.url), !e.url.isEmpty { NSWorkspace.shared.openSoon(u) } }
     }
 
     /// X this week: posts and views, against last week.

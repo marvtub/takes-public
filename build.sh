@@ -37,6 +37,21 @@ mkdir -p "$APP/Contents/Resources/Onboarding" && cp assets/onboarding/creator.jp
 mkdir -p "$APP/Contents/Resources/Article"
 mkdir -p "$APP/Contents/Resources/Brand" && cp assets/brand/mascot-512.png "$APP/Contents/Resources/Brand/mascot.png" && cp assets/brand/mascot-body-512.png "$APP/Contents/Resources/Brand/mascot-body.png"
 cp Info.plist "$APP/Contents/Info.plist"
+# The search helper (embed/, ⌘K by meaning). MLX needs Xcode and its Metal toolchain, which
+# `swift build` and the Command Line Tools lack. Without them Takes still builds, and ⌘K matches
+# file names and transcripts only. The model itself is never in the app: Takes downloads it.
+XCODE=/Applications/Xcode.app/Contents/Developer
+if [[ -d embed && -d "$XCODE" ]] && DEVELOPER_DIR="$XCODE" xcrun metal --version >/dev/null 2>&1; then
+  (cd embed && DEVELOPER_DIR="$XCODE" xcodebuild -quiet -scheme TakesEmbed -configuration Release \
+    -destination 'platform=macOS,arch=arm64' -derivedDataPath .build-xcode build > .build-xcode.log 2>&1) \
+    || { tail -30 embed/.build-xcode.log; echo "The search helper did not build (embed/.build-xcode.log)." >&2; exit 1; }
+  E=embed/.build-xcode/Build/Products/Release
+  cp "$E/takes-embed" "$APP/Contents/MacOS/takes-embed"
+  for b in "$E"/*.bundle; do cp -R "$b" "$APP/Contents/Resources/"; done
+  mkdir -p "$APP/Contents/Resources/Licenses/takes-embed" && cp embed/licenses/* "$APP/Contents/Resources/Licenses/takes-embed/"
+else
+  echo "No Xcode Metal toolchain: Takes builds without search by meaning (xcodebuild -downloadComponent MetalToolchain)."
+fi
 # Skills for Claude Code that the app installs at launch (the public copy ships them in skills/).
 [[ -d skills ]] && cp -R skills "$APP/Contents/Resources/skills"
 # The stamp tells a running Takes that a staged build is new; the changes go in the Update tooltip.
@@ -76,14 +91,20 @@ fi
 KC="$HOME/Library/Keychains/takes-signing.keychain-db"
 if [[ -f "$KC" && -f "$HOME/.config/takes/keychain-pass" ]]; then
   security unlock-keychain -p "$(cat "$HOME/.config/takes/keychain-pass")" "$KC"
+  [[ -f "$APP/Contents/MacOS/takes-embed" ]] && codesign --force --sign "Takes Local Signing" --keychain "$KC" --identifier de.marvinaziz.takes.embed "$APP/Contents/MacOS/takes-embed"
   codesign --force --sign "Takes Local Signing" --keychain "$KC" --identifier de.marvinaziz.takes "$APP"
 else
   echo "No signing certificate: run scripts/setup-signing.sh once to keep permissions across installs."
+  [[ -f "$APP/Contents/MacOS/takes-embed" ]] && codesign --force --sign - --identifier de.marvinaziz.takes.embed "$APP/Contents/MacOS/takes-embed"
   codesign --force --sign - --identifier de.marvinaziz.takes "$APP"
 fi
 echo "Built $APP"
 if [[ "${1:-}" == "install" ]]; then
-  if pgrep -f "Applications/Takes.app/Contents/MacOS/Takes" >/dev/null; then
+  # Once Takes is installed, always stage: never decide by "is it running?". That check failed
+  # silently twice (pgrep sees nothing from agent shells; pipefail broke ps | grep -q) and the
+  # install overwrote the running app with no Update row (2026-10-06). A staged build waits for
+  # the Update click whether Takes is open now or opens later. FRESH_INSTALL=1 copies directly.
+  if [[ -d ~/Applications/Takes.app && "${FRESH_INSTALL:-}" != 1 ]]; then
     # Never quit Takes for the user: stage the build, and Takes shows Update in its sidebar.
     # Copy beside the slot, then rename, so Takes never reads a half-copied build.
     STAGE="$HOME/Applications/.update.noindex"

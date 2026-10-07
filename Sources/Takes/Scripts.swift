@@ -135,9 +135,11 @@ extension SessionDoc {
         try? FileManager.default.createDirectory(at: variantsDir, withIntermediateDirectories: true)
         let raw = FrontMatter.render([("name", v.name), ("author", v.author), ("note", v.note), ("created", v.created)], v.text)
         try? raw.write(to: variantsDir.appending(path: "\(v.slug).md"), atomically: true, encoding: .utf8)
+        variantUnsaved.remove(v.slug)
     }
 
     private func scheduleVariantSave(_ slug: String) {
+        variantUnsaved.insert(slug)
         variantSaveTask?.cancel()
         variantSaveTask = Task { [weak self] in
             try? await Task.sleep(for: .milliseconds(600))
@@ -274,9 +276,9 @@ extension SessionDoc {
 
     /// Flush pending writes and snapshot edits. Call when leaving the session or quitting.
     func close() {
-        flushScript()
+        flushScriptIfEdited()
         variantSaveTask?.cancel()
-        if activeDraft != "main", let v = variants.first(where: { $0.slug == activeDraft }) { writeVariant(v) }
+        for v in variants where variantUnsaved.contains(v.slug) { writeVariant(v) }
         snapshotDirty()
     }
 }

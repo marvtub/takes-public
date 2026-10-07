@@ -358,7 +358,7 @@ private struct PerfRowView: View {
             Text(Num.rate(s)).frame(width: 64, alignment: .trailing).font(Theme.mono(12)).foregroundStyle(Theme.muted)
             Sparkline(values: (item.post.stats ?? []).compactMap(\.reach)).frame(width: 70, height: 22)
             if let u = item.post.url.flatMap(URL.init(string:)) {
-                Button { NSWorkspace.shared.open(u) } label: { Image(systemName: "arrow.up.right.square") }
+                Button { NSWorkspace.shared.openSoon(u) } label: { Image(systemName: "arrow.up.right.square") }
                     .buttonStyle(.borderless).foregroundStyle(Theme.muted)
                     .frame(width: 18)
                     .help("Open the post on \(item.post.label)")

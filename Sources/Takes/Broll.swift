@@ -348,7 +348,7 @@ struct BrollPane: View {
                 Text("\(inSession.count) in this session").font(Theme.sans(13)).foregroundStyle(Theme.live)
             }
             Spacer()
-            Button { NSWorkspace.shared.open(open ?? dir) } label: {
+            Button { NSWorkspace.shared.openSoon(open ?? dir) } label: {
                 Label("Show in Finder", systemImage: "folder").font(Theme.sans(12))
             }
             .buttonStyle(.plain).foregroundStyle(Theme.muted)
@@ -391,7 +391,7 @@ struct BrollPane: View {
                 .font(Theme.sans(13)).foregroundStyle(Theme.muted)
             Button("Show in Finder") {
                 try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-                NSWorkspace.shared.open(dir)
+                NSWorkspace.shared.openSoon(dir)
             }
             .buttonStyle(AccentButtonStyle(kind: .quiet))
         }
@@ -443,7 +443,7 @@ struct BrollFolderTile: View {
         .help("Hover to see the clips; click to open")
         .contextMenu {
             Button("Open", action: open)
-            Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([folder.url]) }
+            Button("Show in Finder") { NSWorkspace.shared.revealSoon([folder.url]) }
             Divider()
             Button("Move Folder to Trash", role: .destructive, action: trash)
         }
@@ -510,7 +510,7 @@ struct BrollClipTile: View {
             } else {
                 Button("Add to This Session", action: add)
             }
-            Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([clip.url]) }
+            Button("Show in Finder") { NSWorkspace.shared.revealSoon([clip.url]) }
             Button("Copy Path") {
                 NSPasteboard.general.clearContents()
                 NSPasteboard.general.setString(clip.url.path, forType: .string)
@@ -594,7 +594,7 @@ struct BrollPlayer: View {
                     HStack(spacing: 10) {
                         Button(added ? "Remove from session" : "Add to session", action: added ? remove : add)
                             .buttonStyle(AccentButtonStyle(kind: added ? .quiet : .accent))
-                        Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([clip.url]) }
+                        Button("Show in Finder") { NSWorkspace.shared.revealSoon([clip.url]) }
                             .buttonStyle(AccentButtonStyle(kind: .quiet))
                         Spacer(minLength: 0)
                         Button(action: trash) { Image(systemName: "trash") }

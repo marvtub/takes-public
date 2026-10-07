@@ -1,6 +1,6 @@
 ---
 name: takes-video-edit
-description: Edit a video recorded in Takes with ffmpeg and Whisper, starting from the Takes session (takes MCP). Use when the user asks to edit, cut, trim, caption, reframe (for example to 9:16), clean up the audio of, or make a thumbnail for a take or a video in Takes, or asks for a new version of an edit after review comments.
+description: Edit a video recorded in Takes with ffmpeg and Whisper, starting from the Takes session (takes MCP). Use when the user asks to edit, cut, trim, caption, reframe (for example to 9:16), clean up the audio of, fix the words said in, add a voice-over to, or make a thumbnail for a take or a video in Takes, or asks for a new version of an edit after review comments.
 ---
 
 # Takes video edit
@@ -38,6 +38,10 @@ Use the `takes` MCP, not file guessing.
    given. A cue on a raw take is a moment of the take: map it through your cut list. No pick:
    ask, or suggest options from `list_music`. Call `set_music` or `set_sfx` only when the user
    agrees.
+7. **Find footage by meaning:** `search_media` searches the whole library on this Mac: clips by
+   what they show ("walking outside", "close-up of a phone"), stills, and the words in transcripts
+   ("where I talk about pricing"). Hits have `path` and, for video and speech, `at` in seconds.
+   Use it for b-roll and cutaways before you ask the user to film something.
 
 ## Voice
 
@@ -49,6 +53,28 @@ again: a second compressor lifts the room echo after every word. Only trim, fade
 
 Keep every intermediate audio file as float WAV (`pcm_f32le`). Integer WAVs clip peaks over
 0 dBFS, which sounds like clicks.
+
+## New words, voice-over, other voices (ElevenLabs)
+
+These tools need an ElevenLabs key in Takes › Settings › Voices. When a tool says there is no key,
+tell the user to open that page. Each call costs ElevenLabs characters (about one per letter), so
+make one call per ask.
+
+- **Fix what was said:** `fix_words` with `take` (or `file`), `old` (the words exactly as said; the
+  transcript has them) and `new`. Takes says the new words in the voice, using the sentences around
+  them so the tone matches. It cuts them in at the word edges, using the take's cleaned voice when
+  there is one. When the new words fit the old time (0.8–1.25×), the result is the same length as
+  the take, with a `.wav` and an `.mp4`, so your cut list still holds. If they do not fit, there is
+  only a WAV, and the result says how far everything after the fix moved. The lips do not move
+  with the new words: tell the user when the fix is on camera, and offer b-roll over it.
+- **Voice-over:** `voiceover` reads `text`, or by default `script.md`. It writes
+  `generated/<name>-vN.wav` at −14 LUFS. Treat it like a cleaned voice: trim, fade and mix it, but
+  do not compress it again.
+- **Another voice:** `change_voice` says a take or a part of it (`start`/`end`) again in another
+  voice, with the same words and timing.
+- **Voices:** `voice` takes a name or the start of one. Leave it out to use the default voice the
+  user picked. `voices` lists the voices, and `voices search=...` finds voices in the ElevenLabs
+  library. `design_voice` makes three samples from a description for the user to choose from.
 
 ## Cut
 

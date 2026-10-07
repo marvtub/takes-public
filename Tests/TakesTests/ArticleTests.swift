@@ -48,6 +48,9 @@ struct ArticleTests {
         let tweet = Article.html("<Tweet id=\"20\" />")
         #expect(tweet.contains("https://x.com/i/status/20"))
 
+        let video = Article.html("<Video src=\"thumbnails/launch-v1.mp4\" poster=\"thumbnails/launch-poster-v1.jpg\" title=\"Launch\" />")
+        #expect(video.contains("<video src=\"thumbnails/launch-v1.mp4\" poster=\"thumbnails/launch-poster-v1.jpg\" controls"))
+
         let tip = Article.html("Use <Tooltip text=\"Parallel checkouts\">worktrees</Tooltip> daily.")
         #expect(tip.contains("<span class=\"tip-word\">worktrees</span><span class=\"tip-bubble\" role=\"tooltip\">Parallel checkouts</span>"))
     }

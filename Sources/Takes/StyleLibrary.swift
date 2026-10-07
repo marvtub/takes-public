@@ -481,7 +481,7 @@ struct StylesBoard: View {
         .onTapGesture { opened = dir }
         .help([c.description, c.source.map { "From \($0)" }].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: "\n\n"))
         .contextMenu {
-            Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([dir]) }
+            Button("Show in Finder") { NSWorkspace.shared.revealSoon([dir]) }
             if let p = c.preview { Button("Open to comment on it") { opened = dir; app.styleFile = p } }
             if c.preview != nil { Button("Render the preview again") { ask(Self.previewAsk(c.name)) } }
             Divider()
@@ -636,9 +636,18 @@ struct StyleChip: View {
                         }
                     }
                 } label: {
-                    Text(own ?? projectStyle ?? "none").font(Theme.sans(12.5, .semibold))
+                    // Our own label: the system button drew dark text on the dark theme (2026-10-06).
+                    HStack(spacing: 4) {
+                        Text(own ?? projectStyle ?? "none").font(Theme.sans(12.5, .semibold))
+                        Image(systemName: "chevron.down").font(.system(size: 8, weight: .bold))
+                            .foregroundStyle(Theme.muted)
+                    }
+                    .foregroundStyle(Theme.ink)
+                    .padding(.horizontal, 9).frame(height: 24)
+                    .background(Theme.hover, in: RoundedRectangle(cornerRadius: 6))
+                    .contentShape(Rectangle())
                 }
-                .menuStyle(.button).fixedSize()
+                .menuStyle(.button).buttonStyle(.plain).menuIndicator(.hidden).fixedSize()
                 .help("The style Takes edits this video in")
                 Text(own == nil ? "from the project" : "this video only")
                     .font(Theme.sans(11)).foregroundStyle(Theme.faint).lineLimit(1)
@@ -687,7 +696,7 @@ struct LibrarySection: View {
                 Spacer()
             }
             .contextMenu {
-                if store.exists { Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([dir]) } }
+                if store.exists { Button("Show in Finder") { NSWorkspace.shared.revealSoon([dir]) } }
             }
             if !store.hasContent {
                 empty
@@ -839,8 +848,9 @@ struct LibrarySection: View {
         return VStack(alignment: .leading, spacing: 5) {
             AssetTile(asset: Asset(url: a.url, group: item.group, name: item.name, size: a.size, modified: a.modified),
                       selected: app.preview == a.url, openComments: openCount)
-                .onTapGesture(count: 2) { NSWorkspace.shared.open(a.url) }
-                .onTapGesture { show(a.url) }
+                // Show on the first click, not after the double-click interval.
+                .gesture(TapGesture(count: 2).onEnded { NSWorkspace.shared.openSoon(a.url) })
+                .simultaneousGesture(TapGesture().onEnded { if NSApp.firstClick { show(a.url) } })
                 .onDrag { NSItemProvider(contentsOf: a.url) ?? NSItemProvider() }
                 .contextMenu { fileMenu(a.url, path + a.name) }
             if let n = store.notes[path + a.name], !n.note.isEmpty {
@@ -868,10 +878,11 @@ struct LibrarySection: View {
     }
 
     private func show(_ url: URL) {
+        Perf.mark("style asset")
         if let onShow { onShow(url); return }
         switch Asset.kind(of: url) {
         case .video, .image, .audio: app.preview = url
-        case .other: if DocReview.handles(url) { app.preview = url } else { NSWorkspace.shared.open(url) }
+        case .other: if DocReview.handles(url) { app.preview = url } else { NSWorkspace.shared.openSoon(url) }
         }
     }
 
@@ -890,8 +901,8 @@ struct LibrarySection: View {
     // MARK: Menu
 
     @ViewBuilder private func fileMenu(_ url: URL, _ rel: String) -> some View {
-        Button("Open") { NSWorkspace.shared.open(url) }
-        Button("Reveal in Finder") { NSWorkspace.shared.activateFileViewerSelecting([url]) }
+        Button("Open") { NSWorkspace.shared.openSoon(url) }
+        Button("Reveal in Finder") { NSWorkspace.shared.revealSoon([url]) }
         Button("Copy Path") {
             NSPasteboard.general.clearContents()
             NSPasteboard.general.setString(url.path, forType: .string)

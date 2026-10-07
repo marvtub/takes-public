@@ -112,6 +112,7 @@ enum Stall {
             while true {
                 Thread.sleep(forTimeInterval: lock.withLock { active } ? 0.1 : 2)
                 let sent = CACurrentMediaTime()
+                let front = lock.withLock { active }
                 let done = DispatchSemaphore(value: 0)
                 DispatchQueue.main.async { done.signal() }
                 // Late by 1.5 s: save a sample while it is still frozen, so a 2–5 s freeze names
@@ -127,6 +128,8 @@ enum Stall {
                 // How long after the click: a freeze a minute later was not caused by drawing it.
                 var label = since < 1 ? after : String(format: "%@, %.0f s before", after, since)
                 if let file { label += ", " + file }
+                // In the back, a late answer is mostly App Nap or a sleeping Mac, not a felt freeze.
+                if !front { label += ", in background" }
                 DispatchQueue.main.async { MainActor.assumeIsolated { Perf.stall(ms, after: label) } }
             }
         }

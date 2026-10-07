@@ -225,7 +225,7 @@ struct PublishMenu: View {
             Text(platform ?? "Somewhere else").font(Theme.sans(13, on ? .semibold : .regular)).foregroundStyle(Theme.ink)
             Spacer()
             if let s = post?.url, let url = URL(string: s) {
-                Button { NSWorkspace.shared.open(url) } label: { Image(systemName: "arrow.up.right.square") }
+                Button { NSWorkspace.shared.openSoon(url) } label: { Image(systemName: "arrow.up.right.square") }
                     .buttonStyle(.borderless).foregroundStyle(Theme.muted)
                     .help("Open the post on \(platform ?? "the web")")
             }

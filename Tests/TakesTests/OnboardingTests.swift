@@ -22,7 +22,6 @@ extension ChatRunTests {
 
         func cleanup() {
             UserDefaults.standard.removeObject(forKey: Onboarding.doneKey)
-            UserDefaults.standard.removeObject(forKey: "scriptBeside")
             flow.shown = false
             ClaudeChat.claudeOverride = nil
             try? FileManager.default.removeItem(at: root)
@@ -98,9 +97,8 @@ extension ChatRunTests {
             #expect(app.library.sessions.map(\.url) == [doc.url])
             #expect(doc.meta.title == "How I plan my week" && doc.meta.named, "named after the idea, so it is not renamed under the chat")
             #expect(doc.url.lastPathComponent.hasSuffix("how-i-plan-my-week"))
-            #expect(UserDefaults.standard.string(forKey: "rightTab") == SessionMode.record.rawValue)
+            #expect(UserDefaults.standard.string(forKey: "rightTab") == SessionMode.write.rawValue, "the script shows next to the chat")
             #expect(app.chats.open && app.chats.docked)
-            #expect(UserDefaults.standard.bool(forKey: "scriptBeside"), "the script shows next to the chat")
             let chat = app.chats.chat(doc.url)
             #expect(chat.messages.first { $0.role == .user }?.text == Onboarding.ask("How I plan my week"))
             let end = Date().addingTimeInterval(10)

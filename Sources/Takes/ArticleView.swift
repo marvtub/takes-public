@@ -251,8 +251,8 @@ final class ArticlePageHost: NSObject, WKScriptMessageHandler, WKNavigationDeleg
                  decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
         if action.navigationType == .linkActivated, let u = action.request.url {
             if u.scheme == "takes", let s = files.session {
-                NSWorkspace.shared.open(s.appending(path: String(u.path.dropFirst())))
-            } else { NSWorkspace.shared.open(u) }
+                NSWorkspace.shared.openSoon(s.appending(path: String(u.path.dropFirst())))
+            } else { NSWorkspace.shared.openSoon(u) }
             decisionHandler(.cancel); return
         }
         decisionHandler(.allow)
@@ -452,6 +452,8 @@ enum ArticlePage {
         display: flex; align-items: center; justify-content: center; } .harmonograph span { font-family: var(--mono); font-size: .75rem; color: #4a5565; }
     .harmonograph figcaption { color: var(--gray); }
     .wide { margin: 2rem 0; }
+    figure.video { margin: 2rem 0; }
+    figure.video video { width: 100%; aspect-ratio: 16 / 9; border-radius: 8px; background: #0a0a0a; }
     .chart { margin: 1.5rem 0; border-radius: .5rem; background: var(--surface); display: flex; align-items: center; justify-content: center; }
     .chart span { font-family: var(--mono); font-size: .875rem; color: var(--gray); }
 
@@ -750,6 +752,7 @@ struct ArticleComponentsHelp: View {
         ("X post", "<Tweet id=\"20\" />"),
         ("Collapse", "<Collapse title=\"The details\">\nHidden until opened.\n</Collapse>"),
         ("Picture", "![What it shows](thumbnails/cover-v1.png)"),
+        ("Video", "<Video src=\"thumbnails/clip-v1.mp4\" poster=\"thumbnails/clip-poster-v1.jpg\" title=\"What it shows\" />"),
     ]
 
     var body: some View {

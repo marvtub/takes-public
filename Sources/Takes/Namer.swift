@@ -122,7 +122,7 @@ enum Keys {
     static func load() -> [String: String] {
         var out: [String: String] = [:]
         let home = FileManager.default.homeDirectoryForCurrentUser
-        let text = files.compactMap { try? String(contentsOf: home.appending(path: $0), encoding: .utf8) }.joined(separator: "\n")
+        let text = files.filter { Plugins.own || !$0.hasPrefix("Documents/") }.compactMap { try? String(contentsOf: home.appending(path: $0), encoding: .utf8) }.joined(separator: "\n")
         for line in text.split(whereSeparator: \.isNewline) {
             var l = line.trimmingCharacters(in: .whitespaces)
             if l.hasPrefix("#") { continue }

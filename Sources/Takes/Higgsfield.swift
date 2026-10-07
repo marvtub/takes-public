@@ -170,7 +170,7 @@ struct HiggsfieldPage: View {
                     Text(line).font(Theme.sans(12)).foregroundStyle(Theme.muted).textSelection(.enabled)
                 }
                 Spacer(minLength: 8)
-                Button("Get credits") { NSWorkspace.shared.open(Higgsfield.pricing) }
+                Button("Get credits") { NSWorkspace.shared.openSoon(Higgsfield.pricing) }
                 Button("Sign out") { hf.signOut() }
             }
         }

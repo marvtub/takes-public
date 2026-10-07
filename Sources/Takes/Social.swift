@@ -614,7 +614,7 @@ struct SignalPostRow: View {
         .background(hover ? Theme.surface : .clear)
         .contentShape(Rectangle())
         .onHover { hover = $0 }
-        .onTapGesture { if let u = URL(string: post.url), !post.url.isEmpty { NSWorkspace.shared.open(u) } }
+        .onTapGesture { if let u = URL(string: post.url), !post.url.isEmpty { NSWorkspace.shared.openSoon(u) } }
     }
 }
 
@@ -789,7 +789,7 @@ struct SignalPage<Extra: View>: View {
                     }
                     .padding(.vertical, 7)
                     .contentShape(Rectangle())
-                    .onTapGesture { if let u = URL(string: t.url), !t.url.isEmpty { NSWorkspace.shared.open(u) } }
+                    .onTapGesture { if let u = URL(string: t.url), !t.url.isEmpty { NSWorkspace.shared.openSoon(u) } }
                 }
             }
         }

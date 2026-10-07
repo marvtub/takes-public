@@ -375,8 +375,10 @@ struct AssetsPane: View {
                         .background(GeometryReader { g in
                             Color.clear.preference(key: TileFrames.self, value: [a.url: g.frame(in: .named("assets"))])
                         })
-                        .onTapGesture(count: 2) { NSWorkspace.shared.open(a.url) }
-                        .onTapGesture { click(a) }
+                        // Act on the first click. A plain onTapGesture next to a double-tap waits out the
+                        // double-click interval (~0.4 s) first. The second click of a double is skipped.
+                        .gesture(TapGesture(count: 2).onEnded { NSWorkspace.shared.openSoon(a.url) })
+                        .simultaneousGesture(TapGesture().onEnded { if NSApp.firstClick { click(a) } })
                         .onDrag { NSItemProvider(contentsOf: a.url) ?? NSItemProvider() }
                         .contextMenu {
                             if picked.count > 1 && picked.contains(a.url) { bulkMenu } else { menu(a) }
@@ -384,6 +386,11 @@ struct AssetsPane: View {
                 }
             }
         }
+    }
+
+    private func draft(_ text: String) {
+        app.chats.chat(doc.url).draft = text
+        app.chats.open = true
     }
 
     @ViewBuilder private func menu(_ a: Asset) -> some View {
@@ -406,7 +413,12 @@ struct AssetsPane: View {
                 app.chats.open = true
             }
         }
-        Button("Open") { NSWorkspace.shared.open(a.url) }
+        if a.kind == .video || a.kind == .audio {
+            // ElevenLabs (2026-10-06): the ask goes in the chat box, the user finishes it.
+            Button("Fix Words…") { draft(ElevenLabs.fixDraft(a.rel)) }
+            Button("Change Voice…") { draft(ElevenLabs.voiceDraft(a.rel)) }
+        }
+        Button("Open") { NSWorkspace.shared.openSoon(a.url) }
         Button("Reveal in Finder") { reveal(a.url) }
         Button("Copy Path") {
             NSPasteboard.general.clearContents()
@@ -459,6 +471,7 @@ struct AssetsPane: View {
     private var pickedAssets: [Asset] { ordered.filter { picked.contains($0.url) } }
 
     private func click(_ a: Asset) {
+        Perf.mark("asset \(a.kind)")
         let mods = NSEvent.modifierFlags
         let adding = mods.contains(.command) || mods.contains(.shift)
         picked = AssetPick.click(a.url, picked: picked, anchor: anchor,
@@ -501,7 +514,7 @@ struct AssetsPane: View {
 
     @ViewBuilder private var bulkMenu: some View {
         let n = picked.count
-        Button("Reveal \(n) in Finder") { NSWorkspace.shared.activateFileViewerSelecting(pickedAssets.map(\.url)) }
+        Button("Reveal \(n) in Finder") { NSWorkspace.shared.revealSoon(pickedAssets.map(\.url)) }
         Button("Copy \(n) Paths") {
             NSPasteboard.general.clearContents()
             NSPasteboard.general.setString(pickedAssets.map(\.url.path).joined(separator: "\n"), forType: .string)
@@ -541,12 +554,12 @@ struct AssetsPane: View {
     private func show(_ a: Asset) {
         switch a.kind {
         case .video, .image, .audio: app.preview = a.url
-        case .other: if DocReview.handles(a.url) { app.preview = a.url } else { NSWorkspace.shared.open(a.url) }
+        case .other: if DocReview.handles(a.url) { app.preview = a.url } else { NSWorkspace.shared.openSoon(a.url) }
         }
     }
 
     private func reveal(_ url: URL) {
-        if FileManager.default.fileExists(atPath: url.path) { NSWorkspace.shared.activateFileViewerSelecting([url]) }
+        if FileManager.default.fileExists(atPath: url.path) { NSWorkspace.shared.revealSoon([url]) }
     }
 
     @ViewBuilder private var footer: some View {
@@ -559,7 +572,7 @@ struct AssetsPane: View {
             Text("\(picked.count) selected · \(ByteCountFormatter.string(fromByteCount: total, countStyle: .file))")
                 .font(Theme.sans(12, .medium)).foregroundStyle(Theme.accentInk)
             Spacer()
-            Button("Reveal") { NSWorkspace.shared.activateFileViewerSelecting(pickedAssets.map(\.url)) }
+            Button("Reveal") { NSWorkspace.shared.revealSoon(pickedAssets.map(\.url)) }
                 .buttonStyle(BracketButtonStyle(active: false))
                 .help("Show the selected files in Finder")
             Button("Trash") { trashPicked() }

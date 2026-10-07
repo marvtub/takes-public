@@ -50,8 +50,10 @@ who is in the frame, where the camera is, and what moves. They are not the final
 | `seconds` | Leave it out. The app counts from the words in `say`. Give it only for a shot with no words. |
 | `redraw` | `true` draws the same sketch text again (for a bad drawing). |
 
-For a `B-ROLL` shot, check `list_broll` first. If a clip in the user's library fits, put it in
-`video` and name it in `do`, so the user does not film it again.
+For a `B-ROLL` shot, look for footage first: `search_media` with what the shot shows ("hands
+typing, close-up", kinds `["video"]`) searches every clip by its picture, and `list_broll` lists the
+b-roll folder. If a clip fits, put it in `video` and name it in `do`, so the user does not film it
+again.
 
 ## How to write `sketch`
 

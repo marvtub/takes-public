@@ -571,7 +571,7 @@ private struct ReviewCard: View {
                 Spacer()
                 if s.options.count > 1 { variantPicker(s) }
                 if let u = s.post.url.flatMap(URL.init(string:)) {
-                    Button("Open post") { NSWorkspace.shared.open(u) }.buttonStyle(BracketButtonStyle())
+                    Button("Open post") { NSWorkspace.shared.openSoon(u) }.buttonStyle(BracketButtonStyle())
                 }
             }
             LinkedInThread(post: s.post, photo: store.root.flatMap { r in s.post.photo.map { CopilotStore.suggestions(r).appending(path: $0) } }) { commentBox }
@@ -722,7 +722,7 @@ private struct ReviewCard: View {
 
     private func send(_ s: Suggestion) {
         guard !note.trimmingCharacters(in: .whitespaces).isEmpty else { return }
-        store.feedback(s, note: note, variant: s.options.count > 1 ? pick : nil)
+        store.feedback(s, note: note, variant: s.options.count > 1 ? pick : nil, edit: text)
         mode = .none
         note = ""
         app.show(toast: "Note added. Send it from the Comments chat when you are done.")
@@ -778,7 +778,7 @@ private struct ApprovedList: View {
                 if s.decision?.kind == "edited" { Tag(text: "your edit", accent: true) }
                 Spacer()
                 if let u = s.post.url.flatMap(URL.init(string:)) {
-                    Button("Open post") { NSWorkspace.shared.open(u) }.buttonStyle(BracketButtonStyle())
+                    Button("Open post") { NSWorkspace.shared.openSoon(u) }.buttonStyle(BracketButtonStyle())
                 }
                 Button("Copy") {
                     NSPasteboard.general.clearContents()
@@ -872,7 +872,7 @@ private struct SkippedRow: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             HStack(spacing: 2) {
                 if let u = s.post.url.flatMap(URL.init(string:)) {
-                    Button { NSWorkspace.shared.open(u) } label: {
+                    Button { NSWorkspace.shared.openSoon(u) } label: {
                         Image(systemName: "arrow.up.right").frame(width: 26, height: 26)
                     }
                     .buttonStyle(IconButtonStyle())
@@ -963,7 +963,7 @@ private struct PostedRow: View {
                 .buttonStyle(.borderless).foregroundStyle(s.best == true ? Theme.accent : Theme.muted)
                 .help("Mark as a best example: the agent studies these")
                 if let u = (s.posted?.url ?? s.post.url).flatMap(URL.init(string:)) {
-                    Button { NSWorkspace.shared.open(u) } label: { Image(systemName: "arrow.up.right.square") }
+                    Button { NSWorkspace.shared.openSoon(u) } label: { Image(systemName: "arrow.up.right.square") }
                         .buttonStyle(.borderless).foregroundStyle(Theme.muted)
                         .help("Open it on LinkedIn")
                 }
@@ -1355,7 +1355,7 @@ private struct CopilotDocView: View {
                     .disabled(text == saved)
                     .opacity(text == saved ? 0.4 : 1)
             }
-            Button { NSWorkspace.shared.activateFileViewerSelecting([doc.url]) } label: {
+            Button { NSWorkspace.shared.revealSoon([doc.url]) } label: {
                 Image(systemName: "folder").font(.system(size: 12))
             }
             .buttonStyle(.plain).foregroundStyle(Theme.muted)
@@ -1474,7 +1474,7 @@ private struct LinkedInThread<Comment: View>: View {
         }
         .background(LinkedIn.card, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(Color.black.opacity(0.07)))
-        .shadow(color: Theme.shadow, radius: 16, y: 6)
+        .cardShadow(RoundedRectangle(cornerRadius: 14, style: .continuous), fill: LinkedIn.card, radius: 16, y: 6)
         .environment(\.colorScheme, .light)
     }
 
@@ -1492,7 +1492,7 @@ private struct LinkedInThread<Comment: View>: View {
                 }
             }
             .contentShape(Rectangle())
-            .onTapGesture { if let u = post.authorURL.flatMap(URL.init(string:)) { NSWorkspace.shared.open(u) } }
+            .onTapGesture { if let u = post.authorURL.flatMap(URL.init(string:)) { NSWorkspace.shared.openSoon(u) } }
             .help("Open their profile")
             Spacer(minLength: 8)
             Text("+ Follow").font(LinkedIn.font(14, .semibold)).foregroundStyle(LinkedIn.blue).padding(.top, 2)

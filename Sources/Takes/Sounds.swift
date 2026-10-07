@@ -165,7 +165,7 @@ enum SoundLib {
     static var source: URL? {
         get {
             if let s = UserDefaults.standard.string(forKey: "soundSource") { return URL(fileURLWithPath: s) }
-            return FileManager.default.fileExists(atPath: defaultSource.path) ? defaultSource : nil
+            return Plugins.own && FileManager.default.fileExists(atPath: defaultSource.path) ? defaultSource : nil
         }
         set { UserDefaults.standard.set(newValue?.path, forKey: "soundSource") }
     }
@@ -591,7 +591,7 @@ struct SoundsPane: View {
                 Divider()
                 Button("Show Library in Finder") {
                     try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-                    NSWorkspace.shared.activateFileViewerSelecting([dir])
+                    NSWorkspace.shared.revealSoon([dir])
                 }
             } label: { Image(systemName: "ellipsis") }
                 .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
@@ -782,13 +782,15 @@ struct SoundRow: View {
         .contentShape(Rectangle())
         .onHover { hover = $0 }
         .animation(Theme.motion, value: hover)
-        .onTapGesture(count: 2) { song ? onUse() : onPlay() }
-        .onTapGesture { onPlay() }
+        // Play on the first click, not after the double-click interval. A double-click on a song
+        // also uses it; the first click already started it playing.
+        .gesture(TapGesture(count: 2).onEnded { if song { onUse() } })
+        .simultaneousGesture(TapGesture().onEnded { if NSApp.firstClick { onPlay() } })
         .onDrag { NSItemProvider(contentsOf: sound.url) ?? NSItemProvider() }
         .contextMenu {
             if song { Button("Use for This Video") { onUse() } }
             if placeAt != nil { Button("Add at the Playhead") { onPlace() } }
-            Button("Reveal in Finder") { NSWorkspace.shared.activateFileViewerSelecting([sound.url]) }
+            Button("Reveal in Finder") { NSWorkspace.shared.revealSoon([sound.url]) }
             Button("Copy Path") {
                 NSPasteboard.general.clearContents()
                 NSPasteboard.general.setString(sound.url.path, forType: .string)
@@ -875,7 +877,7 @@ struct ChosenSong: View {
                 }
                 Menu {
                     Button("No Song for This Video", role: .destructive) { onRemove() }
-                    Button("Reveal in Finder") { NSWorkspace.shared.activateFileViewerSelecting([url]) }
+                    Button("Reveal in Finder") { NSWorkspace.shared.revealSoon([url]) }
                 } label: { Image(systemName: "ellipsis") }
                     .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
             }

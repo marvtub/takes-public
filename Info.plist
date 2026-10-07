@@ -17,6 +17,11 @@
     <key>NSCameraUsageDescription</key><string>Takes records you on camera.</string>
     <key>NSMicrophoneUsageDescription</key><string>Takes records your voice.</string>
     <key>NSSpeechRecognitionUsageDescription</key><string>Takes turns your voice notes into text for the chat.</string>
+    <key>NSDownloadsFolderUsageDescription</key><string>The Takes chat asks for Downloads only when you send it a file from there, such as a video you AirDropped.</string>
+    <key>NSDocumentsFolderUsageDescription</key><string>The Takes chat asks for Documents only when you send it a file from there.</string>
+    <key>NSDesktopFolderUsageDescription</key><string>The Takes chat asks for the Desktop only when you send it a file from there.</string>
+    <key>NSPhotoLibraryUsageDescription</key><string>The Takes chat asks for Photos only when you ask it to use a photo or video from your library.</string>
+    <key>NSAppleMusicUsageDescription</key><string>Takes does not need your music library. You can say no; Takes keeps its own music in the library folder.</string>
     <key>NSCameraUseContinuityCameraDeviceType</key><true/>
     <key>CFBundleURLTypes</key>
     <array>

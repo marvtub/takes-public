@@ -54,7 +54,7 @@ enum Article {
     /// The components the site's MDX knows. Anything else that looks like a tag passes through as HTML.
     static let components: Set<String> = ["Callout", "Terminal", "Tooltip", "Tweet", "FileTree", "Flowchart",
                                           "Harmonograph", "Prompt", "TLDR", "TaskHorizonChart", "Steps", "Step",
-                                          "Collapse", "Ascii", "BarChart", "LineChart", "PieChart"]
+                                          "Collapse", "Ascii", "BarChart", "LineChart", "PieChart", "Video"]
 
     static func esc(_ s: String) -> String {
         s.replacingOccurrences(of: "&", with: "&amp;").replacingOccurrences(of: "<", with: "&lt;")
@@ -199,6 +199,9 @@ enum Article {
         case "Tweet":
             let id = a["id"] ?? ""
             return "<figure class=\"tweet\"><p class=\"tweet-label\">X post</p><a href=\"https://x.com/i/status/\(esc(id))\">View referenced post</a></figure>"
+        case "Video":
+            let poster = a["poster"].map { " poster=\"\(esc(src($0)))\"" } ?? ""
+            return "<figure class=\"video\"><video src=\"\(esc(src(a["src"] ?? "")))\"\(poster) controls playsinline preload=\"metadata\"></video></figure>"
         case "FileTree":
             return "<div class=\"filetree\"><pre>\(esc(plain(inner)))</pre></div>"
         case "Ascii":

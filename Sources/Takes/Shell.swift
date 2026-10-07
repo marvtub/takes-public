@@ -6,12 +6,13 @@ import SwiftUI
 
 /// The five things you do with a session. Stored in "rightTab" (old values: "script" is Record).
 enum SessionMode: String, CaseIterable, Identifiable {
-    case storyboard, record = "script", assets, sounds, broll, post
+    case storyboard, write, record = "script", assets, sounds, broll, post
     var id: String { rawValue }
 
     var title: String {
         switch self {
         case .storyboard: return "Storyboard"
+        case .write: return "Script"
         case .record: return "Record"
         case .assets: return "Assets"
         case .sounds: return "Sound"
@@ -23,7 +24,8 @@ enum SessionMode: String, CaseIterable, Identifiable {
     var help: String {
         switch self {
         case .storyboard: return "The idea as sketches on a timeline, with the script under each shot (⌘5)"
-        case .record: return "Camera, script and takes (⌘1)"
+        case .write: return "The script, with Takes beside it to write it (⌘7)"
+        case .record: return "Camera, prompter and takes (⌘1)"
         case .assets: return "This video's files, your b-roll library, and its sound (⌘2; ⌘6 for b-roll, ⌘3 for sound)"
         case .sounds: return "Music and sound effects under the video (⌘3)"
         case .broll: return "Your own b-roll clips, by folder; add one to this session (⌘6)"
@@ -40,12 +42,13 @@ enum SessionMode: String, CaseIterable, Identifiable {
         case .post: return "4"
         case .storyboard: return "5"
         case .broll: return "6"
+        case .write: return "7"
         }
     }
 
     /// The tabs in the header. B-roll (2026-10-03) and Sound (2026-10-04) live inside Assets,
     /// switched at its top.
-    static let tabs: [SessionMode] = [.storyboard, .record, .assets, .post]
+    static let tabs: [SessionMode] = [.storyboard, .write, .record, .assets, .post]
 
     /// The header tab a mode shows under.
     var tab: SessionMode { self == .broll || self == .sounds ? .assets : self }
@@ -501,34 +504,150 @@ struct HeaderSchedule: View {
     }
 }
 
-/// Everything else about the session, in one place.
+/// Everything else about the session, in one place. Our own popover, not the system menu
+/// (2026-10-06): the same paper, type and hover wells as the rest of Takes. The two lists
+/// (projects, platforms) open in place under their row instead of as side menus.
 struct MoreMenu: View {
     @Environment(AppModel.self) var app
     var doc: SessionDoc
+    @State private var open = false
 
     var body: some View {
         let _ = Perf.body("MoreMenu")
-        Menu {
-            Button("Name From Script") { Task { await app.aiName(doc) } }
-                .disabled(app.naming || doc.script.isEmpty)
-            Button("Copy Folder Path") {
+        Button { open.toggle() } label: {
+            Image(systemName: "ellipsis").font(.system(size: 14, weight: .semibold))
+                .frame(width: 32, height: 30)
+        }
+        .buttonStyle(IconButtonStyle())
+        .disabled(app.isRecording)
+        .help("More")
+        .popover(isPresented: $open, arrowEdge: .bottom) { MorePanel(doc: doc, open: $open) }
+    }
+}
+
+/// The rows of the More menu.
+struct MorePanel: View {
+    @Environment(AppModel.self) var app
+    var doc: SessionDoc
+    @Binding var open: Bool
+    @State var expanded: Fold?
+
+    enum Fold { case move, published }
+
+    var body: some View {
+        let library = app.library
+        let urls: Set<URL> = [doc.url]
+        let others = library.projects.filter { $0.url != library.selectedProject }
+        let archived = library.sessions.first { $0.url == doc.url }?.archived ?? false
+        return VStack(alignment: .leading, spacing: 1) {
+            row("sparkles", "Name from script", enabled: !app.naming && !doc.script.isEmpty) {
+                Task { await app.aiName(doc) }
+            }
+            row("doc.on.doc", "Copy folder path") {
                 NSPasteboard.general.clearContents()
                 NSPasteboard.general.setString(doc.url.path, forType: .string)
                 app.show(toast: "Path copied. Paste it to Takes.")
             }
-            if doc.isPublished { Button("Clean Up…") { app.cleaningUp = true } }
-            Divider()
-            BulkMenu(library: app.library, urls: [doc.url])
-        } label: {
-            Image(systemName: "ellipsis").font(.system(size: 14, weight: .semibold))
-                .frame(width: 32, height: 30)
+            if doc.isPublished { row("checklist", "Clean up…") { app.cleaningUp = true } }
+            divider
+            if !others.isEmpty {
+                group(.move, "folder", "Move to project") {
+                    ForEach(others) { p in
+                        sub(p.name) { close { library.moveSessions(urls, to: p.url) } }
+                    }
+                }
+            }
+            group(.published, "paperplane", "Mark as published on") {
+                ForEach(Platforms.all, id: \.self) { p in platform(p) }
+                platform(nil)
+            }
+            row("star.slash", "Trash takes without a star") { library.trashNonKeepers(urls) }
+            row("archivebox", archived ? "Unarchive" : "Archive") { library.setArchived(urls, !archived) }
+            row("folder.badge.gearshape", "Reveal in Finder") { library.reveal(urls) }
+            divider
+            row("trash", "Move session to Trash", danger: true) { library.trashSessions(urls) }
         }
-        .menuStyle(.borderlessButton)
-        .menuIndicator(.hidden)
-        .fixedSize()
-        .buttonStyle(IconButtonStyle())
-        .disabled(app.isRecording)
-        .help("More")
+        .padding(6)
+        .frame(width: 248)
+        .background(Theme.paper)
+        .animation(Theme.motion, value: expanded)
+    }
+
+    private var divider: some View { Rule().padding(.horizontal, 6).padding(.vertical, 5) }
+
+    /// Close the popover first, then act: a move or a trash changes the view under it.
+    private func close(_ action: @escaping () -> Void) {
+        open = false
+        DispatchQueue.main.async(execute: action)
+    }
+
+    private func row(_ icon: String, _ title: String, enabled: Bool = true, danger: Bool = false,
+                     action: @escaping () -> Void) -> some View {
+        Button { close(action) } label: {
+            label(icon, title, danger: danger)
+        }
+        .buttonStyle(MenuRowStyle())
+        .disabled(!enabled)
+        .opacity(enabled ? 1 : 0.4)
+    }
+
+    private func label(_ icon: String, _ title: String, danger: Bool = false) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: icon).font(.system(size: 12, weight: .medium))
+                .foregroundStyle(danger ? Theme.danger : Theme.muted)
+                .frame(width: 16)
+            Text(title).font(Theme.sans(13)).foregroundStyle(danger ? Theme.danger : Theme.ink)
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 8).frame(height: 28)
+        .contentShape(Rectangle())
+    }
+
+    /// A row that opens its list right under it.
+    private func group<Content: View>(_ id: Fold, _ icon: String, _ title: String,
+                                      @ViewBuilder content: () -> Content) -> some View {
+        let on = expanded == id
+        return VStack(alignment: .leading, spacing: 1) {
+            Button { expanded = on ? nil : id } label: {
+                label(icon, title)
+                    .overlay(alignment: .trailing) {
+                        Image(systemName: "chevron.right").font(.system(size: 9, weight: .bold))
+                            .foregroundStyle(Theme.faint)
+                            .rotationEffect(.degrees(on ? 90 : 0))
+                            .padding(.trailing, 8)
+                    }
+            }
+            .buttonStyle(MenuRowStyle())
+            if on {
+                VStack(alignment: .leading, spacing: 1) { content() }
+                    .padding(.leading, 26)
+                    .transition(.opacity)
+            }
+        }
+    }
+
+    private func sub(_ title: String, checked: Bool = false, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 8) {
+                Text(title).font(Theme.sans(12.5)).foregroundStyle(Theme.ink)
+                Spacer(minLength: 0)
+                if checked {
+                    Image(systemName: "checkmark").font(.system(size: 10, weight: .bold)).foregroundStyle(Theme.accent)
+                }
+            }
+            .padding(.horizontal, 8).frame(height: 26)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(MenuRowStyle())
+    }
+
+    /// A platform switches on and off in place, like the Published control, so the list stays open.
+    private func platform(_ p: String?) -> some View {
+        let on = doc.posts.contains { $0.platform?.lowercased() == p?.lowercased() }
+        return sub(p ?? "Somewhere else", checked: on) {
+            doc.setPublished(p, !on)
+            app.library.loadSessions()
+        }
     }
 }
 

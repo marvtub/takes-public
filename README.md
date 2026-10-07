@@ -16,7 +16,7 @@
 
 You write a script, record takes (camera, or camera and screen at once) and star the keeper. Claude Code reads the same files: it storyboards the video, cuts the edit, and drafts the posts for LinkedIn, X, YouTube and vertical video. Takes shows each post the way the platform will show it, so you review the real thing, not a text box.
 
-> **Shared as is.** This is a personal tool, made public so you can read it, fork it and make it yours. It does not take pull requests (a bot closes them) and it has no support, but [Discussions](https://github.com/marvtub/takes-public/discussions) are open.
+> **Made for creators, no coding needed.** After the one install line, everything happens in the app: you read off the teleprompter, star the best take and ask the chat in plain words. Takes has no account, sends no usage data and keeps your videos in folders on your Mac. The user records his own videos with it every day, and new versions ship several times a week.
 
 ## Getting started
 
@@ -26,12 +26,12 @@ Paste this in Terminal:
 curl -fsSL https://gettakes.app/install | bash
 ```
 
-It installs Takes, ffmpeg and [Claude Code](https://claude.com/claude-code) (if you don't have them), signs you in to Claude and opens Takes. Run it again to update. Then allow the camera and mic, and press ⌘R.
+It installs Takes, ffmpeg and [Claude Code](https://claude.com/claude-code) (if you don't have them), signs you in to Claude and opens Takes. Run it again to update. The [script](https://gettakes.app/install) is 85 lines, so you can read it first. Then allow the camera and mic, and press ⌘R.
 
 <details>
 <summary>Other ways to install</summary>
 
-- **Download:** get `Takes.dmg` from [Releases](https://github.com/marvtub/takes-public/releases/latest) and drag Takes to Applications. Apple has not notarized Takes, so the first open is blocked: open System Settings > Privacy & Security and click **Open Anyway**. Then click **Finish setup** in the sidebar: it installs Claude Code and ffmpeg for you.
+- **Download:** get `Takes.dmg` from [Releases](https://github.com/marvtub/takes-public/releases/latest) and drag Takes to Applications. Apple has not notarized Takes yet, so macOS asks once: open System Settings > Privacy & Security and click **Open Anyway**. Then click **Finish setup** in the sidebar: it installs Claude Code and ffmpeg for you.
 - **From source:** clone this repo, `brew install ffmpeg`, then `./build.sh install`.
 
 </details>
@@ -85,7 +85,7 @@ flowchart LR
 
 - **Needs:** a Mac with Apple silicon, macOS 15+, a Claude plan. The install script gets the rest. Building from source also needs the Swift toolchain (Xcode or the Command Line Tools).
 - **Optional:** `whisper` for transcripts, a `GEMINI_API_KEY` for storyboard sketches, the iPhone app (`TAKES_TEAM=<team id> ios/install.sh`).
-- **Questions and ideas:** [Discussions](https://github.com/marvtub/takes-public/discussions). Pull requests are closed by a bot; fork it and make it yours.
+- **Questions and ideas:** welcome in [Discussions](https://github.com/marvtub/takes-public/discussions). Takes does not take pull requests, so one person keeps it consistent; fork it if you want to take it elsewhere.
 - **Tests:** `./test.sh`.
 
 ## Support

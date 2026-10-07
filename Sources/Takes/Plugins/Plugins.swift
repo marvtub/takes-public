@@ -22,6 +22,9 @@ struct TakesPlugin: Identifiable {
 enum Plugins {
     static var all: [TakesPlugin] { PrivatePlugins.list }
     static func named(_ id: String) -> TakesPlugin? { all.first { $0.id == id } }
+    /// The user's own build (the public copy has no private plugins). Only his build looks in
+    /// ~/Documents: on another Mac even a look there makes macOS ask for the folder.
+    static var own: Bool { !PrivatePlugins.list.isEmpty }
 }
 
 /// The sidebar row of a plugin, like Performance and Comments above it.

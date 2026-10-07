@@ -118,6 +118,21 @@ struct CopilotTests {
         #expect(try raw(root, "b")["status"] as? String == "redraft")
     }
 
+    // 2026-10-06: a redraft threw away the edit he typed before the note. It travels with the note.
+    @Test func feedbackKeepsHisEdit() throws {
+        let (root, store) = try library(["a": "2026-10-02T16:00:00Z", "b": "2026-10-02T16:01:00Z"])
+        var asked: [String] = []
+        store.askChat = { asked.append($0) }
+        store.feedback(store.review[0], note: "tag Haneen", edit: "ngl same, we do this too")
+        store.feedback(store.review[0], note: "shorter", edit: "ngl same")  // unchanged: no edit
+        let drafts = try raw(root, "a")["drafts"] as? [[String: Any]]
+        #expect(drafts?.last?["edit"] as? String == "ngl same, we do this too")
+        #expect((try raw(root, "b")["drafts"] as? [[String: Any]])?.last?["edit"] == nil)
+        store.sendFeedback([store.pendingFeedback[0]])
+        #expect(asked.first?.contains("edited that variant to: \"ngl same, we do this too\"") == true)
+        #expect(asked.first?.contains("Keep my edit as variant 1") == true)
+    }
+
     @Test func droppedFeedbackGoesBackToReview() throws {
         let (root, store) = try library(["a": "2026-10-02T16:00:00Z"])
         store.feedback(store.review[0], note: "shorter", variant: 1)

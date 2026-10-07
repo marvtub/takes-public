@@ -1,0 +1,27 @@
+EmbeddingGemma 2 Text, Images and Audio — MLX Swift
+
+Google DeepMind created the EmbeddingGemma 2 model. The checkpoint is licensed
+under Apache-2.0 and is downloaded separately, unchanged by the extraction step.
+https://huggingface.co/google/embeddinggemma-2
+Source revision: 914f7f89142e33e77833254d9c9b90c3cef7303b
+
+The architecture and reference validation use Transformers 5.19.0's
+embedding_gemma2 and gemma4 implementations:
+Copyright 2026 the HuggingFace Team. All rights reserved.
+Licensed under Apache License, Version 2.0; see APACHE-2.0.txt.
+https://github.com/huggingface/transformers
+
+The native implementation was also informed by MLX-VLM's Python implementation:
+Copyright (c) 2025 Prince Canuma. MIT License; see UPSTREAM_MLX_VLM_LICENSE.
+https://github.com/Blaizzy/mlx-vlm
+Source revision: 3d87e88402f307efbf68e568971aa887ee7d9ed0
+
+Changes: independent Swift text/vision/audio runtime and actor API; local weight
+validation, CLI, iOS validation app, pinned extraction and numerical audits.
+No upstream affiliation, endorsement, or priority claim is implied.
+
+Image resize adapts Pillow 12.0.0's libImaging/Resample.c algorithm to Swift.
+PIL: Copyright 1997-2011 Secret Labs AB; 1995-2011 Fredrik Lundh and contributors.
+Pillow: Copyright 2010 Jeffrey A. Clark and contributors.
+MIT-CMU License: preserve UPSTREAM_PILLOW_LICENSE in distributions.
+https://github.com/python-pillow/Pillow/tree/12.0.0

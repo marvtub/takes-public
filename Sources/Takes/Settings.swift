@@ -2,25 +2,29 @@ import AppKit
 import SwiftUI
 
 /// Takes › Settings (⌘,): Appearance (mode, palette, accent, text size), Higgsfield (AI video,
-/// 2026-10-06) and the archived sessions, which the sidebar no longer shows.
+/// 2026-10-06), Voices (ElevenLabs) and the archived sessions, which the sidebar no longer shows.
 struct SettingsView: View {
     var library: Library
     @AppStorage("settingsPage") private var page = SettingsPage.appearance.rawValue
 
     enum SettingsPage: String, CaseIterable, Identifiable {
-        case appearance, higgsfield, archived
+        case appearance, search, higgsfield, voices, archived
         var id: String { rawValue }
         var name: String {
             switch self {
             case .appearance: return "Appearance"
+            case .search: return "Search"
             case .higgsfield: return "Higgsfield"
+            case .voices: return "Voices"
             case .archived: return "Archived"
             }
         }
         var icon: String {
             switch self {
             case .appearance: return "paintpalette"
+            case .search: return "magnifyingglass"
             case .higgsfield: return "sparkles"
+            case .voices: return "waveform"
             case .archived: return "archivebox"
             }
         }
@@ -53,7 +57,9 @@ struct SettingsView: View {
             Group {
                 switch current {
                 case .appearance: AppearancePage()
+                case .search: SearchPage()
                 case .higgsfield: HiggsfieldPage()
+                case .voices: VoicesPage()
                 case .archived: ArchivedPage(library: library)
                 }
             }

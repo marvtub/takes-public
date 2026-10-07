@@ -19,10 +19,11 @@ run() {
 # too busy for their timing, and they failed the public release (2026-10-06) though each passes
 # alone. A full run leaves them out, then runs them by themselves, one at a time.
 TIMED='theNextArticleUsesALoadedPage|theHiddenDockedChatSkipsStreamedWords|effectPlaysAtItsSecond|resetWhileRunningKeepsTheNewAsk|watcherSeesAWrite'
-if [[ $# -gt 0 ]]; then
+# Only a --filter or --skip picks the tests; other flags (build.sh passes --quiet) keep the split.
+if [[ " $* " == *" --filter "* || " $* " == *" --skip "* ]]; then
   run "$@"
 else
-  run --skip "$TIMED"
+  run --skip "$TIMED" "$@"
   echo "Timed tests, one at a time..."
-  run --filter "$TIMED" --no-parallel
+  run --filter "$TIMED" --no-parallel "$@"
 fi

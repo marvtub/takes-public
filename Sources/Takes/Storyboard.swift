@@ -228,7 +228,7 @@ struct StoryboardPane: View {
                     .font(Theme.sans(12)).foregroundStyle(Theme.muted)
             }
             Spacer()
-            Button { NSWorkspace.shared.open(Storyboard.folder(doc.url)) } label: {
+            Button { NSWorkspace.shared.openSoon(Storyboard.folder(doc.url)) } label: {
                 Image(systemName: "folder").font(.system(size: 13))
             }
             .buttonStyle(.plain).foregroundStyle(Theme.muted)
@@ -639,7 +639,7 @@ private struct ShotDetail: View {
                         Theme.stage
                             .overlay { if let poster { Image(nsImage: poster).resizable().scaledToFill() } }
                             .overlay { if shown && !app.isRecording { LoopingVideo(url: clip, sound: sound) } }
-                            .onTapGesture(count: 2) { NSWorkspace.shared.open(clip) }
+                            .onTapGesture(count: 2) { NSWorkspace.shared.openSoon(clip) }
                             .help("Double-click to open")
                             .task(id: clip) {
                                 poster = BrollLib.cachedPoster(clip)
@@ -647,7 +647,7 @@ private struct ShotDetail: View {
                             }
                     } else if let image {
                         Image(nsImage: image).resizable().scaledToFill()
-                            .onTapGesture(count: 2) { if let n = shot.image { NSWorkspace.shared.open(Storyboard.folder(doc.url).appending(path: n)) } }
+                            .onTapGesture(count: 2) { if let n = shot.image { NSWorkspace.shared.openSoon(Storyboard.folder(doc.url).appending(path: n)) } }
                             .help(shot.sketch)
                     } else if let err = shot.error {
                         VStack(spacing: 8) {
@@ -667,7 +667,7 @@ private struct ShotDetail: View {
                 .clipShape(shape).contentShape(shape)
             }
             .overlay(shape.strokeBorder(Theme.border))
-            .shadow(color: Theme.shadow, radius: 18, y: 8)
+            .cardShadow(shape, fill: Theme.paper, radius: 18, y: 8)
             .overlay(alignment: .topTrailing) {
                 if takes.contains(where: \.keeper) {
                     Image(systemName: "star.fill").font(.system(size: 12)).foregroundStyle(.yellow)
@@ -828,10 +828,10 @@ private struct ShotDetail: View {
             }
         }
         if let clip {
-            Button("Open the clip") { NSWorkspace.shared.open(clip) }
-            Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([clip]) }
+            Button("Open the clip") { NSWorkspace.shared.openSoon(clip) }
+            Button("Show in Finder") { NSWorkspace.shared.revealSoon([clip]) }
         } else if let n = shot.image {
-            Button("Open the sketch") { NSWorkspace.shared.open(Storyboard.folder(doc.url).appending(path: n)) }
+            Button("Open the sketch") { NSWorkspace.shared.openSoon(Storyboard.folder(doc.url).appending(path: n)) }
         }
     }
 }
@@ -890,7 +890,9 @@ private struct TakeThumb: View {
         }
         .task(id: url) { cut = TakeCut.read(doc.url)[String(take.number)] }
         .onReceive(NotificationCenter.default.publisher(for: .takesFilesChanged)) { note in
-            guard let paths = note.object as? [String], paths.contains(where: { $0.hasSuffix("cuts.json") }) else { return }
+            // The watcher reports folders, not files: a check for "cuts.json" never matched, and
+            // a finished cut showed only after a switch (2026-10-06). The file is small.
+            guard FileWatch.touches(note, doc.url) else { return }
             let now = TakeCut.read(doc.url)[String(take.number)]
             if now != cut { cut = now }
         }
