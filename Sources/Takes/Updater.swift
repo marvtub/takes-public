@@ -8,12 +8,18 @@ import SwiftUI
 /// Update, and only the user's click swaps it in: once nothing records or runs (a Claude reply, an
 /// export), Takes quits, the new build replaces the old one, and it opens again. `.noindex`
 /// keeps Spotlight, and so macOS, from opening the staged copy.
+///
+/// Public releases (2026-10-07): a Takes from a GitHub release (its Info.plist has ReleaseTag)
+/// also asks GitHub for the newest release, at launch and every six hours. A newer one is
+/// downloaded and staged in the same folder, so the same Update row shows, with the release
+/// notes as What's new. Before this, users of a release never heard of a newer one.
 @MainActor @Observable
 final class Updater {
     static let shared = Updater()
 
-    /// The waiting build: when it was made, and the commits it adds, newest first.
-    struct Staged: Equatable { var stamp: String; var changes: [String]; var log: [Change] = [] }
+    /// The waiting build: when it was made, and the commits it adds, newest first. `release` is
+    /// the tag of a staged GitHub release ("v2026.10.7"), nil for a local build.
+    struct Staged: Equatable { var stamp: String; var changes: [String]; var log: [Change] = []; var release: String? = nil }
 
     /// One commit in the What's new panel. "Chat: @comments shows as a chip; …" gives the area
     /// "Chat", the headline before the first ";", and the rest plus the message body as detail.
@@ -49,6 +55,18 @@ final class Updater {
             let iso = ISO8601DateFormatter()
             return raw.map { parse(subject: $0.subject, body: $0.body, id: $0.hash, date: iso.date(from: $0.date)) }
         }
+
+        /// A release's notes (release.sh): "### Area" headings over "- headline" lines. The
+        /// Install section is for the download page, not news.
+        nonisolated static func notes(_ body: String) -> [Change] {
+            var out: [Change] = [], area = "Takes"
+            for line in body.split(whereSeparator: \.isNewline).map({ $0.trimmingCharacters(in: .whitespaces) }) {
+                if line.hasPrefix("### ") { area = String(line.dropFirst(4)); continue }
+                guard line.hasPrefix("- "), area != "Install" else { continue }
+                out.append(Change(id: "\(area)-\(out.count)", area: area, headline: String(line.dropFirst(2)), detail: ""))
+            }
+            return out
+        }
     }
     private(set) var staged: Staged?
     /// Clicked: waits for the recording or the work to end, then restarts.
@@ -57,6 +75,12 @@ final class Updater {
 
     @ObservationIgnored private var timer: Timer?
     @ObservationIgnored private var lastRead: Date?
+    @ObservationIgnored private var releaseTimer: Timer?
+    @ObservationIgnored private var fetching = false
+
+    static let releaseRepo = "marvtub/takes-public"
+    /// This build's release tag; nil for a build from source, which never updates itself.
+    private var ownRelease: String? { Bundle.main.infoDictionary?["ReleaseTag"] as? String }
 
     private var running: URL { Bundle.main.bundleURL }
     private var waiting: URL {
@@ -72,6 +96,91 @@ final class Updater {
         timer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { _ in
             MainActor.assumeIsolated { Updater.shared.check() }
         }
+        guard ownRelease != nil else { return }
+        checkRelease()
+        releaseTimer = Timer.scheduledTimer(withTimeInterval: 6 * 3600, repeats: true) { _ in
+            MainActor.assumeIsolated { Updater.shared.checkRelease() }
+        }
+    }
+
+    /// "v2026.10.6.2" is newer than "v2026.10.6": the numbers compare in order.
+    nonisolated static func isNewer(_ tag: String, than own: String) -> Bool {
+        func parts(_ t: String) -> [Int] { t.drop { !$0.isNumber }.split(separator: ".").map { Int($0) ?? 0 } }
+        let a = parts(tag), b = parts(own)
+        for i in 0..<max(a.count, b.count) {
+            let x = i < a.count ? a[i] : 0, y = i < b.count ? b[i] : 0
+            if x != y { return x > y }
+        }
+        return false
+    }
+
+    private struct Release: Decodable {
+        struct Asset: Decodable { var name: String; var browser_download_url: URL }
+        var tag_name: String
+        var body: String?
+        var assets: [Asset]
+    }
+
+    /// Asks GitHub for the newest release; a newer one is downloaded and staged. Quiet when
+    /// offline or when GitHub says no: it tries again in six hours.
+    func checkRelease() {
+        guard let own = ownRelease, !fetching, !applying else { return }
+        fetching = true
+        let api = URL(string: "https://api.github.com/repos/\(Self.releaseRepo)/releases/latest")!
+        let stage = waiting.deletingLastPathComponent(), skip = staged?.release, id = Bundle.main.bundleIdentifier ?? ""
+        Task { @MainActor in
+            defer { fetching = false }
+            if await Self.fetchRelease(api: api, own: own, skip: skip, bundleID: id, into: stage) != nil {
+                lastRead = nil; check()
+            }
+        }
+    }
+
+    /// Reads the newest release from `api`; when it is newer than `own` and not `skip` (already
+    /// staged), downloads its Takes.dmg and stages it. Returns the staged tag.
+    nonisolated static func fetchRelease(api: URL, own: String, skip: String?, bundleID: String, into stage: URL) async -> String? {
+        var req = URLRequest(url: api)
+        req.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+        guard let (data, resp) = try? await URLSession.shared.data(for: req),
+              (resp as? HTTPURLResponse)?.statusCode == 200,
+              let r = try? JSONDecoder().decode(Release.self, from: data),
+              isNewer(r.tag_name, than: own), skip != r.tag_name,
+              let dmg = r.assets.first(where: { $0.name == "Takes.dmg" }),
+              let (file, dresp) = try? await URLSession.shared.download(from: dmg.browser_download_url) else { return nil }
+        defer { try? FileManager.default.removeItem(at: file) }
+        guard (dresp as? HTTPURLResponse)?.statusCode == 200 else { return nil }
+        let notes = (try? JSONEncoder().encode(["tag": r.tag_name, "body": r.body ?? ""])) ?? Data()
+        return Self.stage(dmg: file, tag: r.tag_name, bundleID: bundleID, notes: notes, into: stage) ? r.tag_name : nil
+    }
+
+    /// Mounts the download, checks it is Takes at that tag, and stages its app as build.sh does.
+    /// The notes go beside it as release.json for What's new.
+    nonisolated static func stage(dmg: URL, tag: String, bundleID: String, notes: Data, into stage: URL) -> Bool {
+        let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("takes-update-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        guard (try? FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)) != nil,
+              (try? notes.write(to: tmp.appendingPathComponent("release.json"))) != nil else { return false }
+        let script = """
+        set -e
+        mnt="$0/mnt"; trap 'hdiutil detach -quiet "$mnt" 2>/dev/null || true' EXIT
+        hdiutil attach -quiet -nobrowse -readonly -mountpoint "$mnt" "$1"
+        plist="$mnt/Takes.app/Contents/Info.plist"
+        [ "$(/usr/libexec/PlistBuddy -c 'Print :ReleaseTag' "$plist")" = "$2" ]
+        [ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$plist")" = "$3" ]
+        mkdir -p "$4"; rm -rf "$4/incoming.app"
+        ditto "$mnt/Takes.app" "$4/incoming.app"
+        xattr -dr com.apple.quarantine "$4/incoming.app" 2>/dev/null || true
+        cp "$0/release.json" "$4/release.json"
+        rm -rf "$4/Takes.app"; mv "$4/incoming.app" "$4/Takes.app"
+        """
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/bin/sh")
+        p.arguments = ["-c", script, tmp.path, dmg.path, tag, bundleID, stage.path]
+        p.standardOutput = FileHandle.nullDevice
+        p.standardError = FileHandle.nullDevice
+        guard (try? p.run()) != nil else { return false }
+        p.waitUntilExit()
+        return p.terminationStatus == 0
     }
 
     /// Reads the staged Info.plist again only when it changed. A plist is read directly, not
@@ -81,18 +190,25 @@ final class Updater {
         let changed = (try? FileManager.default.attributesOfItem(atPath: plist.path))?[.modificationDate] as? Date
         if changed != nil, changed == lastRead { return }
         lastRead = changed
-        guard let info = NSDictionary(contentsOf: plist) as? [String: Any],
-              let stamp = info["BuildStamp"] as? String,
-              stamp != Bundle.main.infoDictionary?["BuildStamp"] as? String else {
-            if staged != nil { staged = nil }
-            return
-        }
+        let next = Self.read(waiting, ownStamp: Bundle.main.infoDictionary?["BuildStamp"] as? String)
+        if staged != next { staged = next }
+    }
+
+    /// The build staged at `waiting`, or nil when there is none or it is this build.
+    nonisolated static func read(_ waiting: URL, ownStamp: String?) -> Staged? {
+        guard let info = NSDictionary(contentsOf: waiting.appendingPathComponent("Contents/Info.plist")) as? [String: Any],
+              let stamp = info["BuildStamp"] as? String, stamp != ownStamp else { return nil }
         let changes = (info["BuildChanges"] as? String ?? "").split(separator: "\n").map(String.init)
         let json = try? Data(contentsOf: waiting.appendingPathComponent("Contents/Resources/changes.json"))
         var log = Change.load(json)
+        // A staged release shows its notes: the public repo's own commits say nothing.
+        let release = info["ReleaseTag"] as? String
+        if let release, let data = try? Data(contentsOf: waiting.deletingLastPathComponent().appendingPathComponent("release.json")),
+           let notes = try? JSONDecoder().decode([String: String].self, from: data), notes["tag"] == release {
+            log = Change.notes(notes["body"] ?? "")
+        }
         if log.isEmpty { log = changes.map { Change.parse(subject: $0) } }
-        let next = Staged(stamp: stamp, changes: changes, log: log)
-        if staged != next { staged = next }
+        return Staged(stamp: stamp, changes: changes, log: log, release: release)
     }
 
     /// What quitting now would cut off, if anything.
@@ -246,7 +362,7 @@ struct WhatsNew: View {
         VStack(alignment: .leading, spacing: 0) {
             VStack(alignment: .leading, spacing: 3) {
                 Text("What's new").font(Theme.display(17))
-                Text("\(staged.log.count == 1 ? "1 change" : "\(staged.log.count) changes") in the build from \(staged.stamp.split(separator: " ").dropFirst().joined(separator: " "))")
+                Text("\(staged.log.count == 1 ? "1 change" : "\(staged.log.count) changes") in \(staged.release.map { "Takes \($0.dropFirst())" } ?? "the build from \(staged.stamp.split(separator: " ").dropFirst().joined(separator: " "))")")
                     .font(Theme.sans(12)).foregroundStyle(Theme.muted)
             }
             .padding(.horizontal, 18).padding(.top, 16).padding(.bottom, 12)

@@ -24,7 +24,8 @@ final class FileWatch {
             guard let list = unsafeBitCast(paths, to: NSArray.self) as? [String], count > 0 else { return }
             FileWatch.collect(list)
         }
-        let flags = FSEventStreamCreateFlags(kFSEventStreamCreateFlagUseCFTypes)
+        // File events, so a chat save can be told apart from a real change (see `folders`).
+        let flags = FSEventStreamCreateFlags(kFSEventStreamCreateFlagUseCFTypes | kFSEventStreamCreateFlagFileEvents)
         guard let s = FSEventStreamCreate(nil, callback, &ctx, [url.path] as CFArray,
                                           FSEventStreamEventId(kFSEventStreamEventIdSinceNow), 0.4, flags) else { return }
         FSEventStreamSetDispatchQueue(s, .main)
@@ -52,7 +53,9 @@ final class FileWatch {
 
     /// Runs on the main queue (the stream's dispatch queue).
     private static func collect(_ paths: [String]) {
-        pending.formUnion(paths)
+        let changed = folders(paths)
+        guard !changed.isEmpty else { return }
+        pending.formUnion(changed)
         guard !due else { return }
         due = true
         DispatchQueue.main.asyncAfter(deadline: .now() + every) {
@@ -61,6 +64,17 @@ final class FileWatch {
             due = false
             NotificationCenter.default.post(name: .takesFilesChanged, object: list)
         }
+    }
+
+    /// The folders the changed files are in, as the listeners expect. The chat's own state file
+    /// is left out: every message saved it, and that made each pane of the session and the
+    /// sidebar read the disk again a second later (2026-10-07).
+    static func folders(_ paths: [String]) -> Set<String> {
+        Set(paths.compactMap { p in
+            let url = URL(fileURLWithPath: p)
+            if url.lastPathComponent.hasPrefix(".claude-chat.json") { return nil }
+            return url.deletingLastPathComponent().path
+        })
     }
 
     /// True if a change in `note` is inside `folder`.

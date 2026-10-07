@@ -35,6 +35,61 @@ final class MediaSearch {
         var text: String?
         var title: String? = nil  // session, project and board rows show this, not the file name
         var board: AppModel.Board? = nil
+        var rank: Double? = nil   // how far it stands out in its kind (z-score); nil = a name match
+    }
+
+    /// Only hits that stand out. The index scores every file, so without a cut a chip lists them all:
+    /// "headphones" gave 9 clips at z 2.1–2.8, then the rest from 1.6 down. Keep z ≥ 2 and within 2 of
+    /// the best; if none pass, the best 3. The same words in several edit versions show once.
+    nonisolated static func relevant(_ hits: [Hit]) -> [Hit] {
+        var seen = Set<String>()
+        let once = hits.filter { h in
+            guard h.kind == "speech", let t = h.text else { return true }
+            let edits = h.path.deletingLastPathComponent()
+            return seen.insert(edits.path + "|" + t).inserted
+        }
+        let ranks = once.compactMap(\.rank)
+        guard let best = ranks.max() else { return once }
+        let floor = max(2.0, best - 2.0)
+        let kept = once.filter { ($0.rank ?? .infinity) >= floor }
+        return kept.contains { $0.rank != nil } ? kept : Array(once.prefix(3))
+    }
+
+    /// The chips under the ⌘K field. A hit belongs to one kind, from where its file is.
+    enum Filter: String, CaseIterable, Identifiable {
+        case all, takes, edits, broll, stills, scripts
+        var id: String { rawValue }
+        var title: String {
+            switch self {
+            case .all: return "All"
+            case .takes: return "Takes"
+            case .edits: return "Edits"
+            case .broll: return "B-roll"
+            case .stills: return "Stills"
+            case .scripts: return "Scripts"
+            }
+        }
+    }
+
+    /// Which chip a hit belongs to. Sessions, projects and boards show only under All.
+    nonisolated static func filter(of hit: Hit) -> Filter {
+        if hit.title != nil { return .all }
+        let parts = hit.path.pathComponents
+        let ext = hit.path.pathExtension.lowercased()
+        if hit.kind == "script" || hit.path.lastPathComponent == "script.md" { return .scripts }
+        if parts.contains("broll") { return .broll }
+        if parts.contains("stills") || hit.kind == "image" || ["png", "jpg", "jpeg", "heic", "webp"].contains(ext) { return .stills }
+        if parts.contains("edits") { return .edits }
+        return .takes
+    }
+
+    /// True when the hit passes the chip and the project picked in the menu (nil = every project).
+    nonisolated static func keeps(_ hit: Hit, _ filter: Filter, project: URL?) -> Bool {
+        if filter != .all, Self.filter(of: hit) != filter { return false }
+        guard let project else { return true }
+        if hit.board != nil { return false }
+        let p = project.standardizedFileURL.path, h = hit.path.standardizedFileURL.path
+        return h == p || h.hasPrefix(p + "/")
     }
 
     var model: ModelState = .missing
@@ -315,7 +370,7 @@ final class MediaSearch {
         let hits = rows.compactMap { r -> Hit? in
             guard let p = r["path"] as? String else { return nil }
             return Hit(path: URL(fileURLWithPath: p), kind: r["kind"] as? String ?? "video",
-                       start: r["start"] as? Double ?? 0, text: r["text"] as? String)
+                       start: r["start"] as? Double ?? 0, text: r["text"] as? String, rank: r["rank"] as? Double)
         }
         return hits.isEmpty ? await Self.byName(q, root: root, limit: limit) : hits
     }
@@ -474,7 +529,11 @@ struct SearchPalette: View {
     @State private var hits: [MediaSearch.Hit] = []
     @State private var selected = 0
     @State private var busy = false
+    @State private var filter: MediaSearch.Filter = .all
+    @State private var project: URL?
     @FocusState private var focused: Bool
+
+    private var filtered: Bool { filter != .all || project != nil }
 
     init(query: String = "") { _query = State(initialValue: query) }
 
@@ -494,9 +553,10 @@ struct SearchPalette: View {
                         if busy { ProgressView().controlSize(.small) }
                     }
                     .padding(.horizontal, 16).frame(height: 52)
+                    chips
                     Rule()
                     if hits.isEmpty {
-                        Text(query.isEmpty ? search.statusLine : (busy ? " " : "Nothing found."))
+                        Text(query.isEmpty ? search.statusLine : (busy ? " " : filtered ? "Nothing found here. Pick All or All projects to search everything." : "Nothing found."))
                             .font(Theme.sans(12.5)).foregroundStyle(Theme.muted)
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .padding(16)
@@ -532,18 +592,62 @@ struct SearchPalette: View {
             .onKeyPress(.escape) { close(); return .handled }
             .onKeyPress(.downArrow) { selected = min(hits.count - 1, selected + 1); return .handled }
             .onKeyPress(.upArrow) { selected = max(0, selected - 1); return .handled }
-            .task(id: query) {
-                // Names show at once; footage follows.
-                let places = MediaSearch.places(query, app: app)
+            .onKeyPress(.tab, phases: .down) { press in
+                // Tab and ⇧Tab step through the chips.
+                let all = MediaSearch.Filter.allCases
+                let i = all.firstIndex(of: filter) ?? 0
+                filter = all[(i + (press.modifiers.contains(.shift) ? all.count - 1 : 1)) % all.count]
+                return .handled
+            }
+            .task(id: "\(query)|\(filter.rawValue)|\(project?.path ?? "")") {
+                // Names show at once; footage follows. A chip or project asks for more hits, then keeps its own.
+                let keep = { (h: MediaSearch.Hit) in MediaSearch.keeps(h, filter, project: project) }
+                let places = filter == .all ? MediaSearch.places(query, app: app, limit: project == nil ? 6 : 40).filter(keep) : []
                 hits = places; selected = 0
                 try? await Task.sleep(for: .milliseconds(180))
                 guard !Task.isCancelled else { return }
                 busy = true
-                let found = await search.search(query)
+                let found = await search.search(query, limit: 400)
                 guard !Task.isCancelled else { return }
-                hits = places + found; busy = false
+                hits = places + MediaSearch.relevant(found.filter(keep)).prefix(40); busy = false
             }
         }
+    }
+
+    /// All · Takes · Edits · B-roll · Stills · Scripts, and the project menu on the right.
+    private var chips: some View {
+        HStack(spacing: 6) {
+            ForEach(MediaSearch.Filter.allCases) { f in
+                Button { filter = f } label: {
+                    Text(f.title)
+                        .font(Theme.sans(12, filter == f ? .medium : .regular))
+                        .foregroundStyle(filter == f ? Theme.ink : Theme.muted)
+                        .padding(.horizontal, 10).frame(height: 24)
+                        .background(Capsule().fill(filter == f ? Theme.hover : .clear))
+                        .overlay(Capsule().strokeBorder(filter == f ? Theme.border : .clear))
+                        .contentShape(Capsule())
+                }
+                .buttonStyle(.plain)
+                .help(f == .all ? "Everything (Tab steps through the kinds)" : "Only \(f.title.lowercased())")
+            }
+            Spacer(minLength: 8)
+            Menu {
+                Button("All projects") { project = nil }
+                Divider()
+                ForEach(app.library.projects) { p in
+                    Button(p.name) { project = p.url }
+                }
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: "folder").font(.system(size: 11))
+                    Text(project?.lastPathComponent ?? "All projects").lineLimit(1)
+                    Image(systemName: "chevron.down").font(.system(size: 9, weight: .semibold))
+                }
+                .font(Theme.sans(12)).foregroundStyle(project == nil ? Theme.muted : Theme.ink)
+            }
+            .menuStyle(.button).buttonStyle(.plain).menuIndicator(.hidden).fixedSize()
+        }
+        .padding(.horizontal, 12).padding(.bottom, 10)
     }
 
     private func close() { search.shown = false }

@@ -2,7 +2,8 @@
 
 <p align="center">
   A Mac app for recording video takes and turning them into posts,<br>
-  with <a href="https://claude.com/claude-code">Claude Code</a> working beside you.
+  with <a href="https://claude.com/claude-code">Claude Code</a> working beside you.<br>
+  <a href="https://gettakes.app"><b>gettakes.app</b></a>
 </p>
 
 <p align="center">

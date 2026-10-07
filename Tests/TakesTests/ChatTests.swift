@@ -21,6 +21,67 @@ struct ChatTests {
         #expect(Updater.Change.load(nil).isEmpty)
     }
 
+    @Test func aReleaseIsNewerAndItsNotesReadAsChanges() {
+        #expect(Updater.isNewer("v2026.10.6.2", than: "v2026.10.6"))
+        #expect(Updater.isNewer("v2026.10.10", than: "v2026.10.9.3"))
+        #expect(Updater.isNewer("v2026.11.1", than: "v2026.10.30"))
+        #expect(!Updater.isNewer("v2026.10.6", than: "v2026.10.6"))
+        #expect(!Updater.isNewer("v2026.10.5", than: "v2026.10.6.2"))
+        let body = "### Chat\n- Sound files play right in their card\n\n### ⌘K\n- One search\n- Footage too\n\n### Install\nThe easy way:\n\n    curl -fsSL https://gettakes.app/install | bash\n\n<!-- source: b11ec45 -->"
+        let n = Updater.Change.notes(body)
+        #expect(n.map(\.area) == ["Chat", "⌘K", "⌘K"])
+        #expect(n.map(\.headline) == ["Sound files play right in their card", "One search", "Footage too"])
+        #expect(Set(n.map(\.id)).count == 3)
+    }
+
+    /// The whole path against a stand-in for GitHub: TAKES_UPDATE_E2E=<dir> with api.txt (the
+    /// release URL), own.txt (the old tag), stamp.txt (the old build stamp) and Apps/, made by
+    /// a test script. Read the release, download the DMG, stage it, read it as the sidebar does.
+    @Test func aReleaseUpdatesEndToEnd() async throws {
+        guard let dir = ProcessInfo.processInfo.environment["TAKES_UPDATE_E2E"].map({ URL(fileURLWithPath: $0) }) else { return }
+        func text(_ f: String) throws -> String { try String(contentsOf: dir.appending(path: f), encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines) }
+        let api = try #require(URL(string: try text("api.txt")))
+        let own = try text("own.txt"), stage = dir.appending(path: "Apps/.update.noindex")
+        #expect(await Updater.fetchRelease(api: api, own: "v2099.1.1", skip: nil, bundleID: "de.marvinaziz.takes", into: stage) == nil)
+        #expect(await Updater.fetchRelease(api: api, own: own, skip: nil, bundleID: "de.other", into: stage) == nil)
+        let tag = await Updater.fetchRelease(api: api, own: own, skip: nil, bundleID: "de.marvinaziz.takes", into: stage)
+        #expect(tag != nil)
+        #expect(await Updater.fetchRelease(api: api, own: own, skip: tag, bundleID: "de.marvinaziz.takes", into: stage) == nil)
+        let staged = try #require(Updater.read(stage.appending(path: "Takes.app"), ownStamp: try text("stamp.txt")))
+        #expect(staged.release == tag)
+        #expect(!staged.log.isEmpty)
+        #expect(!staged.log.contains { $0.area == "Install" })
+        #expect(Updater.read(stage.appending(path: "Takes.app"), ownStamp: staged.stamp) == nil)
+        try "\(staged.release ?? "") \(staged.log.map { "\($0.area): \($0.headline)" })".write(to: dir.appending(path: "staged.txt"), atomically: true, encoding: .utf8)
+    }
+
+    /// A release's DMG stages its app and notes; a DMG at another tag stages nothing.
+    @Test func aReleaseDMGIsStaged() throws {
+        let fm = FileManager.default
+        let dir = fm.temporaryDirectory.appending(path: "takes-stage-\(UUID().uuidString)")
+        defer { try? fm.removeItem(at: dir) }
+        let app = dir.appending(path: "disk/Takes.app/Contents")
+        try fm.createDirectory(at: app, withIntermediateDirectories: true)
+        let info: NSDictionary = ["ReleaseTag": "v2026.10.7", "CFBundleIdentifier": "de.example.takes", "BuildStamp": "abc Oct 7 10:00"]
+        try info.write(to: app.appending(path: "Info.plist"))
+        let dmg = dir.appending(path: "Takes.dmg")
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/hdiutil")
+        p.arguments = ["create", "-quiet", "-volname", "Takes", "-srcfolder", dir.appending(path: "disk").path, "-format", "UDZO", dmg.path]
+        try p.run(); p.waitUntilExit()
+        try #require(p.terminationStatus == 0)
+        let stage = dir.appending(path: ".update.noindex")
+        let notes = try JSONEncoder().encode(["tag": "v2026.10.7", "body": "### Chat\n- New"])
+        #expect(!Updater.stage(dmg: dmg, tag: "v2026.10.8", bundleID: "de.example.takes", notes: notes, into: stage))
+        #expect(!fm.fileExists(atPath: stage.appending(path: "Takes.app").path))
+        #expect(!Updater.stage(dmg: dmg, tag: "v2026.10.7", bundleID: "de.other", notes: notes, into: stage))
+        #expect(Updater.stage(dmg: dmg, tag: "v2026.10.7", bundleID: "de.example.takes", notes: notes, into: stage))
+        let staged = NSDictionary(contentsOf: stage.appending(path: "Takes.app/Contents/Info.plist"))
+        #expect(staged?["ReleaseTag"] as? String == "v2026.10.7")
+        #expect(fm.fileExists(atPath: stage.appending(path: "release.json").path))
+        #expect(!fm.fileExists(atPath: stage.appending(path: "incoming.app").path))
+    }
+
     @Test func aLostConnectionGoesOnARateLimitDoesNot() {
         #expect(ClaudeChat.isConnectionError("API Error: Connection error."))
         #expect(ClaudeChat.isConnectionError("Request timed out."))

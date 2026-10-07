@@ -82,6 +82,10 @@ if [[ -n "${BUILD:-}" ]]; then
   plutil -replace CFBundleVersion -string "$BUILD" "$APP/Contents/Info.plist"
 fi
 plutil -insert BuildChanges -string "$CHANGES" "$APP/Contents/Info.plist"
+# A GitHub release (release.sh sets TAKES_RELEASE): the tag lets Takes find newer releases (Updater.swift).
+if [[ -n "${TAKES_RELEASE:-}" ]]; then
+  plutil -insert ReleaseTag -string "$TAKES_RELEASE" "$APP/Contents/Info.plist"
+fi
 # The repo Takes > Release to GitHub releases from (only where the release script exists).
 if [[ -x scripts/public/release.sh ]]; then
   plutil -insert ReleaseRepo -string "$(git worktree list --porcelain | sed -n 1p | cut -d' ' -f2-)" "$APP/Contents/Info.plist"

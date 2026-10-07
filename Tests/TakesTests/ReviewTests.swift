@@ -95,6 +95,13 @@ struct IdleTests {
         #expect(!FileWatch.touches(["/Movies/Takes/p"], session))
     }
 
+    @Test func chatSavesAreNotChanges() {
+        let s = "/Movies/Takes/p/2026-09-27-x"
+        #expect(FileWatch.folders([s + "/.claude-chat.json", s + "/.claude-chat.json.sb-aa06c7e4-H7mIXC"]).isEmpty)
+        #expect(FileWatch.folders([s + "/script.md", s + "/edits/cut-v2.mp4"]) == [s, s + "/edits"])
+        #expect(FileWatch.folders([s]) == ["/Movies/Takes/p"])  // a new session folder: its project changed
+    }
+
     @Test func watcherSeesAWrite() async throws {
         let dir = FileManager.default.temporaryDirectory.appending(path: "takes-watch-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)

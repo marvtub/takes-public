@@ -71,6 +71,38 @@ struct BrandSnapshotTests {
         }
     }
 
+    /// ⌘K with its chips and the project menu, a script hit under them.
+    @Test func searchChips() throws {
+        guard let dir = ProcessInfo.processInfo.environment["TAKES_SNAPSHOT"] else { return }
+        let assets = URL(fileURLWithPath: #filePath).deletingLastPathComponent().appending(path: "../../assets")
+        for f in (try? FileManager.default.contentsOfDirectory(at: assets.appending(path: "fonts"), includingPropertiesForKeys: nil)) ?? []
+        where f.pathExtension == "ttf" { CTFontManagerRegisterFontsForURL(f as CFURL, .process, nil) }
+        let root = FileManager.default.temporaryDirectory.appending(path: "chips-\(UUID().uuidString)")
+        let s = root.appending(path: "Weekly Challenge/2026-10-06-bookkeeping-agent")
+        try FileManager.default.createDirectory(at: s, withIntermediateDirectories: true)
+        try Data("Look down at the computer, click once.".utf8).write(to: s.appending(path: "script.md"))
+        defer { try? FileManager.default.removeItem(at: root) }
+        let app = AppModel()
+        app.library.setRoot(root)
+        MediaSearch.shared.shown = true
+        defer { MediaSearch.shared.shown = false }
+        for (name, appearance) in [("light", NSAppearance.Name.aqua), ("dark", .darkAqua)] {
+            let v = SearchPalette(query: "computer").environment(app)
+                .environment(\.colorScheme, name == "dark" ? .dark : .light)
+            let host = NSHostingView(rootView: v)
+            host.appearance = NSAppearance(named: appearance)
+            host.frame = NSRect(x: 0, y: 0, width: 760, height: 420)
+            let win = NSWindow(contentRect: NSRect(x: -3000, y: -3000, width: 760, height: 420), styleMask: .borderless, backing: .buffered, defer: false)
+            win.contentView = host
+            host.layoutSubtreeIfNeeded()
+            RunLoop.main.run(until: Date().addingTimeInterval(1.0))
+            let rep = try #require(host.bitmapImageRepForCachingDisplay(in: host.bounds))
+            host.cacheDisplay(in: host.bounds, to: rep)
+            let data = try #require(rep.representation(using: .png, properties: [:]))
+            try data.write(to: URL(fileURLWithPath: dir).appending(path: "search-\(name).png"))
+        }
+    }
+
     /// The What's new panel the Update row opens, one change open.
     @Test func whatsNew() throws {
         guard let dir = ProcessInfo.processInfo.environment["TAKES_SNAPSHOT"] else { return }
@@ -85,7 +117,9 @@ struct BrandSnapshotTests {
             Updater.Change.parse(subject: "Notice: a card in the header's middle, with the file's picture and its name in words", id: "e"),
             Updater.Change.parse(subject: "Post tab: Article, a post for the blog as your blog shows it", id: "f"),
         ]
-        let staged = Updater.Staged(stamp: "0c2ec90 Oct 4 09:46", changes: [], log: log)
+        // A local build, and a GitHub release (its heading names the release).
+        for (staged, suffix) in [(Updater.Staged(stamp: "0c2ec90 Oct 4 09:46", changes: [], log: log), ""),
+                                 (Updater.Staged(stamp: "0c2ec90 Oct 4 09:46", changes: [], log: log, release: "v2026.10.9"), "-release")] {
         for (name, appearance) in [("light", NSAppearance.Name.aqua), ("dark", .darkAqua)] {
             let v = WhatsNew(staged: staged, updater: Updater.shared) {}
                 .environment(\.colorScheme, name == "dark" ? .dark : .light)
@@ -104,7 +138,8 @@ struct BrandSnapshotTests {
             let rep = try #require(host.bitmapImageRepForCachingDisplay(in: host.bounds))
             host.cacheDisplay(in: host.bounds, to: rep)
             let data = try #require(rep.representation(using: .png, properties: [:]))
-            try data.write(to: URL(fileURLWithPath: dir).appending(path: "whatsnew-\(name).png"))
+            try data.write(to: URL(fileURLWithPath: dir).appending(path: "whatsnew-\(name)\(suffix).png"))
+        }
         }
     }
 
