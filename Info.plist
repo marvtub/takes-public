@@ -16,7 +16,7 @@
     <key>NSPrincipalClass</key><string>NSApplication</string>
     <key>NSCameraUsageDescription</key><string>Takes records you on camera.</string>
     <key>NSMicrophoneUsageDescription</key><string>Takes records your voice.</string>
-    <key>NSSpeechRecognitionUsageDescription</key><string>Takes turns your voice notes into text for the chat.</string>
+    <key>NSSpeechRecognitionUsageDescription</key><string>Takes turns your voice notes into text for the chat, and follows your script as you talk.</string>
     <key>NSDownloadsFolderUsageDescription</key><string>The Takes chat asks for Downloads only when you send it a file from there, such as a video you AirDropped.</string>
     <key>NSDocumentsFolderUsageDescription</key><string>The Takes chat asks for Documents only when you send it a file from there.</string>
     <key>NSDesktopFolderUsageDescription</key><string>The Takes chat asks for the Desktop only when you send it a file from there.</string>

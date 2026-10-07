@@ -40,7 +40,9 @@ final class MediaSearch {
 
     /// Only hits that stand out. The index scores every file, so without a cut a chip lists them all:
     /// "headphones" gave 9 clips at z 2.1–2.8, then the rest from 1.6 down. Keep z ≥ 2 and within 2 of
-    /// the best; if none pass, the best 3. The same words in several edit versions show once.
+    /// the best of its own sort: pictures (frames, stills) and words (speech, scripts) score apart, or one
+    /// sentence with "laptop" in it hides every laptop clip. If none pass, the best 3. The same words in
+    /// several edit versions show once.
     nonisolated static func relevant(_ hits: [Hit]) -> [Hit] {
         var seen = Set<String>()
         let once = hits.filter { h in
@@ -48,10 +50,14 @@ final class MediaSearch {
             let edits = h.path.deletingLastPathComponent()
             return seen.insert(edits.path + "|" + t).inserted
         }
-        let ranks = once.compactMap(\.rank)
-        guard let best = ranks.max() else { return once }
-        let floor = max(2.0, best - 2.0)
-        let kept = once.filter { ($0.rank ?? .infinity) >= floor }
+        func words(_ h: Hit) -> Bool { h.kind == "speech" || h.kind == "script" }
+        var best: [Bool: Double] = [:]
+        for h in once { if let r = h.rank { best[words(h)] = max(best[words(h)] ?? r, r) } }
+        guard !best.isEmpty else { return once }
+        let kept = once.filter { h in
+            guard let r = h.rank, let b = best[words(h)] else { return true }
+            return r >= max(2.0, b - 2.0)
+        }
         return kept.contains { $0.rank != nil } ? kept : Array(once.prefix(3))
     }
 
@@ -531,6 +537,8 @@ struct SearchPalette: View {
     @State private var busy = false
     @State private var filter: MediaSearch.Filter = .all
     @State private var project: URL?
+    /// The helper's hits for the last query. A chip or project only filters them again.
+    @State private var found: (query: String, hits: [MediaSearch.Hit])?
     @FocusState private var focused: Bool
 
     private var filtered: Bool { filter != .all || project != nil }
@@ -603,13 +611,18 @@ struct SearchPalette: View {
                 // Names show at once; footage follows. A chip or project asks for more hits, then keeps its own.
                 let keep = { (h: MediaSearch.Hit) in MediaSearch.keeps(h, filter, project: project) }
                 let places = filter == .all ? MediaSearch.places(query, app: app, limit: project == nil ? 6 : 40).filter(keep) : []
+                if let found, found.query == query {
+                    hits = places + MediaSearch.relevant(found.hits.filter(keep)).prefix(40); selected = 0
+                    return
+                }
                 hits = places; selected = 0
                 try? await Task.sleep(for: .milliseconds(180))
                 guard !Task.isCancelled else { return }
                 busy = true
-                let found = await search.search(query, limit: 400)
-                guard !Task.isCancelled else { return }
-                hits = places + MediaSearch.relevant(found.filter(keep)).prefix(40); busy = false
+                let all = await search.search(query, limit: 400)
+                guard !Task.isCancelled else { busy = false; return }
+                found = (query, all)
+                hits = places + MediaSearch.relevant(all.filter(keep)).prefix(40); busy = false
             }
         }
     }
@@ -700,7 +713,7 @@ private struct SearchRow: View {
         HStack(spacing: 12) {
             ZStack {
                 RoundedRectangle(cornerRadius: 6).fill(Theme.hover)
-                if let thumb {
+                if let thumb = thumb ?? Self.thumbs.object(forKey: hit.id as NSString) {
                     Image(nsImage: thumb).resizable().aspectRatio(contentMode: .fill)
                 } else {
                     Image(systemName: icon).foregroundStyle(Theme.faint)
@@ -750,7 +763,17 @@ private struct SearchRow: View {
 
     static func time(_ s: Double) -> String { String(format: "%d:%02d", Int(s) / 60, Int(s) % 60) }
 
+    /// Pictures stay for the next keystroke, chip or query, so the list does not draw them again.
+    nonisolated(unsafe) static let thumbs: NSCache<NSString, NSImage> = { let c = NSCache<NSString, NSImage>(); c.countLimit = 400; return c }()
+
     static func thumbnail(_ hit: MediaSearch.Hit) async -> NSImage? {
+        if let cached = thumbs.object(forKey: hit.id as NSString) { return cached }
+        guard let image = await makeThumbnail(hit) else { return nil }
+        thumbs.setObject(image, forKey: hit.id as NSString)
+        return image
+    }
+
+    private static func makeThumbnail(_ hit: MediaSearch.Hit) async -> NSImage? {
         let ext = hit.path.pathExtension.lowercased()
         if ["png", "jpg", "jpeg", "heic", "webp"].contains(ext) {
             return await Task.detached { NSImage(contentsOf: hit.path) }.value

@@ -14,6 +14,7 @@
 //   image   stills, thumbnails, uploads
 //   speech  ~30-word pieces of each <video stem>.words.json, with their times
 //   script  the paragraphs of each session's script.md
+//   about   the description and keywords of each b-roll clip (_library/broll/.index.json)
 // The index is <root>/_library/search/index.json. A file is indexed again only when it changes.
 import AVFoundation
 import Accelerate
@@ -79,9 +80,38 @@ func unpack(_ s: String) -> [Float]? {
 struct Source {
     let rel: String
     let url: URL
-    let kind: String       // video, image, words, script
+    let kind: String       // video, image, words, script, about
     let mtime: Double
     let size: Int
+    var text: String? = nil
+}
+
+/// A hash that is the same in every run (Swift's hashValue is seeded per process).
+func stableHash(_ s: String) -> Int {
+    var h: UInt64 = 5381
+    for b in s.utf8 { h = (h &* 33) ^ UInt64(b) }
+    return Int(truncatingIfNeeded: h & 0x7fff_ffff_ffff)
+}
+
+/// Each b-roll clip's description and keywords, as a text source "<clip>#about". The words name
+/// things a frame can miss ("over-ear headphones"). A changed description is indexed again.
+func brollAbout(root: URL) -> [Source] {
+    let broll = root.appending(path: "_library/broll")
+    guard let d = try? Data(contentsOf: broll.appending(path: ".index.json")),
+          let all = try? JSONSerialization.jsonObject(with: d) as? [String: Any] else { return [] }
+    var out: [Source] = []
+    var seen = Set<String>()
+    for (key, value) in all {
+        guard let v = value as? [String: Any], let about = v["description"] as? String, !about.isEmpty,
+              let name = key.split(separator: "|").first.map(String.init), seen.insert(name).inserted else { continue }
+        let clip = broll.appending(path: name)
+        guard FileManager.default.fileExists(atPath: clip.path) else { continue }
+        var text = about
+        if let k = v["keywords"] as? String, !k.isEmpty { text += " Keywords: " + k }
+        out.append(Source(rel: "_library/broll/" + name + "#about", url: clip, kind: "about",
+                          mtime: 0, size: stableHash(text), text: text))
+    }
+    return out
 }
 
 /// The files to index, newest edit version only (an edit has many -vN copies).
@@ -129,6 +159,7 @@ func sources(root: URL) -> [Source] {
     // A transcript counts only when its video does (old edit versions keep their words.json).
     let kept = Set(videos.map { ($0.rel as NSString).deletingPathExtension })
     return out.filter { $0.kind != "words" || kept.contains(String($0.rel.dropLast(".words.json".count))) } + edits.values.map(\.1)
+        + brollAbout(root: root)
 }
 
 /// The video a words.json belongs to, as a path relative to the root.
@@ -270,7 +301,7 @@ actor Engine {
             return e.mtime != s.mtime || e.size != s.size
         }
         // Text first (fast), then stills, then video.
-        let order = ["script": 0, "words": 1, "image": 2, "video": 3]
+        let order = ["script": 0, "about": 0, "words": 1, "image": 2, "video": 3]
         let queue = todo.sorted { (order[$0.kind] ?? 9, $0.rel) < (order[$1.kind] ?? 9, $1.rel) }
         var done = 0, lastSave = Date()
         emit(["event": "progress", "done": 0, "total": queue.count])
@@ -317,6 +348,10 @@ actor Engine {
             }
             let vecs = try await documents(chunks.map(\.2))
             return (video + "#words", zip(chunks, vecs).map { Item(start: $0.0, end: $0.1, kind: "speech", text: $0.2, v: pack($1)) })
+        case "about":
+            let text = s.text ?? ""
+            let vecs = try await documents([text])
+            return (s.rel, zip([text], vecs).map { Item(start: 0, end: 0, kind: "about", text: String($0.prefix(400)), v: pack($1)) })
         case "image":
             let e = try await visionEncoder()
             let img = try ImageProcessor.prepare(loadImage(s.url), maxSoftTokens: 280)
@@ -349,17 +384,29 @@ actor Engine {
         gen.requestedTimeToleranceBefore = tol
         gen.requestedTimeToleranceAfter = tol
         let e = try await visionEncoder()
-        var items: [Item] = []
+        var spans: [(start: Double, end: Double)] = []
         var start = 0.0
-        while start < duration && items.count < maxFrames {
-            if stopRequested { throw CancellationError() }
-            let end = min(duration, start + segment)
-            let mid = (start + end) / 2
-            if let (cg, _) = try? await gen.image(at: CMTime(seconds: mid, preferredTimescale: 600)) {
-                let img = try ImageProcessor.prepare(rgb(cg), maxSoftTokens: 280)
-                items.append(Item(start: start, end: end, kind: "video", text: nil, v: pack(try await e.encodeImage(img))))
-            }
+        while start < duration && spans.count < maxFrames {
+            spans.append((start, min(duration, start + segment)))
             start += segment
+        }
+        // The CPU reads and prepares the next frame while the GPU encodes this one (~20% faster).
+        // Batches of frames gave nothing more: one frame already fills the GPU.
+        func prepare(_ at: Double) -> Task<PreparedImage?, Error> {
+            Task {
+                guard let (cg, _) = try? await gen.image(at: CMTime(seconds: at, preferredTimescale: 600)) else { return nil }
+                return try ImageProcessor.prepare(rgb(cg), maxSoftTokens: 280)
+            }
+        }
+        func mid(_ i: Int) -> Double { (spans[i].start + spans[i].end) / 2 }
+        var items: [Item] = []
+        var next = spans.isEmpty ? nil : prepare(mid(0))
+        for i in spans.indices {
+            if stopRequested { next?.cancel(); throw CancellationError() }
+            let img = try await next!.value
+            next = i + 1 < spans.count ? prepare(mid(i + 1)) : nil
+            guard let img else { continue }
+            items.append(Item(start: spans[i].start, end: spans[i].end, kind: "video", text: nil, v: pack(try await e.encodeImage(img))))
         }
         return items
     }
@@ -388,7 +435,10 @@ actor Engine {
         // Text-to-text scores run higher than text-to-picture scores, so rank by how far each hit
         // stands out within its own kind (z-score), not by the raw number.
         var byKind: [String: [Float]] = [:]
-        for (i, r) in rows.enumerated() { byKind[r.item.kind, default: []].append(scores[i]) }
+        // A b-roll description is text like a script paragraph, and there are too few of them for
+        // their own mean: they share the script numbers.
+        func group(_ k: String) -> String { k == "about" ? "script" : k }
+        for (i, r) in rows.enumerated() { byKind[group(r.item.kind), default: []].append(scores[i]) }
         var stats: [String: (Float, Float)] = [:]
         for (k, xs) in byKind {
             let mean = xs.reduce(0, +) / Float(xs.count)
@@ -397,18 +447,20 @@ actor Engine {
         }
         var best: [String: (Float, Int)] = [:]
         for (i, r) in rows.enumerated() {
-            if let kinds, !kinds.contains(r.item.kind) { continue }
-            let (mean, sd) = stats[r.item.kind]!
+            if let kinds, !kinds.contains(r.item.kind == "about" ? "video" : r.item.kind) { continue }
+            let (mean, sd) = stats[group(r.item.kind)]!
             let z = (scores[i] - mean) / sd
-            let file = r.file.hasSuffix("#words") ? String(r.file.dropLast(6)) : r.file
+            let file = r.file.hasSuffix("#words") ? String(r.file.dropLast(6)) : r.file.hasSuffix("#about") ? String(r.file.dropLast(6)) : r.file
             if best[file].map({ z > $0.0 }) ?? true { best[file] = (z, i) }
         }
         return best.sorted { $0.value.0 > $1.value.0 }.prefix(limit).map { file, hit in
             let item = rows[hit.1].item
-            var out: [String: Any] = ["path": root.appending(path: file).path, "file": file, "kind": item.kind,
+            // A description hit is the clip itself: kind video at 0 s, with the description as "about".
+            let about = item.kind == "about"
+            var out: [String: Any] = ["path": root.appending(path: file).path, "file": file, "kind": about ? "video" : item.kind,
                                       "start": item.start, "end": item.end,
                                       "score": Double(scores[hit.1]), "rank": Double(hit.0)]
-            if let t = item.text { out["text"] = t }
+            if let t = item.text { out[about ? "about" : "text"] = t }
             return out
         }
     }

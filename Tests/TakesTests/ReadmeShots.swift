@@ -105,6 +105,22 @@ let demoRoot = ProcessInfo.processInfo.environment["TAKES_DEMO"]
         try? enc.encode(log).write(to: ClaudeChat.file(session))
     }
 
+    /// Review notes on the short (2026-10-07, for gettakes.app/ai-video-editor): one fixed, with
+    /// Takes's reply, and one still open, with its area on the frame.
+    static func demoComments(_ session: URL) {
+        let file = "edits/ai-week-short-v1.mp4"
+        let at = "2026-10-05T16:20:00Z"
+        let f = CommentsFile(comments: [
+            Comment(id: "c1", file: file, start: 1.2, end: 3.4, rect: [0.08, 0.66, 0.84, 0.16],
+                    text: "The captions cover my hands here. Put them a bit higher.", status: "resolved", by: "you", at: at,
+                    replies: [Reply(by: "claude", text: "Moved them up in v2, clear of your hands. I saved it as a rule in your style.",
+                                    at: at, file: "edits/ai-week-short-v2.mp4", time: 1.2)]),
+            Comment(id: "c2", file: file, start: 5.0, end: 6.6, rect: [0.18, 0.08, 0.64, 0.4],
+                    text: "Punch in a little on my face for this line.", status: "open", by: "you", at: at),
+        ])
+        try? JSONEncoder().encode(f).write(to: CommentStore.file(session))
+    }
+
     static func playerLayers(in layer: CALayer) -> [AVPlayerLayer] {
         ((layer as? AVPlayerLayer).map { [$0] } ?? []) + (layer.sublayers ?? []).flatMap { playerLayers(in: $0) }
     }
@@ -160,6 +176,12 @@ let demoRoot = ProcessInfo.processInfo.environment["TAKES_DEMO"]
         app.preview = nil
         d.set(SessionMode.storyboard.rawValue, forKey: "rightTab")
         await shoot("storyboard", window(), wait: 4, tab: .storyboard)
+        // The review: the short on the stage, with notes on its frames (Assets tab).
+        Self.demoComments(main.url)
+        app.preview = main.url.appending(path: "edits/ai-week-short-v1.mp4")
+        d.set(SessionMode.assets.rawValue, forKey: "rightTab")
+        await shoot("review", window(), wait: 4, tab: .assets)
+        app.preview = nil
         d.set(SessionMode.post.rawValue, forKey: "rightTab")
         for p in PostPlatform.allCases {
             d.set(p.rawValue, forKey: "postPlatform")

@@ -32,6 +32,8 @@ final class AppModel {
     @ObservationIgnored @AppStorage("autoScroll") private var autoScrollStore = true
     @ObservationIgnored @AppStorage("speed") private var speedStore: Double = 40
     @ObservationIgnored @AppStorage("fontSize") private var fontSizeStore: Double = 34
+    // The iPhone app keeps the same name for its switch.
+    @ObservationIgnored @AppStorage("prompterFollowVoice") private var followVoiceStore = true
     var mode: Mode {
         get { access(keyPath: \.mode); return modeStore }
         set { withMutation(keyPath: \.mode) { modeStore = newValue } }
@@ -52,15 +54,39 @@ final class AppModel {
         get { access(keyPath: \.fontSize); return fontSizeStore }
         set { withMutation(keyPath: \.fontSize) { fontSizeStore = newValue } }
     }
+    /// Voice follow (2026-10-07): the prompters keep your place as you talk. Off: they scroll at `speed`.
+    var followVoice: Bool {
+        get { access(keyPath: \.followVoice); return followVoiceStore }
+        set { withMutation(keyPath: \.followVoice) { followVoiceStore = newValue }; syncVoice() }
+    }
+    let voice = VoiceFollow()
+    /// The prompters follow the voice now. False while it can't hear (they scroll at `speed`).
+    var following: Bool { followVoice && !voice.failed }
+
+    /// What every prompter shows: a storyboard shot's own lines, else the open script.
+    var promptText: String { shot?.say ?? library.current?.activeText ?? "" }
+    /// Changes when the prompters show another script (session, variant or shot).
+    var promptKey: String {
+        guard let doc = library.current else { return "" }
+        return shot.map { "\(doc.url.path)#shot-\($0.id)" } ?? "\(doc.url.path)#\(doc.activeDraft)"
+    }
 
     var phase: Phase = .idle { didSet { if phase != oldValue { holdCamera() } } }
     var error: String?
     var naming = false
     var scrolling = false {
         // Every teleprompter timer listens for this, including one whose view SwiftUI already replaced.
-        didSet { if !scrolling { NotificationCenter.default.post(name: .takesStopScrolling, object: nil) } }
+        didSet {
+            if !scrolling { NotificationCenter.default.post(name: .takesStopScrolling, object: nil) }
+            if scrolling != oldValue { syncVoice() }
+        }
     }
-    var resetToken = 0
+    var resetToken = 0 { didSet { voice.jump(to: 0) } }
+
+    /// Voice follow listens while the script plays.
+    private func syncVoice() {
+        if scrolling && followVoice { voice.start() } else { voice.stop() }
+    }
     /// A take file playing in the left pane instead of the live camera.
     var preview: URL? {
         didSet {
@@ -218,6 +244,8 @@ final class AppModel {
         // ~/Library/Logs/Takes beside the app's and read as the app's own (2026-10-04).
         if !Self.testing { HangWatch.start(); Perf.start(); PostFile.warmPortraits(library.root) }
         copilot.askChat = { [chats] text in chats.comments.send(text, title: "Comments", onStage: nil) }
+        voice.source = { [weak self] in self?.promptText ?? "" }
+        voice.problem = { [weak self] in self?.show(toast: $0) }
         library.onOpen = { [weak self] doc in
             guard let self else { return }
             // Make the session's chat now, not while the chat corner draws (that changed the

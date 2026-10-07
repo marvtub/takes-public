@@ -82,6 +82,10 @@ struct TakesApp: App {
                     .disabled(Onboarding.shared.shown)
                 Button("Play / Pause Script") { app.scrolling.toggle() }.keyboardShortcut("p")
                 Button("Script to Top") { app.resetToken += 1 }.keyboardShortcut(.upArrow, modifiers: .command)
+                Toggle("Follow My Voice", isOn: Binding(get: { app.followVoice }, set: { app.followVoice = $0 }))
+                Divider()
+                Button("Script in the Notch") { NotchPanel.shared.toggle(app) }.keyboardShortcut("n", modifiers: [.command, .option])
+                PrompterWindowButton()
                 Divider()
                 Button("Bigger Script") { app.fontSize = min(96, app.fontSize + 4) }.keyboardShortcut("=", modifiers: [.command, .option])
                 Button("Smaller Script") { app.fontSize = max(14, app.fontSize - 4) }.keyboardShortcut("-", modifiers: [.command, .option])
@@ -92,6 +96,11 @@ struct TakesApp: App {
                 Button("Forget Paired Phones") { app.phone?.forgetAll() }
             }
         }
+        Window("Prompter", id: "prompter") {
+            PrompterWindowView().environment(app).tint(Theme.accent)
+        }
+        .windowStyle(.hiddenTitleBar)
+        .defaultSize(width: 960, height: 600)
         Window("About Takes", id: "about") {
             AboutView().environment(app).tint(Theme.accent).foregroundStyle(Theme.ink)
         }
@@ -2176,7 +2185,8 @@ struct ScriptPane: View {
                          highlights: app.isRecording ? [] : scriptComments.filter(\.open).compactMap(\.quote),
                          reveal: reveal,
                          onSelect: { selection = $0 },
-                         onComment: startComment)
+                         onComment: startComment,
+                         voice: app.following ? app.voice : nil)
                 if doc.activeText.isEmpty {
                     Text("Paste your script here.\nOr have Takes write script.md into the session folder.")
                         .font(Theme.sans(18)).foregroundStyle(Theme.faint)
@@ -2248,7 +2258,8 @@ struct ScriptPane: View {
                     .contentShape(Circle())
             }
             .buttonStyle(.plain)
-            .help("Play / pause (Space when not typing, ⌘P)")
+            .help(app.following ? "Listen and follow your voice / stop (Space when not typing, ⌘P)"
+                                : "Play / pause (Space when not typing, ⌘P)")
             Button { app.resetToken += 1 } label: {
                 Image(systemName: "arrow.up.to.line").frame(width: 28, height: 28)
             }
@@ -2262,8 +2273,15 @@ struct ScriptPane: View {
             }
             .padding(.horizontal, 10).frame(height: 28)
             .background(Theme.hover, in: Capsule())
-            .help("Scroll speed")
+            .opacity(app.following ? 0.45 : 1)
+            .help(app.following ? "Scroll speed, when the prompter does not follow your voice" : "Scroll speed")
+            if !compact {
+                ToggleChip(title: "Voice", icon: "waveform", on: Binding(get: { app.followVoice }, set: { app.followVoice = $0 }))
+                    .help(app.followVoice ? "Follows your voice: the text moves as you talk. Off: it scrolls at the set speed."
+                                          : "Follow your voice: the text moves as you talk")
+            }
             Spacer(minLength: 6)
+            PrompterPlaces()
             HStack(spacing: 0) {
                 Button { app.fontSize = max(14, app.fontSize - 4) } label: {
                     Text("A").font(Theme.sans(11, .semibold)).frame(width: 26, height: 28)
@@ -2279,13 +2297,14 @@ struct ScriptPane: View {
             .background(Theme.hover, in: Capsule())
             if compact {
                 Menu {
+                    Toggle("Follow my voice", isOn: Binding(get: { app.followVoice }, set: { app.followVoice = $0 }))
                     Toggle("Auto-scroll when recording starts", isOn: Binding(get: { app.autoScroll }, set: { app.autoScroll = $0 }))
                     Toggle("3s countdown", isOn: Binding(get: { app.countdownOn }, set: { app.countdownOn = $0 }))
                 } label: {
                     Image(systemName: "slider.horizontal.3")
                 }
                 .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
-                .help("Auto-scroll and countdown")
+                .help("Voice follow, auto-scroll and countdown")
             } else {
                 ToggleChip(title: "Auto-scroll", icon: "arrow.down", on: Binding(get: { app.autoScroll }, set: { app.autoScroll = $0 }))
                     .help("Start scrolling when recording starts")
@@ -2323,6 +2342,35 @@ struct ScriptPane: View {
                         onClose: { withAnimation(Theme.motion) { focused = nil } },
                         onJump: { app.jump(to: doc.url.appending(path: $0), at: $1) })
         }
+    }
+}
+
+/// Two more places for the script (2026-10-07): the notch, under the camera, and a window of its
+/// own that can be mirrored.
+/// The menu item for the prompter window: a view, to get `openWindow`.
+struct PrompterWindowButton: View {
+    @Environment(\.openWindow) private var openWindow
+    var body: some View { Button("Script in Its Own Window") { openWindow(id: "prompter") } }
+}
+
+struct PrompterPlaces: View {
+    @Environment(AppModel.self) private var app
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some View {
+        HStack(spacing: 0) {
+            Button { NotchPanel.shared.toggle(app) } label: {
+                Image(systemName: "rectangle.topthird.inset.filled").frame(width: 28, height: 28)
+            }
+            .help("Script in the notch, under the camera (⌥⌘N)")
+            Rectangle().fill(Theme.border).frame(width: 1, height: 14)
+            Button { openWindow(id: "prompter") } label: {
+                Image(systemName: "macwindow.on.rectangle").frame(width: 28, height: 28)
+            }
+            .help("Script in a window of its own: any display, full screen, mirrored for a glass rig")
+        }
+        .buttonStyle(PillGhostStyle())
+        .background(Theme.hover, in: Capsule())
     }
 }
 
@@ -2715,6 +2763,14 @@ struct Prompter: NSViewRepresentable {
     var reveal: (quote: String, token: Int)? = nil
     var onSelect: (String) -> Void = { _ in }
     var onComment: () -> Void = {}
+    /// Voice follow: keeps the next word to say on the reading line and dims the words said.
+    /// Nil: the text scrolls at `speed`.
+    var voice: VoiceFollow? = nil
+    /// Where the line to read sits, as a share of the height (the red mark on Record).
+    var readingLine: CGFloat = 0.28
+    var inset = NSSize(width: 40, height: 36)
+    /// The page from the countdown on. Nil: the stage's navy. The notch is black.
+    var darkPage: NSColor? = nil
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
@@ -2727,13 +2783,14 @@ struct Prompter: NSViewRepresentable {
         tv.isAutomaticQuoteSubstitutionEnabled = false
         tv.drawsBackground = true
         tv.insertionPointColor = NSColor(Theme.accent)
-        tv.textContainerInset = NSSize(width: 40, height: 36)
+        tv.textContainerInset = inset
         scroll.drawsBackground = true
         scroll.scrollerStyle = .overlay
         tv.string = text
         // The cursor starts at the top: left at the end, the view scrolls down to keep it in sight.
         tv.setSelectedRange(NSRange(location: 0, length: 0))
         context.coordinator.scroll = scroll
+        context.coordinator.watchSize()
         apply(to: tv, context: context)
         return scroll
     }
@@ -2753,6 +2810,8 @@ struct Prompter: NSViewRepresentable {
             tv.setSelectedRange(NSRange(location: 0, length: 0))
             c.fontApplied = 0
             c.scrollToTop()
+            // Another script: voice follow starts at its first word.
+            if let v = voice { DispatchQueue.main.async { v.jump(to: 0) } }
         } else if tv.string != text && !c.isEditing {
             // A first script, written by the chat, starts at its first line, not at its end.
             let first = tv.string.isEmpty
@@ -2769,7 +2828,7 @@ struct Prompter: NSViewRepresentable {
         if context.coordinator.darkApplied != dark {
             context.coordinator.darkApplied = dark
             context.coordinator.fontApplied = 0
-            let page = dark ? Theme.stageNS : Theme.paperNS
+            let page = dark ? darkPage ?? Theme.stageNS : Theme.paperNS
             tv.backgroundColor = page
             tv.enclosingScrollView?.backgroundColor = page
             tv.selectedTextAttributes = [.backgroundColor: NSColor(Theme.accent).withAlphaComponent(dark ? 0.45 : 0.22)]
@@ -2790,7 +2849,8 @@ struct Prompter: NSViewRepresentable {
             c.lastReset = resetToken
             c.scrollToTop()
         }
-        c.setScrolling(scrolling, speed: speed)
+        c.setScrolling(scrolling && voice == nil, speed: speed)
+        c.follow(tv)
         c.highlight(tv, highlights)
         if let reveal, reveal.token != c.lastReveal {
             c.lastReveal = reveal.token
@@ -2818,6 +2878,11 @@ struct Prompter: NSViewRepresentable {
         private var offset: CGFloat = 0
 
         private var stopObserver: NSObjectProtocol?
+        private var followObservers: [NSObjectProtocol] = []
+        /// The script cut into words, for voice follow. Rebuilt when the text changes.
+        private var words = ScriptFollower("")
+        /// What is dimmed now: the text and the word count said.
+        private var dimmed: (String, Int)?
 
         init(_ p: Prompter) {
             parent = p; lastReset = p.resetToken; lastKey = p.contentKey
@@ -2825,11 +2890,101 @@ struct Prompter: NSViewRepresentable {
             stopObserver = NotificationCenter.default.addObserver(forName: .takesStopScrolling, object: nil, queue: .main) {
                 [weak self] _ in self?.setScrolling(false, speed: self?.speed ?? 40)
             }
+            followObservers.append(NotificationCenter.default.addObserver(forName: .takesFollowMoved, object: nil, queue: .main) {
+                [weak self] _ in MainActor.assumeIsolated { self?.moved() }
+            })
+            followObservers.append(NotificationCenter.default.addObserver(forName: NSScrollView.didEndLiveScrollNotification, object: nil, queue: .main) {
+                [weak self] n in MainActor.assumeIsolated { self?.handScrolled(n.object as? NSScrollView) }
+            })
         }
 
         deinit {
             timer?.invalidate()
             if let stopObserver { NotificationCenter.default.removeObserver(stopObserver) }
+            followObservers.forEach { NotificationCenter.default.removeObserver($0) }
+        }
+
+        // MARK: Voice follow
+
+        private var textView: NSTextView? { scroll?.documentView as? NSTextView }
+
+        /// A new size rewraps the text: put the line to read back on the reading line. Also the
+        /// first layout, when the view had no height yet.
+        func watchSize() {
+            guard let clip = scroll?.contentView else { return }
+            clip.postsFrameChangedNotifications = true
+            followObservers.append(NotificationCenter.default.addObserver(forName: NSView.frameDidChangeNotification, object: clip, queue: .main) {
+                [weak self] _ in MainActor.assumeIsolated {
+                    guard let self, let voice = self.parent.voice, let tv = self.textView else { return }
+                    self.place(tv, word: voice.next, animated: false)
+                }
+            })
+        }
+
+        /// Dims the words said and brings the next one to the reading line, or clears the dimming
+        /// when voice follow is off.
+        @MainActor
+        func follow(_ tv: NSTextView) {
+            guard let lm = tv.layoutManager else { return }
+            let said = parent.voice?.next ?? 0
+            guard dimmed == nil || dimmed!.0 != tv.string || dimmed!.1 != said else { return }
+            // The first time, the view jumps to its place; after that it glides.
+            let first = dimmed == nil
+            dimmed = (tv.string, said)
+            if parent.voice != nil { DispatchQueue.main.async { self.place(tv, word: said, animated: !first) } }
+            let all = NSRange(location: 0, length: (tv.string as NSString).length)
+            lm.removeTemporaryAttribute(.foregroundColor, forCharacterRange: all)
+            guard parent.voice != nil, said > 0 else { return }
+            if words.text != tv.string { words = ScriptFollower(tv.string) }
+            guard said <= words.ranges.count else { return }
+            let last = words.ranges[said - 1]
+            let ink = (parent.dark ? NSColor.white : Theme.inkNS).withAlphaComponent(0.38)
+            lm.addTemporaryAttributes([.foregroundColor: ink], forCharacterRange: NSRange(location: 0, length: last.location + last.length))
+        }
+
+        /// Voice follow found a new place: dim up to it and bring its line to the reading line.
+        @MainActor
+        private func moved() {
+            guard parent.voice != nil, let tv = textView else { return }
+            follow(tv)
+        }
+
+        @MainActor
+        func place(_ tv: NSTextView, word: Int, animated: Bool) {
+            guard let scroll, let lm = tv.layoutManager, let tc = tv.textContainer else { return }
+            if words.text != tv.string { words = ScriptFollower(tv.string) }
+            guard !words.ranges.isEmpty else { return }
+            let r = words.ranges[min(word, words.ranges.count - 1)]
+            lm.ensureLayout(for: tc)
+            let rect = lm.boundingRect(forGlyphRange: lm.glyphRange(forCharacterRange: r, actualCharacterRange: nil), in: tc)
+            let clip = scroll.contentView
+            let maxY = max(0, (scroll.documentView?.frame.height ?? 0) - clip.bounds.height)
+            let y = min(maxY, max(0, rect.minY + tv.textContainerOrigin.y - clip.bounds.height * parent.readingLine))
+            offset = y
+            guard abs(clip.bounds.origin.y - y) > 1 else { return }
+            if animated {
+                NSAnimationContext.runAnimationGroup { ctx in
+                    ctx.duration = 0.35
+                    ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                    clip.animator().setBoundsOrigin(NSPoint(x: 0, y: y))
+                }
+            } else {
+                clip.scroll(to: NSPoint(x: 0, y: y))
+            }
+            scroll.reflectScrolledClipView(clip)
+        }
+
+        /// After a scroll by hand, voice follow goes on from the line on the reading line.
+        @MainActor
+        private func handScrolled(_ s: NSScrollView?) {
+            guard let s, s === scroll, let voice = parent.voice, let tv = textView,
+                  let lm = tv.layoutManager, let tc = tv.textContainer else { return }
+            let clip = s.contentView
+            let p = NSPoint(x: 4, y: clip.bounds.minY + clip.bounds.height * parent.readingLine
+                            + parent.fontSize * 0.6 - tv.textContainerOrigin.y)
+            let glyph = lm.glyphIndex(for: p, in: tc)
+            if words.text != tv.string { words = ScriptFollower(tv.string) }
+            voice.jump(to: words.word(at: lm.characterIndexForGlyph(at: glyph)))
         }
 
         func textDidBeginEditing(_ notification: Notification) { isEditing = true }

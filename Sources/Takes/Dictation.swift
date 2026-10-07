@@ -122,9 +122,9 @@ final class Dictation: ObservableObject {
     }
 }
 
-/// One way to turn audio into words.
+/// One way to turn audio into words. Voice notes and voice follow (VoiceFollow.swift) both use it.
 @MainActor
-private protocol Listener: AnyObject {
+protocol Listener: AnyObject {
     /// Called on the audio thread.
     var feed: @Sendable (AVAudioPCMBuffer) -> Void { get }
     /// No more audio: wait for the last words.
@@ -135,7 +135,7 @@ private protocol Listener: AnyObject {
 /// macOS 26: SpeechAnalyzer, live words as you speak.
 @available(macOS 26, *)
 @MainActor
-private final class AnalyzerListener: Listener {
+final class AnalyzerListener: Listener {
     let feed: @Sendable (AVAudioPCMBuffer) -> Void
     private let analyzer: SpeechAnalyzer
     private let input: AsyncStream<AnalyzerInput>.Continuation
@@ -146,12 +146,13 @@ private final class AnalyzerListener: Listener {
         self.feed = feed; self.analyzer = analyzer; self.input = input; self.results = results
     }
 
-    static func make(input format: AVAudioFormat, heard: @escaping @MainActor (String?, String?) -> Void,
+    static func make(input format: AVAudioFormat, locale: Locale = Locale(identifier: "en-US"), hints: [String] = [],
+                     heard: @escaping @MainActor (String?, String?) -> Void,
                      problem: @escaping @MainActor (String) -> Void) async -> AnalyzerListener? {
-        let transcriber = SpeechTranscriber(locale: Locale(identifier: "en-US"), transcriptionOptions: [],
+        let transcriber = SpeechTranscriber(locale: locale, transcriptionOptions: [],
                                             reportingOptions: [.volatileResults], attributeOptions: [])
         do {
-            // The English model, once (a download the first time).
+            // The language's model, once (a download the first time).
             if let req = try await AssetInventory.assetInstallationRequest(supporting: [transcriber]) {
                 try await req.downloadAndInstall()
             }
@@ -166,6 +167,11 @@ private final class AnalyzerListener: Listener {
         }
         let analyzer = SpeechAnalyzer(modules: [transcriber])
         let (stream, cont) = AsyncStream<AnalyzerInput>.makeStream()
+        if !hints.isEmpty {
+            let context = AnalysisContext()
+            context.contextualStrings[.general] = Array(hints.prefix(100))
+            try? await analyzer.setContext(context)
+        }
         do {
             try await analyzer.start(inputSequence: stream)
         } catch {
@@ -224,11 +230,11 @@ private final class AnalyzerListener: Listener {
 
 /// Older macOS: SFSpeechRecognizer. Needs Siri and Dictation turned on.
 @MainActor
-private final class RecognizerListener: Listener {
+final class RecognizerListener: Listener {
     let feed: @Sendable (AVAudioPCMBuffer) -> Void
     private let request: SFSpeechAudioBufferRecognitionRequest
     private var task: SFSpeechRecognitionTask?
-    private var done = false
+    private(set) var done = false
 
     private init(request: SFSpeechAudioBufferRecognitionRequest) {
         self.request = request
@@ -236,7 +242,8 @@ private final class RecognizerListener: Listener {
         feed = { r.append($0) }
     }
 
-    static func make(heard: @escaping @MainActor (String?, String?) -> Void,
+    static func make(locale: Locale = Locale(identifier: "en-US"), hints: [String] = [],
+                     heard: @escaping @MainActor (String?, String?) -> Void,
                      problem: @escaping @MainActor (String) -> Void) async -> RecognizerListener? {
         let allowed = await withCheckedContinuation { (c: CheckedContinuation<Bool, Never>) in
             SFSpeechRecognizer.requestAuthorization { c.resume(returning: $0 == .authorized) }
@@ -245,7 +252,7 @@ private final class RecognizerListener: Listener {
             problem("Takes needs speech recognition: System Settings › Privacy & Security.")
             return nil
         }
-        guard let recognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-US")), recognizer.isAvailable else {
+        guard let recognizer = SFSpeechRecognizer(locale: locale), recognizer.isAvailable else {
             problem("Speech recognition isn't available right now.")
             return nil
         }
@@ -253,6 +260,7 @@ private final class RecognizerListener: Listener {
         request.shouldReportPartialResults = true
         request.addsPunctuation = true
         if recognizer.supportsOnDeviceRecognition { request.requiresOnDeviceRecognition = true }
+        request.contextualStrings = Array(hints.prefix(100))
         let me = RecognizerListener(request: request)
         me.task = recognizer.recognitionTask(with: request, resultHandler: Self.handler { [weak me] words, failure, final in
             if final || failure != nil { me?.done = true }

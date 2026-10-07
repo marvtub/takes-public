@@ -46,7 +46,7 @@ On its first launch Takes connects itself to Claude Code: it adds the `takes` MC
 | | |
 |---|---|
 | <img src="docs/storyboard.webp" alt="Storyboard tab"> | **Storyboard.** Claude writes the script and sketches every shot. A filmstrip runs along the top; each shot shows its line, how to film it and a Record button. |
-| <img src="docs/record.webp" alt="Record tab"> | **Record.** A teleprompter beside the camera, hook options to pick from, script variants and history, and every take with its keeper star. Camera and screen record as two files, synced. |
+| <img src="docs/record.webp" alt="Record tab"> | **Record.** A teleprompter beside the camera that follows your voice (also in the notch, under the camera, or mirrored for a glass rig), hook options to pick from, script variants and history, and every take with its keeper star. Camera and screen record as two files, synced. |
 | <img src="docs/post-linkedin.webp" alt="Post tab"> | **Post.** One draft per platform, each shown as that platform shows it, with variants, opening hooks, history, comments for Claude and a schedule. |
 
 **Every platform, previewed as it will look.**

@@ -3653,6 +3653,8 @@ def t_search_media(a):
             h["at"] = round(r.get("start", 0), 1)
         if r.get("text"):
             h["text"] = r["text"]
+        if r.get("about"):
+            h["about"] = r["about"]
         hits.append(h)
     out = {"results": hits, "indexed_files": (data.get("status") or {}).get("files")}
     if not hits:
@@ -5319,8 +5321,8 @@ TOOLS = [
     ("search_media", "Find footage by meaning across the whole library, on this Mac: clips by what they "
      "show ('hands typing', 'walking outside at night', 'close-up of a phone'), stills and thumbnails, and "
      "the words said in transcripts and scripts ('where I talk about pricing'). Each hit has path, kind "
-     "(video, image, speech, script) and, for video and speech, 'at' (seconds into the file). Best hit "
-     "first. Use it to find b-roll for a storyboard shot or an edit before asking the user to film it, and "
+     "(video, image, speech, script) and, for video and speech, 'at' (seconds into the file). A b-roll "
+     "clip found by its description has 'about' (that description). Best hit first. Use it to find b-roll for a storyboard shot or an edit before asking the user to film it, and "
      "to find an old take or clip he describes. Same search as ⌘K in the app.",
      {"query": {"type": "string", "description": "What to find, in plain words."},
       "kinds": {"type": "array", "items": {"type": "string", "enum": ["video", "image", "speech", "script"]},

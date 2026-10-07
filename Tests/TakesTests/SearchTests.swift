@@ -85,6 +85,10 @@ struct SearchTests {
         #expect(kept.count == 9)
         // A strong hit raises the bar: within 2 of the best.
         #expect(MediaSearch.relevant([hit("a.mov", 4.5), hit("b.mov", 3.0), hit("c.mov", 2.2)]).count == 2)
+        // A sentence with the word scores high, but it does not hide the clips that show the thing.
+        let laptop = MediaSearch.relevant([hit("e/cut.mp4", 4.9, "speech", text: "my laptop"), hit("s/script.md", 3.7, "script"),
+                                           hit("b/typing.mov", 2.55), hit("b/table.mov", 2.43), hit("b/walk.mov", 1.1)])
+        #expect(laptop.map(\.path.lastPathComponent) == ["cut.mp4", "script.md", "typing.mov", "table.mov"])
         // Nothing stands out: the best 3, so the list is never empty for a real query.
         #expect(MediaSearch.relevant([1.2, 1.1, 0.9, 0.5].map { hit("x\($0).mov", $0) }).count == 3)
         // The same sentence in eight versions of an edit shows once.
