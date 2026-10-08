@@ -49,6 +49,7 @@ struct PhoneFile: Codable, Hashable {
     var keeper: Bool?
     var duration: Double?
     var shot: String?       // a take filed under a storyboard shot
+    var model: String?      // the AI model that made it (generated/), as the Mac's Assets tab shows
 }
 
 /// The storyboard for the phone's Board tab: the shots in order, with their sketch, takes and comments.
@@ -92,6 +93,29 @@ struct PhonePlatformPost: Codable, Hashable {
     var limit: Int
 }
 
+/// A post on a side a plugin adds to the Post tab (2026-10-07): the Show HN or Reddit launch post.
+struct PhoneSidePost: Codable, Hashable {
+    /// The side's id ("hn", "reddit") and name.
+    var side: String
+    var name: String
+    /// The post's file name: what the phone sends back with a change.
+    var file: String
+    var title: String
+    var text: String
+    var link: String
+    /// "r/ClaudeAI".
+    var place: String
+    var flair: String
+    var user: String
+    var media: String
+    var status: String
+    var postedURL: String
+    /// The site's submit page with the title (and link) filled in.
+    var submit: String?
+    var titleLimit: Int
+    var textLimit: Int?
+}
+
 struct PhonePostVariant: Codable, Hashable {
     var slug: String
     var name: String
@@ -125,6 +149,8 @@ struct PhoneSessionDetail: Codable {
     var storyboard: [PhoneShot]?
     /// Every platform with a post, LinkedIn first. Older phones read only `post`.
     var posts: [PhonePlatformPost]?
+    /// The posts on the plugins' sides (Show HN, Reddit). Nil in the public copy.
+    var sides: [PhoneSidePost]?
 }
 
 /// One published post on the phone's performance tab: its latest numbers.
@@ -448,6 +474,14 @@ final class PhoneServer: PhoneHandler, @unchecked Sendable {
             let failed = await MainActor.run { Self.postDraft(b, in: s) }
             if let failed { return .error(failed.hasPrefix("It changed") ? 409 : 400, failed) }
             return .encode(["ok": true])
+        case ("POST", "/api/side"):
+            // ?side=hn: {"file", and "title", "text" or "status", "base": the text the phone started from}.
+            guard let s = session(req.query["id"]) else { return .error(404, "No such session") }
+            guard let side = Plugins.postSide(req.query["side"] ?? ""), side.phoneSave != nil else { return .error(404, "No such side") }
+            guard let b = try? JSONDecoder().decode([String: String].self, from: req.body) else { return .error(400, "No change") }
+            let failed = await MainActor.run { side.phoneSave?(s, b) }
+            if let failed { return .error(failed.hasPrefix("It changed") ? 409 : 400, failed) }
+            return .encode(["ok": true])
         case ("GET", "/api/profile/photo"):
             guard FileManager.default.fileExists(atPath: LinkedIn.photoURL.path) else { return .error(404, "No photo") }
             return .file(LinkedIn.photoURL, type: "image/jpeg")
@@ -734,13 +768,15 @@ final class PhoneServer: PhoneHandler, @unchecked Sendable {
                                    keeper: t.keeper, duration: t.duration, shot: t.shot))
         }
         let fm = FileManager.default
-        for folder in ["edits", "thumbnails", "stills", Self.uploads, "assets"] {
+        // Every folder the Mac's Assets tab shows (generated/ and others too, 2026-10-07), not a fixed list.
+        for folder in Self.folders(s) {
             let dir = s.appending(path: folder)
             for u in (try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil, options: .skipsHiddenFiles)) ?? []
             where !u.hasDirectoryPath && !u.lastPathComponent.hasSuffix(".json") {
                 let a = Self.attributes(u)
                 files.append(PhoneFile(path: u.standardizedFileURL.path, name: u.lastPathComponent, folder: folder,
-                                       kind: Self.kind(u), size: a.size, modified: a.modified ?? Date()))
+                                       kind: Self.kind(u), size: a.size, modified: a.modified ?? Date(),
+                                       model: folder == "generated" ? MadeWith.label(for: u) : nil))
             }
         }
         files.sort { $0.modified > $1.modified }
@@ -758,6 +794,7 @@ final class PhoneServer: PhoneHandler, @unchecked Sendable {
             p.hooks = drafts.1
             post = p
         }
+        let sides = await MainActor.run { Plugins.postSides.flatMap { $0.phone?(s) ?? [] } }
         let allComments = CommentStore.read(s).comments
         let open = allComments.filter(\.open).count
         let profile = Self.profile()
@@ -779,7 +816,7 @@ final class PhoneServer: PhoneHandler, @unchecked Sendable {
                                   script: (try? String(contentsOf: s.appending(path: "script.md"), encoding: .utf8)) ?? "",
                                   files: files, post: post, chat: chat, openComments: open, profile: profile,
                                   storyboard: board?.isEmpty == false ? board : nil,
-                                  posts: Self.platformPosts(s))
+                                  posts: Self.platformPosts(s), sides: sides.isEmpty ? nil : sides)
     }
 
     private func chat(_ s: URL) async -> PhoneChat {
@@ -1004,7 +1041,7 @@ final class PhoneServer: PhoneHandler, @unchecked Sendable {
             store.decline(s, wrongPost: b["wrongPost"] as? Bool ?? false, reason: reason, note: b["note"] as? String ?? "")
         case "feedback":
             guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return .error(400, "The note is empty") }
-            store.feedback(s, note: text, variant: variant, send: true)  // the phone has no feedback pill
+            store.feedback(s, note: text, variant: variant, edit: b["edit"] as? String, send: true)  // the phone has no feedback pill
         case "skip": store.skip(s)
         case "unskip": store.unskip(s.id)
         case "pullback": store.pullBack(s)
@@ -1168,6 +1205,16 @@ final class PhoneServer: PhoneHandler, @unchecked Sendable {
     static func attributes(_ u: URL) -> (size: Int64, modified: Date?) {
         let a = try? FileManager.default.attributesOfItem(atPath: u.path)
         return ((a?[.size] as? NSNumber)?.int64Value ?? 0, a?[.modificationDate] as? Date)
+    }
+
+    /// The session's folders with files for the phone: what the Assets tab shows, less the takes
+    /// (they come from session.json) and the "_" work folders.
+    nonisolated static func folders(_ s: URL) -> [String] {
+        let dirs = (try? FileManager.default.contentsOfDirectory(at: s, includingPropertiesForKeys: [.isDirectoryKey],
+                                                                 options: .skipsHiddenFiles)) ?? []
+        return dirs.filter(\.hasDirectoryPath).map(\.lastPathComponent)
+            .filter { !$0.hasPrefix("_") && !AssetStore.skipFolders.contains($0) }
+            .sorted()
     }
 
     static func kind(_ u: URL) -> String {

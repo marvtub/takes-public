@@ -365,7 +365,18 @@ struct UpdatePill: View {
     @EnvironmentObject var model: Model
 
     var body: some View {
-        if let u = model.update {
+        if let r = model.update?.renew {
+            // The Mac cannot renew the free 7-day profile: say what to do before the app stops.
+            HStack(alignment: .firstTextBaseline, spacing: 11) {
+                Image(systemName: "exclamationmark.triangle.fill").font(.system(size: 15)).frame(width: 20)
+                Text(r).font(.inter(.caption, .medium)).fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 0)
+            }
+            .foregroundStyle(Palette.danger)
+            .padding(.horizontal, 12).padding(.vertical, 10)
+            .accessibilityElement(children: .combine)
+        }
+        if let u = model.update, u.stamp != nil {
             Button {
                 Brand.select()
                 Task { await model.installUpdate() }

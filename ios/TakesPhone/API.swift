@@ -35,9 +35,12 @@ struct RemoteFile: Codable, Identifiable, Hashable {
     var duration: Double?
     /// A take filed under a storyboard shot (its id).
     var shot: String?
+    /// The AI model that made it (generated/). nil from an older Mac.
+    var model: String? = nil
     var id: String { path }
     var isVideo: Bool { kind == "video" }
     var isImage: Bool { kind == "image" }
+    var isAudio: Bool { kind == "audio" }
     /// Only a thumbnail can be a cover.
     var canBeCover: Bool { isImage && folder == "thumbnails" }
 
@@ -106,6 +109,28 @@ struct PlatformPost: Codable, Hashable, Identifiable {
     var id: String { platform }
 }
 
+/// A post on a side a Mac plugin adds: the Show HN or Reddit launch post. Nil list from a Mac
+/// before 2026-10-07, and from the public Mac.
+struct SidePost: Codable, Hashable, Identifiable {
+    var side: String
+    var name: String
+    var file: String
+    var title: String
+    var text: String
+    var link: String
+    var place: String
+    var flair: String
+    var user: String
+    var media: String
+    var status: String
+    var postedURL: String
+    var submit: String?
+    var titleLimit: Int
+    var textLimit: Int?
+    var id: String { file }
+    var posted: Bool { status == "posted" }
+}
+
 struct PostVariant: Codable, Hashable, Identifiable {
     var slug: String
     var name: String
@@ -148,6 +173,7 @@ struct SessionDetail: Codable, Hashable {
     var storyboard: [Shot]?
     /// Every platform with a post, LinkedIn first. Nil from a Mac before 2026-10-05.
     var posts: [PlatformPost]?
+    var sides: [SidePost]?
 }
 
 /// One storyboard shot: the sketch, the lines it covers, how to film it, the user's comments.
@@ -344,6 +370,8 @@ struct AppUpdate: Decodable, Equatable {
     var changes: [String]?
     var installing: Bool?
     var error: String?
+    /// Why the Mac cannot renew this app's 7-day profile. nil from an older Mac.
+    var renew: String?
 }
 
 struct APIError: LocalizedError {

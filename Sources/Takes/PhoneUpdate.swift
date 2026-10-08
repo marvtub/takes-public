@@ -23,6 +23,14 @@ final class PhoneUpdate: @unchecked Sendable {
         var changes: [String]?
         var installing: Bool?
         var error: String?
+        /// Why the Mac cannot renew the 7-day profile (refresh.sh writes renew.json), with or without a build.
+        var renew: String?
+    }
+
+    /// What refresh.sh writes when a renew fails.
+    struct Renew: Codable, Equatable {
+        var problem: String
+        var stops: Double?
     }
 
     let dir: URL
@@ -45,16 +53,26 @@ final class PhoneUpdate: @unchecked Sendable {
         return try? JSONDecoder().decode(Staged.self, from: data)
     }
 
+    func renewProblem() -> Renew? {
+        guard let data = try? Data(contentsOf: dir.appending(path: "renew.json")) else { return nil }
+        return try? JSONDecoder().decode(Renew.self, from: data)
+    }
+
     func status() -> Status {
         let (busy, error) = lock.withLock { (installing, lastError) }
-        return Self.status(staged: staged(), installing: busy, error: error)
+        return Self.status(staged: staged(), installing: busy, error: error, renew: renewProblem())
     }
 
     /// Pure: what to tell the phone. An error stays visible only while the build still waits.
-    static func status(staged: Staged?, installing: Bool, error: String?) -> Status {
-        guard let staged else { return Status() }
+    static func status(staged: Staged?, installing: Bool, error: String?, renew: Renew? = nil, now: Date = .now) -> Status {
+        let warn = renew.map { r -> String in
+            guard let stops = r.stops else { return r.problem }
+            let left = max(0, Int((stops - now.timeIntervalSince1970) / 3600))
+            return r.problem + (left < 48 ? " The app stops in \(left) h." : " The app stops in \(left / 24) days.")
+        }
+        guard let staged else { return Status(renew: warn) }
         return Status(stamp: staged.stamp, changes: staged.changes,
-                      installing: installing ? true : nil, error: installing ? nil : error)
+                      installing: installing ? true : nil, error: installing ? nil : error, renew: warn)
     }
 
     /// Starts the install in the background. False when nothing waits or one is already running.

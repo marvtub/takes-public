@@ -189,6 +189,18 @@ struct PhoneCommentTests {
         #expect(PhoneServer.firstAsk("AI for dentists", titled: true).hasSuffix("script.md.)"))
     }
 
+    @Test func everyAssetsFolderGoesToThePhone() throws {
+        let s = FileManager.default.temporaryDirectory.appending(path: "phone-folders-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: s) }
+        for f in ["edits", "generated", "storyboard", "_render", "history", "uploads"] {
+            try FileManager.default.createDirectory(at: s.appending(path: f), withIntermediateDirectories: true)
+        }
+        try Data().write(to: s.appending(path: "take-1.mov"))
+        #expect(PhoneServer.folders(s) == ["edits", "generated", "uploads"])
+        try #"{"cat-v1.png": "Nano Banana 2.1"}"#.write(to: s.appending(path: "generated/.models.json"), atomically: true, encoding: .utf8)
+        #expect(MadeWith.label(for: s.appending(path: "generated/cat-v1.png")) == "Nano Banana 2.1")
+    }
+
     @Test func boardChatsHaveTheirOwnIDs() {
         #expect(PhoneServer.lane("board:comments") == "find")
         #expect(PhoneServer.lane("board:comments-post") == "post")

@@ -518,9 +518,11 @@ struct ReviewDeck: View {
         }
         .sheet(isPresented: $noting) {
             if let s = top {
-                TextSheet(title: "Note for a redraft", text: "", button: "Send",
-                          hint: "What should change? Takes on the Mac writes three new drafts from it.") { t in
-                    decide(s, "feedback", ["text": t, "variant": variant], undo: nil, label: "Sent for a redraft")
+                // His edit goes with the note: the redraft keeps it as variant 1, as on the Mac (2026-10-07).
+                NoteSheet(text: text(s)) { note, edit in
+                    var b: [String: Any] = ["text": note, "variant": variant]
+                    if edit != text(s).trimmingCharacters(in: .whitespacesAndNewlines) { b["edit"] = edit }
+                    decide(s, "feedback", b, undo: nil, label: "Sent for a redraft")
                 }
                 .presentationDetents([.medium, .large])
             }
@@ -737,6 +739,44 @@ struct TextSheet: View {
             if let hint { Text(hint).font(.inter(.footnote)).foregroundStyle(Palette.muted).padding(.horizontal, 4) }
         }
         .onAppear { draft = text; focused = true }
+    }
+}
+
+/// A note for a redraft, under the draft he can edit first. The Mac keeps his edit as variant 1.
+struct NoteSheet: View {
+    let text: String
+    let send: (_ note: String, _ edit: String) async -> Void
+    @Environment(\.dismiss) private var dismiss
+    @State private var edit = ""
+    @State private var note = ""
+    @State private var sending = false
+    @FocusState private var noteFocused: Bool
+
+    var body: some View {
+        BrandSheet(title: "Note for a redraft", close: { dismiss() }) {
+            Button("Send") {
+                sending = true
+                Task {
+                    await send(note.trimmingCharacters(in: .whitespacesAndNewlines), edit.trimmingCharacters(in: .whitespacesAndNewlines))
+                    sending = false
+                    dismiss()
+                }
+            }
+            .buttonStyle(.pill(small: true))
+            .disabled(sending || note.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        } content: {
+            Text("The draft. Change it if you like: the redraft keeps your words.")
+                .font(.inter(.footnote)).foregroundStyle(Palette.muted).padding(.horizontal, 4)
+            FormCard {
+                TextField("", text: $edit, axis: .vertical).font(.inter(.callout)).lineLimit(3...10)
+            }
+            Text("What should change? Takes on the Mac writes three new drafts from it.")
+                .font(.inter(.footnote)).foregroundStyle(Palette.muted).padding(.horizontal, 4)
+            FormCard {
+                TextField("Note", text: $note, axis: .vertical).font(.inter(.callout)).lineLimit(2...8).focused($noteFocused)
+            }
+        }
+        .onAppear { edit = text; noteFocused = true }
     }
 }
 

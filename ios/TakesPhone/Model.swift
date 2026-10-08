@@ -163,7 +163,7 @@ final class Model: ObservableObject {
     /// Asks the Mac whether a new build of this app waits. An older Mac Takes answers 404: nothing.
     func checkUpdate() async {
         guard phase == .open, let u = try? await api.appUpdate() else { return }
-        let next = u.stamp == nil ? nil : u
+        let next = u.stamp == nil && u.renew == nil ? nil : u
         if next != update { update = next }
         if updating, u.installing != true { updating = false }
     }
@@ -344,6 +344,11 @@ final class Model: ObservableObject {
         let op = Outbox.Op(what == "script" ? .script : .post, session: id, path: "/api/" + what, query: query,
                            json: ["text": text, "base": base])
         _ = try await outbox.send(op)
+    }
+
+    /// A launch post's title, text or status. `side`: hn or reddit.
+    func sideSave(_ id: String, side: String, _ body: [String: String]) async throws {
+        _ = try await outbox.send(Outbox.Op(.side, session: id, path: "/api/side", query: ["id": id, "side": side], json: body))
     }
 
     func postDraft(_ id: String, _ body: [String: String]) async throws {

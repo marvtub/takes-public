@@ -24,10 +24,61 @@ session = {"id": SID, "title": "Offline video", "project": "Tests", "created": N
            "takes": 0, "running": False, "unread": False, "notice": False, "published": False}
 
 
+FOLDER = "/tmp/" + SID
+
+
+def file(folder, name, kind, model=None):
+    f = {"path": "%s/%s/%s" % (FOLDER, folder, name), "name": name, "folder": folder, "kind": kind,
+         "size": 1000, "modified": NOW}
+    if model:
+        f["model"] = model
+    return f
+
+
+def files():
+    """GET /test/files turns these on: six edits, and generated files with the model that made them."""
+    if not state.get("files"):
+        return []
+    return ([file("edits", "hook-v%d.mp4" % i, "video") for i in range(1, 7)] +
+            [file("generated", "desk-v1.png", "image", "Nano Banana 2.1"),
+             file("generated", "intro-v1.wav", "audio", "The user (ElevenLabs)")])
+
+
+def wav(seconds=2, rate=8000):
+    """A quiet sound for /media, so the chat's sound card can play."""
+    import struct
+    n = seconds * rate
+    return (b"RIFF" + struct.pack("<I", 36 + n * 2) + b"WAVEfmt " + struct.pack("<IHHIIHH", 16, 1, 1, rate, rate * 2, 2, 16)
+            + b"data" + struct.pack("<I", n * 2) + b"\0" * (n * 2))
+
+
+def side(site, file, title, text, **more):
+    p = {"side": site, "name": "Hacker News" if site == "hn" else "Reddit", "file": file, "title": title, "text": text,
+         "link": "", "place": "", "flair": "", "user": "tester", "media": "", "status": "draft", "postedURL": "",
+         "submit": None, "titleLimit": 80 if site == "hn" else 300, "textLimit": None if site == "hn" else 40000}
+    p.update(more)
+    return p
+
+
+def launch():
+    """GET /test/launch turns these on: a Show HN post and a Reddit post for the session."""
+    state["sides"] = [
+        side("hn", "2026-10-07-hn.md", "Show HN: A test app for video takes",
+             "Hi HN, this is a test post.\n\nIt has a second paragraph with a *word* in italics.",
+             link="https://github.com/example/app", submit="https://news.ycombinator.com/submitlink?u=x&t=y"),
+        side("reddit", "2026-10-07-reddit.md", "I made a test app for video takes",
+             "What it does:\n\n- records takes\n- writes posts", place="r/test", flair="Showcase",
+             media="a 20 s screen recording", submit="https://www.reddit.com/r/test/submit?title=x"),
+    ]
+
+
 def detail():
-    return {"session": session, "folder": "/tmp/" + SID, "script": state["script"], "files": [],
-            "post": None, "chat": state["chat"],
-            "openComments": len(state["comments"]), "profile": None, "storyboard": None}
+    d = {"session": session, "folder": FOLDER, "script": state["script"], "files": files(),
+         "post": None, "chat": state["chat"],
+         "openComments": len(state["comments"]), "profile": None, "storyboard": None}
+    if state.get("sides"):
+        d["sides"] = state["sides"]
+    return d
 
 
 class H(BaseHTTPRequestHandler):
@@ -89,6 +140,38 @@ class H(BaseHTTPRequestHandler):
             state["chat"] = chat
             state["chat_revision"] += 1
             return self.send({"ok": True})
+        if p == "/test/files":
+            state["files"] = True
+            chat = {"running": False, "messages": [
+                message(200, "Here is the voice-over:\n\n%s/generated/intro-v1.wav" % FOLDER),
+                dict(message(201, "And the picture:\n\n%s/generated/desk-v1.png" % FOLDER), done=True)]}
+            chat["messages"][0]["done"] = True
+            state["chat"] = chat
+            state["chat_revision"] += 1
+            return self.send({"ok": True})
+        if p == "/test/launch":
+            launch()
+            return self.send({"ok": True})
+        if p == "/api/side" and method == "POST":
+            j = json.loads(self.body())
+            post = next((x for x in state.get("sides") or [] if x["file"] == j.get("file")), None)
+            if post is None:
+                return self.send({"error": "That post is gone from the Mac"}, 400)
+            for k in ("title", "text", "status"):
+                if k in j:
+                    post[k] = j[k]
+            state["log"].append({"side": q.get("side"), **{k: v for k, v in j.items() if k != "base"}})
+            return self.send({"ok": True})
+        if p == "/media" and q.get("path", "").endswith(".wav"):
+            b = wav()
+            self.send_response(200)
+            self.send_header("Content-Type", "audio/wav")
+            self.send_header("Content-Length", str(len(b)))
+            self.end_headers()
+            self.wfile.write(b)
+            return
+        if p == "/api/update" and state.get("files"):
+            return self.send({"renew": "Xcode lost your Apple ID. On the Mac: Xcode > Settings > Apple Accounts, sign in. The app stops in 30 h."})
         if p == "/api/ping":
             return self.send({"ok": "takes"})
         if p == "/api/pair":

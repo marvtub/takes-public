@@ -12,7 +12,7 @@ import UIKit
 @MainActor
 final class Outbox: ObservableObject {
     struct Op: Codable, Identifiable, Hashable {
-        enum Kind: String, Codable { case newSession, script, post, postDraft, comment, reply, resolve, keeper, cover, decide, say, take, archive }
+        enum Kind: String, Codable { case newSession, script, post, postDraft, comment, reply, resolve, keeper, cover, decide, say, take, archive, side }
         var id = UUID()
         var kind: Kind
         /// The session id, or the suggestion id for a decision.
@@ -57,6 +57,7 @@ final class Outbox: ObservableObject {
             case .say: return "Message: \(string("text") ?? "")"
             case .take: return "Take \(name ?? "")"
             case .archive: return query["on"] == "0" ? "Unarchive" : "Archive"
+            case .side: return string("status").map { $0 == "posted" ? "Launch post marked posted" : "Launch post back to draft" } ?? "Launch post edit"
             }
         }
     }
@@ -244,12 +245,15 @@ final class Outbox: ObservableObject {
     func retry(_ op: Op) async {
         guard let model, let i = ops.firstIndex(where: { $0.id == op.id }) else { return }
         var o = ops[i]
-        if [.script, .post, .postDraft].contains(o.kind), o.string("base") != nil,
+        if [.script, .post, .postDraft, .side].contains(o.kind), o.string("base") != nil,
            let d = try? await model.api.detail(o.session) {
             var j = o.json
             switch o.kind {
             case .script: j["base"] = d.script
             case .post: j["base"] = d.post?.text ?? ""
+            case .side:
+                let p = d.sides?.first { $0.file == o.string("file") }
+                j["base"] = (o.string("title") != nil ? p?.title : p?.text) ?? j["base"]
             default: j["base"] = d.post?.variants?.first { $0.slug == o.string("slug") }?.text ?? j["base"]
             }
             o.body = try? JSONSerialization.data(withJSONObject: j)

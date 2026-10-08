@@ -15,6 +15,8 @@ PROFILES="$HOME/Library/Developer/Xcode/UserData/Provisioning Profiles"
 RENEW_DAYS=3
 # When the profile on the iPhone stops (epoch seconds), written after each install.
 STATE="$HOME/Library/Application Support/Takes/phone-app-expires"
+# Why the last renew failed, for the phone to show. Removed after a renew works.
+PROBLEM="$HOME/Library/Application Support/Takes/phone-update/renew.json"
 log() { echo "$(date '+%F %T') $*"; }
 notify() { osascript -e "display notification \"$1\" with title \"Takes iPhone app\"" >/dev/null 2>&1 || true; }
 
@@ -87,7 +89,18 @@ if DEVICE="$DEVICE" ./install.sh --now >>"$HOME/Library/Logs/takes-phone-refresh
   mkdir -p "$(dirname "$STATE")"
   date -j -u -f '%Y-%m-%dT%H:%M:%SZ' "$exp" +%s > "$STATE"
   log "Renewed. Takes runs on the iPhone until $exp."
+  rm -f "$PROBLEM"
 else
   log "Renew failed. See ~/Library/Logs/takes-phone-refresh.build.log"
-  notify "Could not renew Takes on the iPhone. See takes-phone-refresh.build.log."
+  # Xcode can lose the Apple ID (2026-10-06: two days of silent failures). Say what to do, on the
+  # phone's Update row too (PhoneUpdate.swift reads this file), not only in a Mac notification.
+  if tail -40 "$HOME/Library/Logs/takes-phone-refresh.build.log" | grep -q "No Accounts"; then
+    why="Xcode lost your Apple ID. On the Mac: Xcode > Settings > Apple Accounts, sign in."
+  else
+    why="The Mac could not renew this app. See takes-phone-refresh.build.log on the Mac."
+  fi
+  stops=$(( $(date +%s) + left * 3600 ))
+  mkdir -p "$(dirname "$PROBLEM")"
+  python3 -c 'import json,sys; json.dump({"problem": sys.argv[1], "stops": int(sys.argv[2])}, open(sys.argv[3], "w"))' "$why" "$stops" "$PROBLEM"
+  notify "$why Takes stops on the iPhone in ${left}h."
 fi

@@ -37,6 +37,12 @@ struct PostSide: Identifiable {
     let pane: @MainActor (_ session: URL, _ switcher: AnyView) -> AnyView
     /// What the session's chat hears while this side is open.
     let context: @MainActor (_ session: URL) -> String
+    /// The session's posts on this side for the phone's Post tab (2026-10-07). None: the phone
+    /// does not show the side.
+    var phone: (@MainActor (_ session: URL) -> [PhoneSidePost])? = nil
+    /// A change from the phone: {"file", and "title", "text" or "status", "base"}. Nil when done,
+    /// else what went wrong.
+    var phoneSave: (@MainActor (_ session: URL, _ change: [String: String]) -> String?)? = nil
 }
 
 enum Plugins {

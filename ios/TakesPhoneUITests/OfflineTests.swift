@@ -3,9 +3,9 @@ import XCTest
 /// Offline (2026-10-03): with the Mac away, a script edit and a comment wait on the phone, show
 /// at once, and reach the Mac when it is back. Needs ios/standin.py (check.sh offline starts it).
 final class OfflineTests: XCTestCase {
-    private var server: String { ProcessInfo.processInfo.environment["TAKES_SERVER"] ?? "http://127.0.0.1:8797" }
+    var server: String { ProcessInfo.processInfo.environment["TAKES_SERVER"] ?? "http://127.0.0.1:8797" }
 
-    private func get(_ path: String) throws -> Data {
+    func get(_ path: String) throws -> Data {
         var out: Data?
         let done = expectation(description: path)
         URLSession.shared.dataTask(with: URL(string: server + path)!) { d, _, _ in out = d; done.fulfill() }.resume()
@@ -78,7 +78,7 @@ final class OfflineTests: XCTestCase {
         _ = try get("/test/down?s=30")
         XCTAssertTrue(app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS 'Changes wait on the phone'")).firstMatch.waitForExistence(timeout: 15))
         app.buttons["New video"].tap()
-        let field = app.textFields["Message Claude"].exists ? app.textFields["Message Claude"] : app.textViews["Message Claude"]
+        let field = app.textFields["Message Takes"].exists ? app.textFields["Message Takes"] : app.textViews["Message Takes"]
         XCTAssertTrue(field.waitForExistence(timeout: 8))
         field.tap()
         field.typeText("A video about offline mode.")
@@ -102,11 +102,48 @@ final class OfflineTests: XCTestCase {
         shot(app, "offline-6-new-video-back")
     }
 
-    private func text(_ app: XCUIApplication, _ t: String) -> XCUIElement {
+    /// 2026-10-07: generated files and their model, a sound that plays in its chat card, the Files
+    /// tab's first four with Show all, a folded section, and the renew warning on the home screen.
+    func testFilesAndSound() throws {
+        _ = try get("/test/files")
+        let app = XCUIApplication()
+        app.launchEnvironment["TAKES_SERVER"] = server
+        app.launch()
+        app.buttons["Connect"].tap()
+        if app.tabBars.buttons["Videos"].waitForExistence(timeout: 15) { app.tabBars.buttons["Videos"].tap() }
+        XCTAssertTrue(text(app, "Xcode lost your Apple ID").waitForExistence(timeout: 15))
+        shot(app, "files-1-renew")
+
+        let row = text(app, "Offline video")
+        XCTAssertTrue(row.waitForExistence(timeout: 15))
+        row.tap()
+        let play = app.buttons["Play intro-v1.wav"]
+        XCTAssertTrue(play.waitForExistence(timeout: 10))
+        shot(app, "files-2-chat-sound")
+        play.tap()
+        XCTAssertTrue(app.buttons["Stop intro-v1.wav"].waitForExistence(timeout: 5))
+        sleep(1)
+        shot(app, "files-3-chat-playing")
+
+        app.buttons["Files"].firstMatch.tap()
+        XCTAssertTrue(text(app, "Show all 6").waitForExistence(timeout: 5))
+        XCTAssertTrue(text(app, "Nano Banana 2.1").exists)
+        XCTAssertFalse(text(app, "hook-v5.mp4").exists)
+        shot(app, "files-4-first-four")
+        text(app, "Show all 6").tap()
+        XCTAssertTrue(text(app, "hook-v5.mp4").waitForExistence(timeout: 5))
+        app.buttons["Fold edits"].tap()
+        XCTAssertTrue(app.buttons["Open edits"].waitForExistence(timeout: 5))
+        sleep(1)
+        shot(app, "files-5-folded")
+        app.buttons["Open edits"].tap()  // the fold stays for every session: leave it open
+    }
+
+    func text(_ app: XCUIApplication, _ t: String) -> XCUIElement {
         app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS %@", t)).firstMatch
     }
 
-    private func shot(_ app: XCUIApplication, _ name: String) {
+    func shot(_ app: XCUIApplication, _ name: String) {
         guard let dir = ProcessInfo.processInfo.environment["TAKES_SHOTS"] else { return }
         try? app.screenshot().pngRepresentation.write(to: URL(fileURLWithPath: dir).appending(path: name + ".png"))
     }

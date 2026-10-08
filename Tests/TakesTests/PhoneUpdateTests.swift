@@ -15,6 +15,11 @@ struct PhoneUpdateTests {
         let s = PhoneUpdate.status(staged: staged, installing: true, error: "old")
         #expect(s.installing == true && s.error == nil && s.stamp == staged.stamp)
         #expect(PhoneUpdate.status(staged: staged, installing: false, error: "no phone").error == "no phone")
+        // A failed renew shows even with no build waiting, with the time left.
+        let now = Date(timeIntervalSince1970: 1_000_000)
+        let r = PhoneUpdate.Renew(problem: "Xcode lost your Apple ID.", stops: 1_000_000 + 30 * 3600)
+        #expect(PhoneUpdate.status(staged: nil, installing: false, error: nil, renew: r, now: now).renew == "Xcode lost your Apple ID. The app stops in 30 h.")
+        #expect(PhoneUpdate.status(staged: staged, installing: false, error: nil, renew: r, now: now).stamp == staged.stamp)
     }
 
     @Test func readsWhatInstallShWrote() throws {

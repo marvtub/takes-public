@@ -52,7 +52,7 @@ struct SessionView: View {
                     case .script: ScriptView(sessionID: session.id, text: detail.script, reload: { await reload() })
                     case .board: BoardView(sessionID: session.id, detail: detail, show: { showing = $0 },
                                            record: { shooting = $0 }, reload: { await reload() }, toChat: { tab = .chat })
-                    case .post: PostView(sessionID: session.id, post: detail.post, posts: detail.posts ?? [], profile: detail.profile,
+                    case .post: PostView(sessionID: session.id, post: detail.post, posts: detail.posts ?? [], sides: detail.sides ?? [], profile: detail.profile,
                                          show: { showing = $0 }, files: detail.files, reload: { await reload() })
                     }
                 } else if let failed {
@@ -572,7 +572,7 @@ struct Bubble: View, Equatable {
         }
         for line in text.components(separatedBy: "\n") {
             let t = line.trimmingCharacters(in: .whitespaces).trimmingCharacters(in: CharacterSet(charactersIn: "`"))
-            if t.hasPrefix("/"), !t.contains(" ") || t.contains("/Movies/"), ["mp4", "mov", "png", "jpg", "jpeg", "m4a", "wav", "md", "gif", "webp", "heic"]
+            if t.hasPrefix("/"), !t.contains(" ") || t.contains("/Movies/"), ["mp4", "mov", "png", "jpg", "jpeg", "m4a", "wav", "mp3", "aac", "md", "gif", "webp", "heic"]
                 .contains((t as NSString).pathExtension.lowercased()) {
                 flush()
                 out.append(.file(t))
@@ -590,7 +590,8 @@ struct Bubble: View, Equatable {
 
     static func guess(_ path: String) -> RemoteFile {
         let ext = (path as NSString).pathExtension.lowercased()
-        let kind = ["mp4", "mov"].contains(ext) ? "video" : ["png", "jpg", "jpeg", "gif", "webp", "heic"].contains(ext) ? "image" : "other"
+        let kind = ["mp4", "mov"].contains(ext) ? "video" : ["png", "jpg", "jpeg", "gif", "webp", "heic"].contains(ext) ? "image"
+            : ["wav", "mp3", "m4a", "aac", "aiff"].contains(ext) ? "audio" : "other"
         let parts = path.split(separator: "/")
         return RemoteFile(path: path, name: (path as NSString).lastPathComponent,
                           folder: parts.count > 1 ? String(parts[parts.count - 2]) : "", kind: kind, size: 0, modified: Date())
@@ -603,6 +604,14 @@ struct FileCard: View {
     let show: (RemoteFile) -> Void
 
     var body: some View {
+        if file.isAudio {
+            SoundCard(file: file)
+        } else {
+            card
+        }
+    }
+
+    private var card: some View {
         Button { show(file) } label: {
             VStack(alignment: .leading, spacing: 0) {
                 if file.isVideo || file.isImage {
@@ -624,6 +633,7 @@ struct FileCard: View {
                     Image(systemName: file.isVideo ? "film" : file.isImage ? "photo" : "doc")
                     Text(file.name).lineLimit(1)
                     Spacer()
+                    if let m = file.model { Text(m).font(.inter(.caption2)).foregroundStyle(Palette.faint).lineLimit(1) }
                 }
                 .font(.inter(.footnote, .medium)).foregroundStyle(Palette.ink)
                 .padding(12)
@@ -647,22 +657,34 @@ struct FilesView: View {
 
     /// Open comments per file, for the badge on its tile.
     @State private var open: [String: Int] = [:]
-    private static let order = ["edits", "thumbnails", "takes", "stills", "uploads", "assets"]
+    /// Sections showing all their files, not the first four.
+    @State private var showAll: Set<String> = []
+    /// Sections folded into a pile of small thumbnails, as on the Mac. One list for every session.
+    @AppStorage("files.folded") private var foldedStore = ""
+    private static let order = ["edits", "thumbnails", "takes", "stills", "generated", "uploads", "assets"]
+    static let firstFew = 4
     private let columns = [GridItem(.adaptive(minimum: 150), spacing: 10)]
+
+    /// The known folders first, then any other the Mac sends, A–Z.
+    private var folders: [String] {
+        let rest = Set(detail.files.map(\.folder)).subtracting(Self.order).sorted()
+        return Self.order + rest
+    }
+
+    private var folded: Set<String> { Set(foldedStore.split(separator: "\n").map(String.init)) }
+
+    private func fold(_ name: String) {
+        var f = folded
+        if f.contains(name) { f.remove(name) } else { f.insert(name) }
+        withAnimation(.spring(duration: 0.35)) { foldedStore = f.sorted().joined(separator: "\n") }
+    }
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
-                ForEach(Self.order, id: \.self) { folder in
+                ForEach(folders, id: \.self) { folder in
                     let list = detail.files.filter { $0.folder == folder }
-                    if !list.isEmpty {
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text(folder.prefix(1).uppercased() + folder.dropFirst()).font(.nunito(size: 18, relativeTo: .headline)).foregroundStyle(Palette.ink)
-                            LazyVGrid(columns: columns, spacing: 10) {
-                                ForEach(list) { f in Tile(file: f, sessionID: detail.session.id, open: open[sessionRel(f)] ?? 0, show: show, reload: { await reload() }) }
-                            }
-                        }
-                    }
+                    if !list.isEmpty { section(folder, list) }
                 }
                 if detail.files.isEmpty {
                     MascotEmpty(title: "No files yet", message: "Record a take, or ask Takes for an edit.")
@@ -675,12 +697,99 @@ struct FilesView: View {
         .task(id: detail.files.count) { await loadComments() }
     }
 
+    private func section(_ folder: String, _ list: [RemoteFile]) -> some View {
+        let isFolded = folded.contains(folder)
+        let all = showAll.contains(folder) || list.count <= Self.firstFew
+        return VStack(alignment: .leading, spacing: 8) {
+            Button { fold(folder) } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "chevron.right").font(.system(size: 11, weight: .bold)).foregroundStyle(Palette.faint)
+                        .rotationEffect(.degrees(isFolded ? 0 : 90))
+                    Text(folder.prefix(1).uppercased() + folder.dropFirst()).font(.nunito(size: 18, relativeTo: .headline)).foregroundStyle(Palette.ink)
+                    Spacer()
+                    Text("\(list.count)").font(.inter(.caption, .medium)).monospacedDigit().foregroundStyle(Palette.faint)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(isFolded ? "Open \(folder)" : "Fold \(folder)")
+            if isFolded {
+                FilePile(files: list) { fold(folder) }
+                    .transition(.opacity.combined(with: .scale(scale: 0.96, anchor: .topLeading)))
+            } else {
+                LazyVGrid(columns: columns, spacing: 10) {
+                    ForEach(all ? list : Array(list.prefix(Self.firstFew))) { f in
+                        Tile(file: f, sessionID: detail.session.id, open: open[sessionRel(f)] ?? 0, show: show, reload: { await reload() })
+                    }
+                }
+                if list.count > Self.firstFew {
+                    Button {
+                        withAnimation(.spring(duration: 0.35)) {
+                            if showAll.contains(folder) { showAll.remove(folder) } else { showAll.insert(folder) }
+                        }
+                    } label: {
+                        Label(showAll.contains(folder) ? "Show fewer" : "Show all \(list.count)",
+                              systemImage: showAll.contains(folder) ? "chevron.up" : "chevron.down")
+                    }
+                    .buttonStyle(.pill(.soft, small: true))
+                    .frame(maxWidth: .infinity)
+                }
+            }
+        }
+    }
+
     /// The file's path inside the session, as comments.json names it.
     private func sessionRel(_ f: RemoteFile) -> String { f.rel(in: detail.session.id) ?? f.path }
 
     private func loadComments() async {
         guard let c = await model.comments(detail.session.id) else { return }
         open = Dictionary(c.filter(\.open).map { ($0.file, 1) }, uniquingKeysWith: +)
+    }
+}
+
+/// A folded section: small thumbnails in a loose pile. A tap opens the section again.
+struct FilePile: View {
+    @EnvironmentObject var model: Model
+    let files: [RemoteFile]
+    let open: () -> Void
+    static let most = 8
+
+    var body: some View {
+        let few = Array(files.prefix(Self.most))
+        Button(action: open) {
+            HStack(spacing: 12) {
+                HStack(spacing: -26) {
+                    ForEach(Array(few.enumerated()), id: \.element.id) { i, f in
+                        thumb(f)
+                            .rotationEffect(.degrees([-5, 3, -2, 4, -3, 2, -4, 3][i % 8]))
+                            .offset(y: [0, -2, 1, -1, 2, 0, -2, 1][i % 8])
+                            .zIndex(Double(few.count - i))
+                    }
+                }
+                if files.count > few.count {
+                    Text("+\(files.count - few.count)").font(.inter(.caption, .semibold)).foregroundStyle(Palette.faint)
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(.leading, 4).padding(.vertical, 6)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func thumb(_ f: RemoteFile) -> some View {
+        Palette.well
+            .frame(width: 48, height: 60)
+            .overlay {
+                if f.isVideo || f.isImage {
+                    RemoteImage(url: model.api.thumb(f.path, width: 160)) { $0.resizable().scaledToFill() } placeholder: { Color.clear }
+                } else {
+                    Image(systemName: f.isAudio ? "waveform" : "doc").font(.system(size: 14)).foregroundStyle(Palette.faint)
+                }
+            }
+            .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 7, style: .continuous).strokeBorder(Palette.paper, lineWidth: 1.5))
+            .shadow(color: Palette.shadow.opacity(0.6), radius: 3, y: 2)
     }
 }
 
@@ -701,7 +810,8 @@ struct Tile: View {
                     if file.isVideo || file.isImage {
                         RemoteImage(url: model.api.thumb(file.path, width: 400)) { $0.resizable().scaledToFill() } placeholder: { Color.clear }
                     } else {
-                        Image(systemName: "doc").font(.nunito(.title)).foregroundStyle(Palette.faint)
+                        Image(systemName: file.isAudio ? "waveform" : "doc").font(.nunito(.title)).foregroundStyle(Palette.faint)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
                     }
                     if file.keeper == true {
                         Image(systemName: "star.fill").foregroundStyle(.yellow).padding(6)
@@ -719,6 +829,7 @@ struct Tile: View {
                 .frame(height: 120).frame(maxWidth: .infinity).clipped()
                 .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
                 Text(file.name).font(.inter(.caption, .medium)).lineLimit(1).foregroundStyle(Palette.ink)
+                if let m = file.model { Text(m).font(.inter(.caption2)).lineLimit(1).foregroundStyle(Palette.faint) }
                 if let d = file.duration { Text(Duration.seconds(d).formatted(.time(pattern: .minuteSecond))).font(.inter(.caption2)).monospacedDigit().foregroundStyle(Palette.faint) }
             }
         }
@@ -952,6 +1063,8 @@ struct PostView: View {
     let post: Post?
     /// Every platform's post, LinkedIn first (2026-10-05). Empty from an older Mac.
     let posts: [PlatformPost]
+    /// Show HN and Reddit launch posts, from the Mac's plugins (2026-10-07).
+    let sides: [SidePost]
     let profile: Profile?
     let show: (RemoteFile) -> Void
     let files: [RemoteFile]
@@ -975,22 +1088,32 @@ struct PostView: View {
     /// The other platforms' posts. LinkedIn shows even with no post: it is where a post starts.
     private var others: [PlatformPost] { posts.filter { $0.platform != "linkedin" } }
     private var other: PlatformPost? { platform == "linkedin" ? nil : others.first { $0.platform == platform } }
+    /// The sides with a post, in the Mac's order: Hacker News, then Reddit.
+    private var sideIDs: [(id: String, name: String)] {
+        var seen = Set<String>()
+        return sides.compactMap { seen.insert($0.side).inserted ? ($0.side, $0.name) : nil }
+    }
+    private var sideOn: [SidePost] { sides.filter { $0.side == platform } }
     private var coverNow: String? { other?.cover ?? (platform == "linkedin" ? (posts.first { $0.platform == "linkedin" }?.cover ?? post?.cover) : nil) }
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
-                if !others.isEmpty { platforms }
+                if !others.isEmpty || !sides.isEmpty { platforms }
                 if let failed { Label(failed, systemImage: "exclamationmark.triangle").font(.inter(.footnote)).foregroundStyle(.orange) }
-                if let other { platformPost(other) } else { linkedIn }
-                if post != nil || other != nil { covers }
+                if !sideOn.isEmpty {
+                    LaunchPhone.pane(sessionID: sessionID, posts: sideOn, reload: reload)
+                } else {
+                    if let other { platformPost(other) } else { linkedIn }
+                    if post != nil || other != nil { covers }
+                }
             }
             .padding(16)
         }
         .background(LinkedIn.feed)
         .refreshable { await reload() }
         .onChange(of: variants.map(\.slug)) { _, slugs in if draft != "main" && !slugs.contains(draft) { draft = "main" } }
-        .onChange(of: others.map(\.platform), initial: true) { _, have in if platform != "linkedin" && !have.contains(platform) { platform = "linkedin" } }
+        .onChange(of: others.map(\.platform) + sideIDs.map(\.id), initial: true) { _, have in if platform != "linkedin" && !have.contains(platform) { platform = "linkedin" } }
         .sheet(isPresented: $editing) {
             if let other {
                 TextEditSheet(title: "\(other.name) post", text: other.text, font: .system(size: 16), limit: other.limit) { new in
@@ -1016,6 +1139,7 @@ struct PostView: View {
             HStack(spacing: 6) {
                 platformChip("linkedin", "LinkedIn")
                 ForEach(others) { platformChip($0.platform, $0.name) }
+                ForEach(sideIDs, id: \.id) { platformChip($0.id, $0.name) }
             }
         }
     }
@@ -1480,7 +1604,7 @@ struct Viewer: View {
                 Color.black
                 if let rel = reviewPath {
                     MediaReview(file: file, rel: rel, sessionID: sessionID)
-                } else if file.isVideo, let player {
+                } else if file.isVideo || file.isAudio, let player {
                     VideoPlayer(player: player).ignoresSafeArea(edges: .bottom)
                 } else if file.isImage {
                     RemoteImage(url: model.api.thumb(file.path, width: 1600)) { $0.resizable().scaledToFit() } placeholder: { WorkingDots(color: .white) }
@@ -1492,7 +1616,7 @@ struct Viewer: View {
         .background(Color.black.ignoresSafeArea())
         .environment(\.colorScheme, .dark)
         .onAppear {
-            guard file.isVideo, reviewPath == nil else { return }
+            guard file.isVideo || file.isAudio, reviewPath == nil else { return }
             let p = AVPlayer(url: model.api.media(file.path))
             player = p
             try? AVAudioSession.sharedInstance().setCategory(.playback)
