@@ -109,7 +109,7 @@ struct PlatformPost: Codable, Hashable, Identifiable {
     var id: String { platform }
 }
 
-/// A post on a side a Mac plugin adds: the Show HN or Reddit launch post. Nil list from a Mac
+/// A post on a side a Mac plugin adds. Nil list from a Mac
 /// before 2026-10-07, and from the public Mac.
 struct SidePost: Codable, Hashable, Identifiable {
     var side: String
@@ -174,6 +174,87 @@ struct SessionDetail: Codable, Hashable {
     /// Every platform with a post, LinkedIn first. Nil from a Mac before 2026-10-05.
     var posts: [PlatformPost]?
     var sides: [SidePost]?
+    /// The style this video is edited in. Nil from a Mac before 2026-10-08.
+    var style: SessionStyle?
+}
+
+// MARK: Styles (the Mac's Styles board)
+
+/// The style one video uses, and the styles it can pick.
+struct SessionStyle: Codable, Hashable {
+    var own: String?
+    var project: String?
+    var names: [String]
+}
+
+struct StyleCard: Codable, Hashable, Identifiable {
+    var name: String
+    var description: String
+    var source: String?
+    var isNew: Bool
+    var video: String?
+    var poster: String?
+    var usedBy: [String]
+    var openComments: Int
+    var id: String { name }
+}
+
+struct StyleList: Codable, Hashable {
+    var styles: [StyleCard]
+    var projects: [String]
+}
+
+struct StyleSwatch: Codable, Hashable {
+    var name: String
+    var value: String
+    var usage: String
+}
+
+struct StyleType: Codable, Hashable {
+    var name: String
+    var family: String
+    var size: Double
+    var weight: Int
+}
+
+struct StyleVersion: Codable, Hashable {
+    var path: String
+    var name: String
+    var version: Int?
+    var kind: String
+    var size: Int64
+    var modified: Date
+    var note: String?
+    var from: String?
+    var openComments: Int
+}
+
+struct StyleItem: Codable, Hashable, Identifiable {
+    var name: String
+    var versions: [StyleVersion]
+    var id: String { name }
+}
+
+struct StyleGroup: Codable, Hashable, Identifiable {
+    var name: String
+    var items: [StyleItem]
+    var id: String { name }
+}
+
+struct StyleDetail: Codable, Hashable {
+    /// The library folder inside the Takes folder: comments use it as their session id.
+    var id: String
+    var name: String
+    var folder: String
+    var readme: String?
+    var readmeComments: Int
+    var hasTokens: Bool
+    var tokensComments: Int
+    var swatches: [StyleSwatch]
+    var type: [StyleType]
+    var fonts: [String]
+    var groups: [StyleGroup]
+    var openComments: Int
 }
 
 /// One storyboard shot: the sketch, the lines it covers, how to film it, the user's comments.
@@ -406,10 +487,11 @@ struct API {
         return d
     }()
 
-    /// A long wait for the pair call (the user walks to the Mac), short for the rest.
+    /// Short: screens show their saved copy first, so a sleeping Mac should fail fast, not spin
+    /// for 30 s. The pair call has its own long wait (the user walks to the Mac).
     static let session: URLSession = {
         let c = URLSessionConfiguration.default
-        c.timeoutIntervalForRequest = 30
+        c.timeoutIntervalForRequest = 15
         c.waitsForConnectivity = false
         return URLSession(configuration: c)
     }()
@@ -536,6 +618,21 @@ struct API {
 
     /// The raw answer, so the phone can keep it and show it at once next time.
     func performanceData() async throws -> Data { try await raw(request("/api/performance")) }
+
+    func stylesData() async throws -> Data { try await raw(request("/api/styles")) }
+    /// One style by name, or a project's own looks by its library folder ("<Project>/_library").
+    func style(name: String?, id: String?) async throws -> StyleDetail {
+        try await send(request("/api/style", name.map { ["name": $0] } ?? ["id": id ?? ""]))
+    }
+    /// action: keep (it loses its New mark) or trash (to the Mac's Trash).
+    func changeStyle(_ name: String, action: String) async throws {
+        _ = try await send(request("/api/style", method: "POST", json: ["name": name, "action": action]), as: OK.self)
+    }
+    /// A video's style. nil: its project's. project: the pick becomes the project's style.
+    func setStyle(_ id: String, style: String?, project: Bool = false) async throws -> SessionStyle {
+        try await send(request("/api/session/style", ["id": id], method: "POST",
+                               json: ["style": style ?? "", "project": project ? "1" : "0"]))
+    }
 
     /// Saves the script or the post. `base` is the text the edit started from: if it changed on
     /// the Mac meanwhile, the Mac answers 409 and keeps its text.

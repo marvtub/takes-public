@@ -68,7 +68,7 @@ final class PhoneAudio: ObservableObject {
             return
         }
         stop()
-        try? AVAudioSession.sharedInstance().setCategory(.playback)  // he tapped play himself
+        AVAudioSession.sharedInstance().use(.playback)  // he tapped play himself
         let p = AVPlayer(url: file)
         player = p
         url = file
@@ -94,5 +94,14 @@ final class PhoneAudio: ObservableObject {
         if let end { NotificationCenter.default.removeObserver(end) }
         watch = nil; end = nil; player = nil
         playing = false; time = 0; length = 0; url = nil
+    }
+}
+
+extension AVAudioSession {
+    /// Sets the category only when it changes: each set is a call to the system's audio server
+    /// that blocks the main thread, and it ran on every video that came on screen (2026-10-08).
+    func use(_ category: Category, _ options: CategoryOptions = []) {
+        guard self.category != category || categoryOptions != options else { return }
+        try? setCategory(category, options: options)
     }
 }

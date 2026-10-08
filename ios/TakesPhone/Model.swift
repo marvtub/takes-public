@@ -9,6 +9,9 @@ final class Model: ObservableObject {
     enum Phase: Equatable { case pairing, locked, open }
 
     @Published var phase: Phase
+    /// Face ID opened the app once this run. The relock then covers the screens instead of
+    /// replacing them, so the user comes back to the same video and scroll place (2026-10-08).
+    @Published private(set) var opened = false
     @Published var sessions: [Session] = []
     @Published var error: String?
     /// The Mac answers. Back online, the changes that waited go out (Outbox).
@@ -26,6 +29,9 @@ final class Model: ObservableObject {
     /// The Mac's Performance chat is updating the numbers.
     @Published var performanceRunning = false
     @Published var performanceTick = 0
+    /// Takes works on the Styles board's chat; the tick moves when a run ends, so Styles reloads.
+    @Published var stylesRunning = false
+    @Published var stylesTick = 0
     /// Goes up when the Mac's comment suggestions change: the Comments tab reloads.
     @Published var copilotTick = 0
     /// A new build of this app waits on the Mac; Update installs it (the Mac ends and reopens the app).
@@ -93,8 +99,10 @@ final class Model: ObservableObject {
             try Vault.save(t)
             token = t
             phase = .open
-            await refresh()
+            opened = true
+            // The live stream first: it does not wait for the list and the outbox.
             listen()
+            await refresh()
         } catch {
             self.error = error.localizedDescription
         }
@@ -104,17 +112,22 @@ final class Model: ObservableObject {
         guard phase == .locked else { return }
         guard let t = await Vault.load() else { return }
         token = t
+        // Woken in the background while the phone was locked, the saved list could not be read.
+        if sessions.isEmpty { sessions = withLocal(Cache.load([Session].self, "sessions") ?? []) }
         phase = .open
-        await refresh()
+        opened = true
         listen()
+        await refresh()
     }
 
     func unpair() {
         Vault.delete()
         Cache.clear()
+        UserDefaults.standard.removeObject(forKey: "prefetchedAt")
         token = nil
         stream?.cancel()
         sessions = []
+        opened = false
         phase = .pairing
     }
 
@@ -126,11 +139,17 @@ final class Model: ObservableObject {
             if phase == .open, let leftAt, -leftAt.timeIntervalSinceNow > Self.relock {
                 token = nil
                 stream?.cancel()
+                // Screens under the lock stay, but ask nothing: no token. Unlock connects again,
+                // and each open screen reloads then.
+                connected = false
                 phase = .locked
             } else if phase == .open, leftAt != nil {
                 // Only after real time away: Control Center and Face ID also make the app active.
                 listen()
                 Task { await refresh() }
+                // The stream does not replay what happened while away: a reply that finished
+                // would say "working" until the next beat.
+                if let id = chatID { Task { await loadChat(id) } }
             }
             leftAt = nil
         default: break
@@ -203,7 +222,8 @@ final class Model: ObservableObject {
                 guard let self, let r = Optional(self.api.request("/api/events")) else { return }
                 do {
                     var req = r
-                    req.timeoutInterval = 90
+                    // The Mac sends a beat every 20 s: two missed means it is gone.
+                    req.timeoutInterval = 45
                     let (bytes, resp) = try await URLSession.shared.bytes(for: req)
                     guard (resp as? HTTPURLResponse)?.statusCode == 200 else { throw URLError(.badServerResponse) }
                     if !self.connected { self.connected = true }
@@ -227,6 +247,10 @@ final class Model: ObservableObject {
         switch ev.type {
         case "chat":
             guard let id = ev.id else { return }
+            if id == "board:styles", let r = ev.running {
+                if stylesRunning && !r { stylesTick += 1 }
+                if stylesRunning != r { stylesRunning = r }
+            }
             if id == "board:performance", let r = ev.running {
                 // A finished update: the performance tab loads the new numbers.
                 if performanceRunning && !r { performanceTick += 1 }
@@ -248,7 +272,16 @@ final class Model: ObservableObject {
             for m in ev.tail ?? [] {
                 if let i = c.messages.lastIndex(where: { $0.id == m.id }) {
                     if c.messages[i] != m { c.messages[i] = m }
-                } else { c.messages.append(m) }
+                } else {
+                    // The Mac's copy of a message the phone already shows: it takes the phone's place.
+                    if m.role == .user, !sending.isEmpty,
+                       let i = c.messages.firstIndex(where: { sending.contains($0.id) && $0.text == m.text })
+                           ?? c.messages.firstIndex(where: { sending.contains($0.id) }) {
+                        sending.remove(c.messages[i].id)
+                        c.messages.remove(at: i)
+                    }
+                    c.messages.append(m)
+                }
             }
             if c != live.chat { live.chat = c }
             // Lost a message on the way: fetch all of it, once.
@@ -311,6 +344,14 @@ final class Model: ObservableObject {
         if voice { json["voice"] = "1" }
         if tokens { json["tokens"] = "1" }
         let op = Outbox.Op(.say, session: id, path: "/api/chat", query: ["id": id], json: json)
+        // The message shows at once, not after the Mac answers; the Mac's copy replaces it (2026-10-08).
+        // Not while Claude works: the Mac then holds a session message back until the run ends.
+        if chatID == id, var c = live.chat, !c.running {
+            c.messages.append(Self.waitingMessage(op))
+            live.chat = c
+            sending.insert(op.id)
+        }
+        defer { sending.remove(op.id) }
         do {
             switch try await outbox.send(op) {
             case .now:
@@ -319,7 +360,7 @@ final class Model: ObservableObject {
                     live.chat = c
                 }
             case .queued(let o):
-                if chatID == id, var c = live.chat {
+                if chatID == id, var c = live.chat, !c.messages.contains(where: { $0.id == o.id }) {
                     c.messages.append(Self.waitingMessage(o))
                     live.chat = c
                 }
@@ -329,10 +370,16 @@ final class Model: ObservableObject {
             if chatID == id { await loadChat(id) }
             return true
         } catch {
+            if chatID == id, var c = live.chat, c.messages.contains(where: { $0.id == op.id }) {
+                c.messages.removeAll { $0.id == op.id }
+                live.chat = c
+            }
             self.error = error.localizedDescription
             return false
         }
     }
+    /// Messages shown before the Mac has them (`say`).
+    private var sending: Set<UUID> = []
 
     // MARK: Changes (they wait on the phone when the Mac is away)
 
@@ -346,7 +393,7 @@ final class Model: ObservableObject {
         _ = try await outbox.send(op)
     }
 
-    /// A launch post's title, text or status. `side`: hn or reddit.
+    /// A side post's title, text or status. `side`: the side's id.
     func sideSave(_ id: String, side: String, _ body: [String: String]) async throws {
         _ = try await outbox.send(Outbox.Op(.side, session: id, path: "/api/side", query: ["id": id, "side": side], json: body))
     }
@@ -459,15 +506,26 @@ final class Model: ObservableObject {
 
     /// Keeps a copy of the newest sessions, their comments, the comment drafts and the numbers,
     /// so they open offline even when the user never opened them on the phone. At most every 10 min.
+    /// Starts 5 s after the list arrives, so the video the user taps first does not wait behind it,
+    /// and skips a session whose copy is as new as the list says (2026-10-08).
     func prefetch() async {
         if let p = prefetched, -p.timeIntervalSinceNow < 600 { return }
         prefetched = Date()
+        try? await Task.sleep(nanoseconds: 5_000_000_000)
+        var stamps = (UserDefaults.standard.dictionary(forKey: "prefetchedAt") as? [String: Double]) ?? [:]
         let recent = sessions.filter { !$0.published }.sorted { $0.updated > $1.updated }.prefix(12)
-        for s in recent {
-            guard connected else { return }
-            if let d = try? await api.detail(s.id) { let k = "session-" + s.id; Task.detached(priority: .utility) { Cache.save(d, k) } }
+        for s in recent where stamps[s.id] != s.updated.timeIntervalSince1970 {
+            guard connected, phase == .open else { return }
+            guard let d = try? await api.detail(s.id) else { continue }
+            let k = "session-" + s.id
+            Task.detached(priority: .utility) { Cache.save(d, k) }
             if let c = try? await api.comments(s.id) { let k = "comments-" + s.id; Task.detached(priority: .utility) { Cache.save(c, k) } }
+            stamps[s.id] = s.updated.timeIntervalSince1970
         }
+        let keep = Set(recent.map(\.id))
+        UserDefaults.standard.set(stamps.filter { keep.contains($0.key) }, forKey: "prefetchedAt")
+        // Comments and Performance: only where those boards show.
+        guard Features.socialBoards else { return }
         if let raw = try? await api.copilotData() { Cache.saveData(raw, "copilot") }
         if let raw = try? await api.performanceData() { Cache.saveData(raw, "performance") }
     }
@@ -499,6 +557,11 @@ final class Model: ObservableObject {
                     d.post?.variants?[i].text = t
                 }
             case .say: d.chat.messages.append(Self.waitingMessage(op))
+            case .keeper:
+                // The Mac toggles the take's star: so does the phone's copy until it has the change.
+                if let n = op.query["take"].flatMap(Int.init) {
+                    for i in d.files.indices where d.files[i].take == n { d.files[i].keeper = !(d.files[i].keeper ?? false) }
+                }
             case .comment:
                 let c = Self.waitingComment(op)
                 if let shot = c.shot, let i = d.storyboard?.firstIndex(where: { $0.id == shot }) {

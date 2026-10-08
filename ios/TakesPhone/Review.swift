@@ -41,16 +41,27 @@ final class ReviewClock: ObservableObject {
     @Published var duration: Double = 0
     @Published var playing = false
     @Published var size: CGSize = .zero
+    /// The video can show its first frame: the poster under it goes.
+    @Published var ready = false
     private var clock: Any?
     private var watch: NSKeyValueObservation?
+    private var status: NSKeyValueObservation?
     private var url: URL?
+    /// Scrubbing: one seek at a time, and the newest place waits (a "chase" seek).
+    private var seeking = false
+    private var next: Double?
 
     func start(_ url: URL, known: Double?) {
         guard self.url != url else { return }
         self.url = url
         if let known { duration = known }
-        player.replaceCurrentItem(with: AVPlayerItem(url: url))
-        try? AVAudioSession.sharedInstance().setCategory(.playback)
+        let item = AVPlayerItem(url: url)
+        status = item.observe(\.status) { [weak self] it, _ in
+            let ok = it.status == .readyToPlay
+            Task { @MainActor in if ok, self?.ready == false { self?.ready = true } }
+        }
+        player.replaceCurrentItem(with: item)
+        AVAudioSession.sharedInstance().use(.playback)
         watch = player.observe(\.timeControlStatus) { [weak self] pl, _ in
             let on = pl.timeControlStatus != .paused
             Task { @MainActor in self?.playing = on }
@@ -81,7 +92,25 @@ final class ReviewClock: ObservableObject {
     func seek(_ s: Double) {
         let t = max(0, min(duration > 0 ? duration : s, s))
         time = t
+        next = nil
         player.seek(to: CMTime(seconds: t, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
+    }
+
+    /// While a finger drags the timeline: exact seeks queued up and the picture lagged behind the
+    /// finger. Now a new seek starts only when the last one is done, near enough (2026-10-08).
+    func scrub(_ s: Double) {
+        let t = max(0, min(duration > 0 ? duration : s, s))
+        time = t
+        guard !seeking else { next = t; return }
+        seeking = true
+        let near = CMTime(seconds: 0.1, preferredTimescale: 600)
+        player.seek(to: CMTime(seconds: t, preferredTimescale: 600), toleranceBefore: near, toleranceAfter: near) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                self.seeking = false
+                if let n = self.next { self.next = nil; self.scrub(n) }
+            }
+        }
     }
 
     func stop() { player.pause() }
@@ -163,7 +192,14 @@ struct MediaReview: View {
             ZStack(alignment: .topLeading) {
                 Group {
                     if file.isVideo {
-                        ReviewLayer(player: clock.player)
+                        ZStack {
+                            // The thumbnail already seen, until the first frame: no black wait.
+                            if !clock.ready, let poster {
+                                Image(uiImage: poster).resizable().scaledToFit().transition(.opacity)
+                            }
+                            ReviewLayer(player: clock.player)
+                        }
+                        .animation(.easeOut(duration: 0.15), value: clock.ready)
                     } else if let image {
                         Image(uiImage: image).resizable().scaledToFit()
                     } else {
@@ -324,10 +360,23 @@ struct MediaReview: View {
     }
 
     private func load() async {
-        if let c = await model.comments(sessionID) { comments = c }
-        if file.isImage, image == nil, let (data, _) = try? await URLSession.shared.data(from: model.api.media(file.path)) {
-            image = UIImage(data: data)
+        // A picture shows its thumbnail at once, then the full one, sized for the screen and
+        // decoded off the main thread, from the phone's cache when it has it (2026-10-08).
+        if file.isImage, image == nil { image = poster }
+        if file.isImage {
+            Task {
+                if let full = await ImageCache.shared.load(model.api.media(file.path), maxPixels: 2400) { image = full }
+            }
         }
+        if let c = await model.comments(sessionID) { comments = c }
+    }
+
+    /// The biggest thumbnail of this file already in memory (the list, chat and post use these sizes).
+    private var poster: UIImage? {
+        for w in [1600, 900, 720, 400, 300, 200, 160] {
+            if let i = ImageCache.shared.memory(model.api.thumb(file.path, width: w)) { return i }
+        }
+        return nil
     }
 
     // MARK: Geometry
@@ -443,7 +492,7 @@ struct ReviewTimeline: View {
                 clock.player.pause()
             }
             if marking, abs(g.translation.width) > 4 { to = t(g.location.x, w) }
-            clock.seek(t(g.location.x, w))
+            clock.scrub(t(g.location.x, w))
         }.onEnded { g in
             let a = from ?? t(g.startLocation.x, w), b = to
             from = nil; to = nil

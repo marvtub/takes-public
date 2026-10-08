@@ -261,7 +261,7 @@ final class PhoneConnection: @unchecked Sendable {
     }
 
     static func reason(_ s: Int) -> String {
-        [200: "OK", 206: "Partial Content", 400: "Bad Request", 401: "Unauthorized", 403: "Forbidden",
+        [200: "OK", 206: "Partial Content", 304: "Not Modified", 400: "Bad Request", 401: "Unauthorized", 403: "Forbidden",
          404: "Not Found", 409: "Conflict", 413: "Payload Too Large", 416: "Range Not Satisfiable",
          431: "Request Header Fields Too Large", 500: "Internal Server Error"][s] ?? "Status"
     }
@@ -271,6 +271,16 @@ final class PhoneConnection: @unchecked Sendable {
             self?.close()
         })
     }
+
+    /// An HTTP date ("Thu, 08 Oct 2026 17:48:00 GMT"), whole seconds, as Last-Modified wants it.
+    static func httpDate(_ d: Date) -> String { httpDates.string(from: d) }
+    private static let httpDates: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.timeZone = TimeZone(identifier: "GMT")
+        f.dateFormat = "EEE, dd MMM yyyy HH:mm:ss 'GMT'"
+        return f
+    }()
 
     /// "bytes=0-1023", "bytes=500-", "bytes=-500" → the closed range in a file of `size` bytes.
     static func range(_ header: String?, size: Int64) -> ClosedRange<Int64>?? {
@@ -289,9 +299,15 @@ final class PhoneConnection: @unchecked Sendable {
     }
 
     private func sendFile(_ url: URL, type: String) {
-        guard let h = try? FileHandle(forReadingFrom: url),
-              let size = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? NSNumber)?.int64Value else {
+        let attrs = try? FileManager.default.attributesOfItem(atPath: url.path)
+        guard let h = try? FileHandle(forReadingFrom: url), let size = (attrs?[.size] as? NSNumber)?.int64Value else {
             send(status: 404, headers: [:], body: Data("No such file".utf8)); return
+        }
+        // The phone keeps pictures on disk and asks "changed since?": unchanged costs one empty answer.
+        let modified = (attrs?[.modificationDate] as? Date).map(Self.httpDate)
+        if let modified, request?.header("range") == nil, request?.header("if-modified-since") == modified {
+            try? h.close()
+            send(status: 304, headers: ["Last-Modified": modified, "Cache-Control": "private, max-age=60"], body: Data()); return
         }
         guard let r = Self.range(request?.header("range"), size: size) else {
             try? h.close()
@@ -300,6 +316,7 @@ final class PhoneConnection: @unchecked Sendable {
         let span = r ?? 0...(max(size, 1) - 1)
         let length = size == 0 ? 0 : span.upperBound - span.lowerBound + 1
         var headers = ["Content-Type": type, "Accept-Ranges": "bytes", "Cache-Control": "private, max-age=60"]
+        if let modified { headers["Last-Modified"] = modified }
         if r != nil { headers["Content-Range"] = "bytes \(span.lowerBound)-\(span.upperBound)/\(size)" }
         let head = Self.head(r != nil ? 206 : 200, headers, length: Int(length))
         if request?.method == "HEAD" || length == 0 {

@@ -249,6 +249,7 @@ final class SessionDoc {
     func addTakes(_ takes: [Take]) {
         meta.takes.append(contentsOf: takes)
         save()
+        for t in Transcripts.voiceTakes(takes) { Transcripts.shared.add(fileURL(t)) }
     }
 
     /// A take just recorded for a storyboard shot: named after the shot ("Hook 1: I do my
@@ -276,6 +277,7 @@ final class SessionDoc {
     func trashTake(_ number: Int) {
         for t in meta.takes where t.number == number {
             try? FileManager.default.trashItem(at: fileURL(t), resultingItemURL: nil)
+            try? FileManager.default.trashItem(at: Transcript.file(for: fileURL(t)), resultingItemURL: nil)
         }
         meta.takes.removeAll { $0.number == number }
         save()
@@ -291,6 +293,9 @@ final class SessionDoc {
             let newFile = Self.takeFile(number: number, slug: slug, kind: t.kind, ext: ext.isEmpty ? "mov" : ext.lowercased())
             if newFile != t.file,
                (try? FileManager.default.moveItem(at: fileURL(t), to: url.appending(path: newFile))) != nil {
+                // The transcript keeps the video's name.
+                try? FileManager.default.moveItem(at: Transcript.file(for: fileURL(t)),
+                                                  to: Transcript.file(for: url.appending(path: newFile)))
                 meta.takes[i].file = newFile
             }
             meta.takes[i].name = clean.isEmpty ? nil : clean

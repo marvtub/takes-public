@@ -34,6 +34,16 @@ struct ChatTests {
         #expect(Set(n.map(\.id)).count == 3)
     }
 
+    /// Three releases behind: one update, and What's new lists all three releases' changes.
+    @Test func skippedReleasesNotesMergeIntoOne() {
+        let newest = "### Chat\n- Replies stream\n\n### Install\n- not news"
+        let middle = "### ⌘K\n- Results glide in\n\n### Chat\n- Tools fold away\n- Replies stream"
+        let oldest = "### Record\n- Prompter follows your voice"
+        let n = Updater.Change.notes(Updater.mergeNotes([newest, middle, oldest]))
+        #expect(n.map(\.area) == ["Chat", "Chat", "⌘K", "Record"])
+        #expect(n.map(\.headline) == ["Replies stream", "Tools fold away", "Results glide in", "Prompter follows your voice"])
+    }
+
     /// The whole path against a stand-in for GitHub: TAKES_UPDATE_E2E=<dir> with api.txt (the
     /// release URL), own.txt (the old tag), stamp.txt (the old build stamp) and Apps/, made by
     /// a test script. Read the release, download the DMG, stage it, read it as the sidebar does.

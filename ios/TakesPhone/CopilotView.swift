@@ -75,6 +75,7 @@ struct CopilotView: View {
                 await load()
             }
             .onChange(of: model.copilotTick) { _, _ in Task { await load() } }
+            .onChange(of: model.connected) { _, on in if on { Task { await load() } } }
         }
         .environment(\.linkedInMe, data?.profile)
     }
@@ -157,7 +158,7 @@ struct CopilotView: View {
             guard model.connected else { throw URLError(.notConnectedToInternet) }
             let raw = try await model.api.copilotData()
             data = model.patch(try API.decoder.decode(Copilot.self, from: raw))
-            Cache.saveData(raw, "copilot")
+            Task.detached(priority: .utility) { Cache.saveData(raw, "copilot") }
             failed = nil
         } catch {
             // Offline: the last copy, with the decisions that wait on top.
@@ -1006,7 +1007,8 @@ struct BoardChatView: View {
             latestRequest += 1
             draft = ""
             spoke = false
-            let from = id.hasPrefix("board:comments") ? "Comments" : id.hasPrefix("board:performance") ? "Performance" : nil
+            let from = id.hasPrefix("board:comments") ? "Comments" : id.hasPrefix("board:performance") ? "Performance"
+                : id == StylesView.chatID ? "Styles" : nil
             if !(await model.say(text, in: id, from: from, voice: dictated)) { draft = text; spoke = dictated }
         }
     }

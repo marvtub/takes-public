@@ -549,7 +549,7 @@ private struct ClipLoop: UIViewRepresentable {
         v.playerLayer.videoGravity = .resizeAspectFill
         v.playerLayer.player = v.player
         v.player.isMuted = !sound
-        try? AVAudioSession.sharedInstance().setCategory(sound ? .playback : .ambient, options: sound ? [] : .mixWithOthers)
+        AVAudioSession.sharedInstance().use(sound ? .playback : .ambient, sound ? [] : .mixWithOthers)
         v.looper = AVPlayerLooper(player: v.player, templateItem: AVPlayerItem(url: url))
         v.player.play()
         return v
@@ -558,7 +558,7 @@ private struct ClipLoop: UIViewRepresentable {
     func updateUIView(_ v: Box, context: Context) {
         guard v.player.isMuted == sound else { return }
         v.player.isMuted = !sound
-        try? AVAudioSession.sharedInstance().setCategory(sound ? .playback : .ambient, options: sound ? [] : .mixWithOthers)
+        AVAudioSession.sharedInstance().use(sound ? .playback : .ambient, sound ? [] : .mixWithOthers)
     }
 
     static func dismantleUIView(_ v: Box, coordinator: ()) {

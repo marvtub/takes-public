@@ -317,7 +317,7 @@ def t_get_session(a):
         c = cuts.get(str(t["number"]))
         c = {k: v for k, v in c.items() if k not in ("pid", "model")} if c else None
         takes.append(dict(t, path=os.path.join(s, t["file"]), **({"voice": v} if v else {}),
-                          **({"best_cut": c} if c else {})))
+                          **({"best_cut": c} if c else {}), **take_said(s, t, meta.get("takes", []))))
     return {"session": os.path.relpath(s, root()), "path": s, "title": meta["title"],
             "created": meta["createdAt"], "script": script, "variants": variants(s),
             "favorite_script": meta.get("favorite"),
@@ -3052,6 +3052,9 @@ def t_rename_take(a):
         new = take_file(n, sl, t["kind"], os.path.splitext(t["file"])[1] or ".mov")
         if new != t["file"] and os.path.exists(os.path.join(s, t["file"])):
             os.rename(os.path.join(s, t["file"]), os.path.join(s, new))
+            words = os.path.join(s, os.path.splitext(t["file"])[0] + ".words.json")
+            if os.path.exists(words):  # the transcript keeps the video's name
+                os.rename(words, os.path.join(s, os.path.splitext(new)[0] + ".words.json"))
             t["file"] = new
         if name:
             t["name"] = name
@@ -3061,6 +3064,23 @@ def t_rename_take(a):
         raise ValueError("No take %d in this session." % n)
     write_meta(s, meta)
     return t_get_session({"session": s})
+
+
+def take_said(s, t, takes):
+    """What a take says, from the transcript Takes writes next to it (Apple's speech model on the Mac).
+    One per take: the camera file's, or the screen file's when the take has no camera file."""
+    if t["kind"] == "screen" and any(o["number"] == t["number"] and o["kind"] == "camera" for o in takes):
+        return {}
+    path = os.path.join(s, t["file"])
+    try:
+        words = transcript_words(path)
+    except Exception:  # a broken transcript loses its text, not the session
+        words = None
+    if words is None:
+        return {"said": None, "said_note": "No transcript yet. Takes writes one in the background (macOS 26)."}
+    text = " ".join(w for _, _, w in words)
+    return {"said": text[:1500] + ("…" if len(text) > 1500 else ""),
+            "transcript": os.path.splitext(path)[0] + ".words.json"}
 
 
 def take_file(n, sl, kind, ext=".mov"):
@@ -3688,7 +3708,9 @@ def t_trash_takes(a):
     else:
         numbers = {int(x) for x in a.get("takes", [])}
     doomed = [t for t in meta["takes"] if t["number"] in numbers]
-    trash([os.path.join(s, t["file"]) for t in doomed if os.path.exists(os.path.join(s, t["file"]))])
+    files = [os.path.join(s, t["file"]) for t in doomed]
+    files += [os.path.splitext(f)[0] + ".words.json" for f in files]
+    trash([f for f in files if os.path.exists(f)])
     meta["takes"] = [t for t in meta["takes"] if t["number"] not in numbers]
     write_meta(s, meta)
     return {"trashed_takes": sorted(numbers), "note": "Moved to the macOS Trash."}
@@ -4558,13 +4580,17 @@ SCOUT_BROWSER = (
     "shows it is the last tab in the group: then navigate it to about:blank and leave it open (an "
     "empty group makes the next new tab open a window).")
 
-# The feed and search pages often carry no post links, and the clipboard is off limits. The
-# author's activity page always has them.
+# The feed and search pages often carry no post links. Copy link is caught in the page so the
+# system clipboard stays untouched (the user OK, 2026-10-08).
 SCOUT_LINK = (
     "Every candidate needs the post's own link. If the page you read it on has no "
-    "urn:li:activity link for it, open the author's linkedin.com/in/<handle>/recent-activity/all/ "
-    "in your tab, find the same post by its first words and take the link from there. No link, no "
-    "candidate.")
+    "urn:li:activity link for it, catch the post's own Copy link: with javascript_tool run "
+    "window.__copied=null; navigator.clipboard.writeText=t=>{window.__copied=t;return Promise.resolve()} "
+    "(the link stays in the page and never reaches the system clipboard; run it again after every "
+    "page load), click the post's \"...\" menu, then \"Copy link to post\" (the only clicks allowed "
+    "beyond reading), then read window.__copied with javascript_tool. A lnkd.in short link: navigate your tab to it "
+    "and take the post URL it lands on. Keep the link without its query string. Still no link: open the author's linkedin.com/in/<handle>/recent-activity/all/ in your "
+    "tab, find the same post by its first words and try there. No link, no candidate.")
 
 SCOUT_OUTPUT = (
     "Return only JSON, nothing else: {\"candidates\": [{\"url\": the post's own link "
@@ -4587,7 +4613,7 @@ SCOUT_RULES = (
     "agents or running a community, a counterpoint, a pointed question or a concrete tip.")
 
 # Posts from people not on the target list: fresh, and with proof that people read the author.
-SCOUT_FRESH = "Posts under 12 hours old with at least 20 reactions only."
+SCOUT_FRESH = "Posts under 24 hours old with at least 10 reactions only."
 
 SEARCH_TERMS = ["Claude Code", "AI agents", "agentic workflows", "automation", "solo founder AI",
                 "building in public"]
@@ -4636,7 +4662,7 @@ def scout_briefs(skip_urls, skip_authors, targets_file):
     no_list = "Skip anyone on his target list at %s: the list scout reads them." % targets_file
     feed = ("You are the feed scout for the user's LinkedIn comment copilot. " + SCOUT_BROWSER + " "
             "Open linkedin.com/feed/ (sorted by most recent if the page offers it) and scroll down, "
-            "reading as you go, until you have read about 60 posts or the posts are over 12 hours old. "
+            "reading as you go, until you have read about 60 posts or the posts are over 24 hours old. "
             "Note the candidates first, then get their links. " + SCOUT_LINK + " "
             + SCOUT_RULES + " " + SCOUT_FRESH + " " + skip + " "
             + SCOUT_OUTPUT % (NEW_TARGETS, 12))
@@ -4646,7 +4672,7 @@ def scout_briefs(skip_urls, skip_authors, targets_file):
            "reposts and comments). Go through the people in this order, the ones read longest ago first, so "
            "every run reaches different people: %s. Stop early at 20 candidates. "
            % (targets_file, shuffled_targets(targets_file))
-           + SCOUT_RULES + " Posts under 24 hours old. " + skip + " Also note the people whose "
+           + SCOUT_LINK + " " + SCOUT_RULES + " " + SCOUT_FRESH + " " + skip + " Also note the people whose "
            "newest own post is over 30 days old. "
            + SCOUT_OUTPUT % ("\"quiet\": [names],", 20))
     search = ("You are the search scout for the user's LinkedIn comment copilot. " + SCOUT_BROWSER + " "
@@ -4665,8 +4691,7 @@ def scout_briefs(skip_urls, skip_authors, targets_file):
                   "headline whose comment shows real work (a story, numbers, a clear opinion), not "
                   "praise. For up to 8 such people, open their own "
                   "linkedin.com/in/<handle>/recent-activity/all/ and read their newest posts. "
-                  % targets_file + SCOUT_RULES + " Posts under 24 hours old with at least 10 "
-                  "reactions. " + no_list + " " + skip + " "
+                  % targets_file + SCOUT_LINK + " " + SCOUT_RULES + " " + SCOUT_FRESH + " " + no_list + " " + skip + " "
                   + SCOUT_OUTPUT % (NEW_TARGETS, 10))
     return {"feed": feed, "list": lst, "search": search, "commenters": commenters}
 
@@ -4728,8 +4753,7 @@ def t_get_comment_context(a):
                                "library='comments', edit the file, then reply_comment library='comments' "
                                "resolve=true.") if open_notes else None,
         "rules": "English posts only. Author headline must show a founder, CEO, CTO, head of / VP, product, "
-                 "growth or engineering role. Under ~150 comments. A post by someone on the target list: under 24 hours old. "
-                 "Anyone else: under 12 hours old with at least 20 reactions (from a commenter scout: under 24 hours, 10 reactions). Skip skip_post_urls "
+                 "growth or engineering role. Under ~150 comments. Under 24 hours old with at least 10 reactions. Skip skip_post_urls "
                  "and skip_authors (commented in the last 2 days). No politics, layoffs or competitor fights. "
                  "Each suggestion needs an angle: what the user can add. No angle, no suggestion. Write 3 "
                  "variants per post, each a different shape (for example a short story from his work, a "

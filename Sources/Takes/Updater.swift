@@ -149,8 +149,35 @@ final class Updater {
               let (file, dresp) = try? await URLSession.shared.download(from: dmg.browser_download_url) else { return nil }
         defer { try? FileManager.default.removeItem(at: file) }
         guard (dresp as? HTTPURLResponse)?.statusCode == 200 else { return nil }
-        let notes = (try? JSONEncoder().encode(["tag": r.tag_name, "body": r.body ?? ""])) ?? Data()
+        // One update jumps to the newest release, so What's new lists every release since `own`
+        // (2026-10-08), not only the newest. Without the list, the newest release's notes.
+        var bodies = [r.body ?? ""]
+        if let list = URL(string: api.absoluteString.replacingOccurrences(of: "/releases/latest", with: "/releases?per_page=30")),
+           list != api, let (ldata, lresp) = try? await URLSession.shared.data(for: URLRequest(url: list)),
+           (lresp as? HTTPURLResponse)?.statusCode == 200,
+           let all = try? JSONDecoder().decode([Release].self, from: ldata) {
+            let since = all.filter { isNewer($0.tag_name, than: own) && !isNewer($0.tag_name, than: r.tag_name) }
+                .sorted { isNewer($0.tag_name, than: $1.tag_name) }
+            if !since.isEmpty { bodies = since.map { $0.body ?? "" } }
+        }
+        let notes = (try? JSONEncoder().encode(["tag": r.tag_name, "body": mergeNotes(bodies)])) ?? Data()
         return Self.stage(dmg: file, tag: r.tag_name, bundleID: bundleID, notes: notes, into: stage) ? r.tag_name : nil
+    }
+
+    /// Several releases' notes as one: each "### Area" once, in the order it first shows, with
+    /// the newest release's lines first. The Install section and comments drop out.
+    nonisolated static func mergeNotes(_ bodies: [String]) -> String {
+        var order: [String] = [], lines: [String: [String]] = [:]
+        for body in bodies {
+            var area = "Takes"
+            for line in body.split(whereSeparator: \.isNewline).map({ $0.trimmingCharacters(in: .whitespaces) }) {
+                if line.hasPrefix("### ") { area = String(line.dropFirst(4)); continue }
+                guard line.hasPrefix("- "), area != "Install" else { continue }
+                if lines[area] == nil { order.append(area) }
+                if lines[area]?.contains(line) != true { lines[area, default: []].append(line) }
+            }
+        }
+        return order.map { "### \($0)\n" + lines[$0]!.joined(separator: "\n") }.joined(separator: "\n\n")
     }
 
     /// Mounts the download, checks it is Takes at that tag, and stages its app as build.sh does.

@@ -77,6 +77,18 @@ struct PhoneHTTPTests {
         #expect((r2 as? HTTPURLResponse)?.statusCode == 206)
         #expect(part == Data((10..<20).map { UInt8($0) }))
 
+        // A picture the phone has: "changed since?" gets an empty 304 (2026-10-08).
+        let plain = URLSession(configuration: .ephemeral)
+        let (_, r6) = try await plain.data(from: URL(string: base + "/file")!)
+        let stamp = try #require((r6 as? HTTPURLResponse)?.value(forHTTPHeaderField: "Last-Modified"))
+        var again = URLRequest(url: URL(string: base + "/file")!, cachePolicy: .reloadIgnoringLocalCacheData)
+        again.setValue(stamp, forHTTPHeaderField: "If-Modified-Since")
+        let (none, r7) = try await plain.data(for: again)
+        #expect((r7 as? HTTPURLResponse)?.statusCode == 304)
+        #expect(none.isEmpty)
+        again.setValue("Thu, 01 Jan 2026 00:00:00 GMT", forHTTPHeaderField: "If-Modified-Since")
+        #expect((try await plain.data(for: again).1 as? HTTPURLResponse)?.statusCode == 200)
+
         var put = URLRequest(url: URL(string: base + "/up")!)
         put.httpMethod = "PUT"
         let big = Data((0..<3_000_000).map { UInt8($0 % 251) })

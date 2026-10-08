@@ -52,24 +52,30 @@ def wav(seconds=2, rate=8000):
             + b"data" + struct.pack("<I", n * 2) + b"\0" * (n * 2))
 
 
-def side(site, file, title, text, **more):
-    p = {"side": site, "name": "Hacker News" if site == "hn" else "Reddit", "file": file, "title": title, "text": text,
-         "link": "", "place": "", "flair": "", "user": "tester", "media": "", "status": "draft", "postedURL": "",
-         "submit": None, "titleLimit": 80 if site == "hn" else 300, "textLimit": None if site == "hn" else 40000}
-    p.update(more)
-    return p
 
 
-def launch():
-    """GET /test/launch turns these on: a Show HN post and a Reddit post for the session."""
-    state["sides"] = [
-        side("hn", "2026-10-07-hn.md", "Show HN: A test app for video takes",
-             "Hi HN, this is a test post.\n\nIt has a second paragraph with a *word* in italics.",
-             link="https://github.com/example/app", submit="https://news.ycombinator.com/submitlink?u=x&t=y"),
-        side("reddit", "2026-10-07-reddit.md", "I made a test app for video takes",
-             "What it does:\n\n- records takes\n- writes posts", place="r/test", flair="Showcase",
-             media="a 20 s screen recording", submit="https://www.reddit.com/r/test/submit?title=x"),
-    ]
+STYLES = {"styles": [
+    {"name": "Bold", "description": "Big type", "isNew": True, "usedBy": [], "openComments": 0},
+    {"name": "Magazine", "description": "Paper pages", "isNew": False, "poster": "/tmp/styles/Magazine/preview.png",
+     "usedBy": [SID], "openComments": 1}],
+    "projects": ["Tests"]}
+
+STYLE = {"id": "_library/styles/Magazine", "name": "Magazine", "folder": "/tmp/_library/styles/Magazine",
+         "readme": "# Magazine\n\nPaper pages with thin-line figures. Instrument Serif for titles, Inter for the rest.\n\n## Colours\n\nOne oxblood accent.",
+         "readmeComments": 0, "hasTokens": True, "tokensComments": 0,
+         "swatches": [{"name": "paper", "value": "#f4efe6", "usage": "page"}, {"name": "ink", "value": "#1b1b1b", "usage": "text"},
+                      {"name": "oxblood", "value": "#7a1f2b", "usage": "accent"}, {"name": "rule", "value": "var(--x)", "usage": ""}],
+         "type": [{"name": "Title", "family": "Georgia", "size": 40, "weight": 700}, {"name": "Body", "family": "Helvetica Neue", "size": 16, "weight": 400}],
+         "fonts": [],
+         "groups": [{"name": "logos", "items": [{"name": "logo.svg", "versions": [
+             {"path": "/tmp/_library/styles/Magazine/assets/logos/logo-v1.svg", "name": "logo-v1.svg", "version": 1, "kind": "image",
+              "size": 100, "modified": NOW, "openComments": 0},
+             {"path": "/tmp/_library/styles/Magazine/assets/logos/logo-v2.svg", "name": "logo-v2.svg", "version": 2, "kind": "image",
+              "size": 100, "modified": NOW, "note": "Use on dark pages", "openComments": 1}]}]},
+                    {"name": "motion", "items": [{"name": "title-card.mp4", "versions": [
+             {"path": "/tmp/_library/styles/Magazine/assets/motion/title-card-v1.mp4", "name": "title-card-v1.mp4", "version": 1,
+              "kind": "video", "size": 100, "modified": NOW, "note": "Opens each video", "openComments": 0}]}]}],
+         "openComments": 1}
 
 
 def detail():
@@ -78,6 +84,12 @@ def detail():
          "openComments": len(state["comments"]), "profile": None, "storyboard": None}
     if state.get("sides"):
         d["sides"] = state["sides"]
+    if state.get("styles"):
+        d["style"] = state["video_style"]
+        d["post"] = {"text": "Four days and 75 updates.\n\nThis is the body of the post.", "status": "draft",
+                     "variants": [{"slug": "short", "name": "Short", "author": "claude", "note": "Tighter, one idea", "text": "Short one"}],
+                     "hooks": [{"id": "h1", "text": "Four days and 75 updates.", "note": "Numbers first"},
+                               {"id": "h2", "text": "I shipped 75 updates in four days."}]}
     return d
 
 
@@ -149,9 +161,27 @@ class H(BaseHTTPRequestHandler):
             state["chat"] = chat
             state["chat_revision"] += 1
             return self.send({"ok": True})
-        if p == "/test/launch":
-            launch()
+        if p == "/test/styles":
+            state["styles"] = True
+            state["video_style"] = {"own": None, "project": "Magazine", "names": ["Bold", "Magazine"]}
             return self.send({"ok": True})
+        if p == "/api/styles":
+            return self.send(STYLES)
+        if p == "/api/style":
+            if method == "POST":
+                j = json.loads(self.body())
+                state["log"].append({"style": j})
+                return self.send({"ok": True})
+            return self.send(dict(STYLE, name=q.get("name") or "Only Tests"))
+        if p == "/api/session/style" and method == "POST":
+            j = json.loads(self.body())
+            state["log"].append({"video_style": j})
+            vs = state["video_style"]
+            if j.get("project") == "1":
+                vs["project"], vs["own"] = j["style"], None
+            else:
+                vs["own"] = j.get("style") or None
+            return self.send(vs)
         if p == "/api/side" and method == "POST":
             j = json.loads(self.body())
             post = next((x for x in state.get("sides") or [] if x["file"] == j.get("file")), None)

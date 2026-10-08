@@ -45,13 +45,32 @@ enum ChatItem: Identifiable, Hashable {
 }
 
 /// The messages of a chat with tool runs folded. The session chat and the Copilot chat use it.
+/// Only the newest `page` items are drawn: the chat is a plain stack (2026-10-06), so a long
+/// history cost layout on every open and every streamed word. Older ones come a page at a time,
+/// and the chat stays on the message you read (2026-10-08).
 struct ChatItems: View {
     let messages: [Message]
     let running: Bool
     let bubble: (Message) -> Bubble
+    static let page = 80
+    @State private var shown = Self.page
 
     var body: some View {
-        let items = ChatItem.group(messages)
+        let all = ChatItem.group(messages)
+        let items = all.count > shown ? Array(all.suffix(shown)) : all
+        if items.count < all.count, let top = items.first?.id {
+            ScrollViewReader { proxy in
+                Button {
+                    shown += Self.page
+                    // Keep the message that was on top where it was.
+                    DispatchQueue.main.async { proxy.scrollTo(top, anchor: .top) }
+                } label: {
+                    Text("Show earlier messages").font(.inter(.footnote, .medium)).foregroundStyle(Palette.accent)
+                        .frame(maxWidth: .infinity).padding(.vertical, 6)
+                }
+                .buttonStyle(.press)
+            }
+        }
         ForEach(items) { item in
             switch item {
             case .message(let m): bubble(m).equatable().id(m.id)

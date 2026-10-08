@@ -540,6 +540,9 @@ struct SearchPalette: View {
     /// The helper's hits for the last query. A chip or project only filters them again.
     @State private var found: (query: String, hits: [MediaSearch.Hit])?
     @FocusState private var focused: Bool
+    /// The panel settles in when it opens (2026-10-08: results popped in all at once).
+    @State private var appeared = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private var filtered: Bool { filter != .all || project != nil }
 
@@ -558,7 +561,7 @@ struct SearchPalette: View {
                             .font(Theme.sans(16))
                             .focused($focused)
                             .onSubmit { open(selected) }
-                        if busy { ProgressView().controlSize(.small) }
+                        if busy { ProgressView().controlSize(.small).transition(.opacity) }
                     }
                     .padding(.horizontal, 16).frame(height: 52)
                     chips
@@ -568,21 +571,26 @@ struct SearchPalette: View {
                             .font(Theme.sans(12.5)).foregroundStyle(Theme.muted)
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .padding(16)
+                            .transition(.opacity)
                     } else {
                         ScrollViewReader { proxy in
                             ScrollView {
                                 LazyVStack(spacing: 2) {
                                     ForEach(Array(hits.enumerated()), id: \.element.id) { i, h in
                                         SearchRow(hit: h, root: app.library.root, on: i == selected)
-                                            .id(i)
                                             .onTapGesture { open(i) }
+                                            .transition(arrive(i))
                                     }
                                 }
                                 .padding(6)
                             }
                             .frame(height: min(440, hits.reduce(12) { $0 + SearchRow.height($1) }))
-                            .onChange(of: selected) { _, i in withAnimation(Theme.motion) { proxy.scrollTo(i, anchor: .center) } }
+                            .onChange(of: selected) { _, i in
+                                guard hits.indices.contains(i) else { return }
+                                withAnimation(Theme.motion) { proxy.scrollTo(hits[i].id, anchor: .center) }
+                            }
                         }
+                        .transition(.opacity)
                         if search.model != .ready {
                             Text(search.statusLine).font(Theme.sans(11)).foregroundStyle(Theme.faint)
                                 .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 16).padding(.vertical, 10)
@@ -594,9 +602,16 @@ struct SearchPalette: View {
                 .background(RoundedRectangle(cornerRadius: 14).fill(Theme.paper))
                 .overlay(RoundedRectangle(cornerRadius: 14).stroke(Theme.border))
                 .cardShadow(RoundedRectangle(cornerRadius: 14), fill: Theme.paper, radius: 30, y: 12)
+                .opacity(appeared ? 1 : 0)
+                .scaleEffect(appeared || reduceMotion ? 1 : 0.98, anchor: .top)
+                .offset(y: appeared || reduceMotion ? 0 : -6)
                 .padding(.top, 90)
             }
-            .onAppear { focused = true }
+            .onAppear {
+                focused = true
+                withAnimation(.smooth(duration: 0.22)) { appeared = true }
+            }
+            .onDisappear { appeared = false }
             .onKeyPress(.escape) { close(); return .handled }
             .onKeyPress(.downArrow) { selected = min(hits.count - 1, selected + 1); return .handled }
             .onKeyPress(.upArrow) { selected = max(0, selected - 1); return .handled }
@@ -612,17 +627,17 @@ struct SearchPalette: View {
                 let keep = { (h: MediaSearch.Hit) in MediaSearch.keeps(h, filter, project: project) }
                 let places = filter == .all ? MediaSearch.places(query, app: app, limit: project == nil ? 6 : 40).filter(keep) : []
                 if let found, found.query == query {
-                    hits = places + MediaSearch.relevant(found.hits.filter(keep)).prefix(40); selected = 0
+                    show(places + MediaSearch.relevant(found.hits.filter(keep)).prefix(40))
                     return
                 }
-                hits = places; selected = 0
+                show(places)
                 try? await Task.sleep(for: .milliseconds(180))
                 guard !Task.isCancelled else { return }
-                busy = true
+                withAnimation(Theme.motion) { busy = true }
                 let all = await search.search(query, limit: 400)
-                guard !Task.isCancelled else { busy = false; return }
+                guard !Task.isCancelled else { withAnimation(Theme.motion) { busy = false }; return }
                 found = (query, all)
-                hits = places + MediaSearch.relevant(all.filter(keep)).prefix(40); busy = false
+                show(places + MediaSearch.relevant(all.filter(keep)).prefix(40))
             }
         }
     }
@@ -661,6 +676,23 @@ struct SearchPalette: View {
             .menuStyle(.button).buttonStyle(.plain).menuIndicator(.hidden).fixedSize()
         }
         .padding(.horizontal, 12).padding(.bottom, 10)
+    }
+
+    /// New hits glide in: the panel grows to fit, rows that stay keep their place, new rows fade up
+    /// one after another, and old ones fade out.
+    private func show(_ new: [MediaSearch.Hit]) {
+        withAnimation(.smooth(duration: 0.28)) {
+            hits = new; selected = 0; busy = false
+        }
+    }
+
+    /// A new row fades in and rises 6 points, a few hundredths of a second after the row above it.
+    private func arrive(_ i: Int) -> AnyTransition {
+        let delay = Double(min(i, 8)) * 0.025
+        return .asymmetric(
+            insertion: (reduceMotion ? AnyTransition.opacity : AnyTransition.opacity.combined(with: .offset(y: 6)))
+                .animation(.smooth(duration: 0.26).delay(delay)),
+            removal: .opacity.animation(.easeOut(duration: 0.12)))
     }
 
     private func close() { search.shown = false }
@@ -706,6 +738,7 @@ private struct SearchRow: View {
         }
         .padding(.horizontal, 10).frame(height: 38)
         .background(RoundedRectangle(cornerRadius: 9).fill(on ? Theme.hover : .clear))
+        .animation(.easeOut(duration: 0.12), value: on)
         .contentShape(Rectangle())
     }
 
@@ -715,6 +748,7 @@ private struct SearchRow: View {
                 RoundedRectangle(cornerRadius: 6).fill(Theme.hover)
                 if let thumb = thumb ?? Self.thumbs.object(forKey: hit.id as NSString) {
                     Image(nsImage: thumb).resizable().aspectRatio(contentMode: .fill)
+                        .transition(.opacity)
                 } else {
                     Image(systemName: icon).foregroundStyle(Theme.faint)
                 }
@@ -737,8 +771,13 @@ private struct SearchRow: View {
         }
         .padding(8)
         .background(RoundedRectangle(cornerRadius: 9).fill(on ? Theme.hover : .clear))
+        .animation(.easeOut(duration: 0.12), value: on)
         .contentShape(Rectangle())
-        .task(id: hit.id) { thumb = await Self.thumbnail(hit) }
+        .task(id: hit.id) {
+            // A cached picture shows at once; a new one fades in over the placeholder.
+            let image = await Self.thumbnail(hit)
+            withAnimation(.easeOut(duration: 0.2)) { thumb = image }
+        }
     }
 
     private var icon: String {

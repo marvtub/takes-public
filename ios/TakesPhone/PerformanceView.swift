@@ -64,6 +64,7 @@ struct PerformanceView: View {
                           empty: "Ask about your numbers, or tap Update to have Takes refresh them on the Mac.")
         }
         .onChange(of: model.performanceTick) { _, _ in Task { await load() } }
+        .onChange(of: model.connected) { _, on in if on { Task { await load() } } }
         .task {
             // Last time's numbers at once, then the Mac's.
             if data == nil, let raw = Cache.loadData("performance") { data = try? API.decoder.decode(Performance.self, from: raw) }
@@ -75,7 +76,7 @@ struct PerformanceView: View {
         do {
             let raw = try await model.api.performanceData()
             data = try API.decoder.decode(Performance.self, from: raw)
-            Cache.saveData(raw, "performance")
+            Task.detached(priority: .utility) { Cache.saveData(raw, "performance") }
             failed = nil
         } catch {
             if data == nil { failed = error.localizedDescription }

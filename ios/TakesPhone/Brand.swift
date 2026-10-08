@@ -287,7 +287,9 @@ struct Segments<T: Hashable>: View {
                 Button {
                     guard !on else { return }
                     Brand.select()
-                    withAnimation(Brand.spring) { selection = item }
+                    // Only the pill slides. Animating the change itself cross-faded the whole
+                    // screen under the tabs for 0.4 s (2026-10-08).
+                    selection = item
                 } label: {
                     Text(title(item))
                         .font(.inter(.subheadline, .medium))
@@ -310,6 +312,7 @@ struct Segments<T: Hashable>: View {
         }
         .padding(3)
         .background(Palette.well, in: RoundedRectangle(cornerRadius: 11, style: .continuous))
+        .animation(Brand.spring, value: selection)
     }
 }
 

@@ -273,6 +273,8 @@ final class AppModel {
         if !Self.testing {
             phone = PhoneServer(app: self)
             phone?.start()
+            Transcripts.shared.start(root: { [weak self] in self?.library.root },
+                                     paused: { [weak self] in self?.isRecording ?? false })
         }
 
         if let m = NSEvent.addLocalMonitorForEvents(matching: .keyDown, handler: { [weak self] e in

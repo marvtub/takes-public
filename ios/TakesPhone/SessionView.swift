@@ -81,6 +81,8 @@ struct SessionView: View {
             }
             await reload(read: true)
         }
+        // Opened before the Mac answered (just after Face ID): load it as soon as it does.
+        .onChange(of: model.connected) { _, on in if on { Task { await reload(read: true) } } }
         .onDisappear { if model.chatID == session.id { model.chatID = nil } }
         .onReceive(model.live.$chat.map { $0?.messages.isEmpty == false }.removeDuplicates()) { if $0 && model.chatID == session.id { talked = true } }
         .fullScreenCover(item: $recording) { mode in
@@ -562,7 +564,21 @@ struct Bubble: View, Equatable {
 
     enum Piece { case text(String), file(String) }
 
+    /// Parsed once per text: a chat that opens again, or redraws, does not split and parse every
+    /// message again. Only a reply still streaming misses (2026-10-08).
+    private final class Parsed { let pieces: [Piece]; init(_ p: [Piece]) { pieces = p } }
+    private final class Marked { let text: AttributedString; init(_ t: AttributedString) { text = t } }
+    nonisolated(unsafe) private static let parsed: NSCache<NSString, Parsed> = { let c = NSCache<NSString, Parsed>(); c.countLimit = 600; return c }()
+    nonisolated(unsafe) private static let marked: NSCache<NSString, Marked> = { let c = NSCache<NSString, Marked>(); c.countLimit = 1200; return c }()
+
     static func pieces(_ text: String) -> [Piece] {
+        if let hit = parsed.object(forKey: text as NSString) { return hit.pieces }
+        let out = split(text)
+        parsed.setObject(Parsed(out), forKey: text as NSString)
+        return out
+    }
+
+    private static func split(_ text: String) -> [Piece] {
         var out: [Piece] = []
         var buf: [String] = []
         func flush() {
@@ -585,7 +601,10 @@ struct Bubble: View, Equatable {
     }
 
     static func markdown(_ s: String) -> AttributedString {
-        (try? AttributedString(markdown: s, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString(s)
+        if let hit = marked.object(forKey: s as NSString) { return hit.text }
+        let t = (try? AttributedString(markdown: s, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString(s)
+        marked.setObject(Marked(t), forKey: s as NSString)
+        return t
     }
 
     static func guess(_ path: String) -> RemoteFile {
@@ -682,6 +701,10 @@ struct FilesView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
+                // The style Takes edits this video in, as on the Mac's Assets tab.
+                if let style = detail.style, !style.names.isEmpty {
+                    StylePicker(sessionID: detail.session.id, project: detail.session.project, style: style).id(style)
+                }
                 ForEach(folders, id: \.self) { folder in
                     let list = detail.files.filter { $0.folder == folder }
                     if !list.isEmpty { section(folder, list) }
@@ -873,7 +896,8 @@ struct ScriptView: View {
         .sheet(isPresented: $editing) {
             TextEditSheet(title: "Script", text: text, font: Font(Self.font), limit: nil) { new in
                 try await model.save("script", sessionID, text: new, base: text)
-                await reload()
+                // The sheet closes once the Mac has the text, not after a full reload too (2026-10-08).
+                Task { await reload() }
             }
         }
     }
@@ -937,7 +961,6 @@ struct TextEditSheet: View {
 /// LinkedIn's light feed colors and type, as on the Mac's post tab.
 enum LinkedIn {
     static let card = Color.white
-    static let feed = Color(red: 0.957, green: 0.949, blue: 0.933)
     static let ink = Color.black.opacity(0.9)
     static let muted = Color.black.opacity(0.6)
     static let line = Color.black.opacity(0.08)
@@ -1063,7 +1086,7 @@ struct PostView: View {
     let post: Post?
     /// Every platform's post, LinkedIn first (2026-10-05). Empty from an older Mac.
     let posts: [PlatformPost]
-    /// Show HN and Reddit launch posts, from the Mac's plugins (2026-10-07).
+    /// Posts on the sides the Mac's plugins add (2026-10-07).
     let sides: [SidePost]
     let profile: Profile?
     let show: (RemoteFile) -> Void
@@ -1076,6 +1099,8 @@ struct PostView: View {
     /// "main", or the slug of the variant on show.
     @State private var draft = "main"
     @State private var busy = false
+    /// The hook just tapped, until the reload shows it.
+    @State private var picked: String?
     @State private var failed: String?
 
     private var name: String { profile?.name ?? "You" }
@@ -1088,7 +1113,7 @@ struct PostView: View {
     /// The other platforms' posts. LinkedIn shows even with no post: it is where a post starts.
     private var others: [PlatformPost] { posts.filter { $0.platform != "linkedin" } }
     private var other: PlatformPost? { platform == "linkedin" ? nil : others.first { $0.platform == platform } }
-    /// The sides with a post, in the Mac's order: Hacker News, then Reddit.
+    /// The sides with a post, in the Mac's order.
     private var sideIDs: [(id: String, name: String)] {
         var seen = Set<String>()
         return sides.compactMap { seen.insert($0.side).inserted ? ($0.side, $0.name) : nil }
@@ -1110,7 +1135,9 @@ struct PostView: View {
             }
             .padding(16)
         }
-        .background(LinkedIn.feed)
+        // The app's own page, light or dark: a fixed beige page put light text (chips, status,
+        // Cover) on beige in dark mode (2026-10-08). The LinkedIn card stays white, as in the feed.
+        .background(Palette.canvas)
         .refreshable { await reload() }
         .onChange(of: variants.map(\.slug)) { _, slugs in if draft != "main" && !slugs.contains(draft) { draft = "main" } }
         .onChange(of: others.map(\.platform) + sideIDs.map(\.id), initial: true) { _, have in if platform != "linkedin" && !have.contains(platform) { platform = "linkedin" } }
@@ -1118,7 +1145,7 @@ struct PostView: View {
             if let other {
                 TextEditSheet(title: "\(other.name) post", text: other.text, font: .system(size: 16), limit: other.limit) { new in
                     try await model.save("post", sessionID, text: new, base: other.text, platform: other.platform)
-                    await reload()
+                    Task { await reload() }
                 }
             } else {
                 TextEditSheet(title: variant?.name ?? "LinkedIn post", text: text, font: .system(size: 16), limit: 3000) { new in
@@ -1127,7 +1154,7 @@ struct PostView: View {
                     } else {
                         try await model.save("post", sessionID, text: new, base: post?.text ?? "")
                     }
-                    await reload()
+                    Task { await reload() }
                 }
             }
         }
@@ -1289,7 +1316,7 @@ struct PostView: View {
             if let variant {
                 HStack(alignment: .firstTextBaseline) {
                     if !variant.note.isEmpty {
-                        Text(variant.note).font(.footnote).foregroundStyle(LinkedIn.muted).lineLimit(3)
+                        Text(variant.note).font(.footnote).foregroundStyle(Palette.muted).lineLimit(3)
                     }
                     Spacer()
                     Button("Use as main") { act(["action": "promote", "slug": variant.slug]) }
@@ -1308,9 +1335,10 @@ struct PostView: View {
             }
             .font(.subheadline.weight(on ? .semibold : .regular))
             .padding(.horizontal, 12).padding(.vertical, 7)
-            .background(on ? LinkedIn.ink : LinkedIn.card, in: Capsule())
-            .overlay(Capsule().stroke(on ? .clear : LinkedIn.line))
-            .foregroundStyle(on ? LinkedIn.card : LinkedIn.ink)
+            // The page's own colours, as the platform chips: LinkedIn black was lost on the dark page.
+            .background(on ? Palette.ink : Palette.paper, in: Capsule())
+            .overlay(Capsule().strokeBorder(on ? .clear : Palette.border))
+            .foregroundStyle(on ? Palette.paper : Palette.ink)
         }
         .buttonStyle(.plain)
     }
@@ -1319,10 +1347,10 @@ struct PostView: View {
     private var hookList: some View {
         let current = PostHook.opening(text)
         return VStack(alignment: .leading, spacing: 8) {
-            Text("HOOKS").font(.caption.weight(.semibold)).tracking(0.8).foregroundStyle(LinkedIn.muted)
+            Text("HOOKS").font(.caption.weight(.semibold)).tracking(0.8).foregroundStyle(Palette.muted)
                 .padding(.top, 6)
             ForEach(hooks) { h in
-                let on = h.text.trimmingCharacters(in: .whitespacesAndNewlines) == current
+                let on = picked.map { $0 == h.id } ?? (h.text.trimmingCharacters(in: .whitespacesAndNewlines) == current)
                 Button { if !on { act(["action": "hook", "hook": h.id, "draft": draft]) } } label: {
                     HStack(alignment: .top, spacing: 10) {
                         Image(systemName: on ? "checkmark.circle.fill" : "circle")
@@ -1345,15 +1373,17 @@ struct PostView: View {
                 .buttonStyle(.plain)
                 .disabled(busy)
                 .accessibilityLabel(on ? "Hook in use: \(h.text)" : "Use hook: \(h.text)")
+                .environment(\.colorScheme, .light)
             }
         }
-        .environment(\.colorScheme, .light)
     }
 
     private func act(_ body: [String: String]) {
         busy = true
+        // The tapped hook gets its check at once; the reloaded post takes over after.
+        if body["action"] == "hook" { picked = body["hook"]; Brand.select() }
         Task {
-            defer { busy = false }
+            defer { busy = false; picked = nil }
             do {
                 try await model.postDraft(sessionID, body)
                 failed = nil
@@ -1498,7 +1528,7 @@ final class InlinePlayer: ObservableObject {
         self.url = url
         if let known { left = Self.time(known) }
         player.isMuted = true
-        try? AVAudioSession.sharedInstance().setCategory(.ambient, options: .mixWithOthers)
+        AVAudioSession.sharedInstance().use(.ambient, .mixWithOthers)
         let item = AVPlayerItem(url: url)
         looper = AVPlayerLooper(player: player, templateItem: item)
         watch = player.observe(\.timeControlStatus) { [weak self] pl, _ in
@@ -1536,7 +1566,7 @@ final class InlinePlayer: ObservableObject {
         muted.toggle()
         player.isMuted = muted
         // Sound on: the player takes the audio, as it would in the full screen player.
-        try? AVAudioSession.sharedInstance().setCategory(muted ? .ambient : .playback, options: muted ? .mixWithOthers : [])
+        AVAudioSession.sharedInstance().use(muted ? .ambient : .playback, muted ? .mixWithOthers : [])
         if !muted { try? AVAudioSession.sharedInstance().setActive(true) }
         player.play()
     }
@@ -1576,6 +1606,8 @@ struct Viewer: View {
     let sessionID: String
     let onDone: () -> Void
     @State private var player: AVPlayer?
+    /// The star as tapped here: it turns at once, and the viewer stays open (2026-10-08).
+    @State private var starred: Bool?
 
     /// A video or picture of this session opens in the review player, with comments as on the Mac.
     private var reviewPath: String? {
@@ -1591,8 +1623,13 @@ struct Viewer: View {
                 Text(file.name).font(.inter(.footnote, .semibold)).foregroundStyle(.white.opacity(0.9)).lineLimit(1)
                     .frame(maxWidth: .infinity)
                 if let n = file.take {
-                    Button { Task { await model.keeper(sessionID, take: n); onDone() } } label: {
-                        dark(file.keeper == true ? "star.fill" : "star", "Star as keeper", tint: file.keeper == true ? .yellow : .white)
+                    let on = starred ?? (file.keeper == true)
+                    Button {
+                        starred = !on
+                        Brand.tap(.medium)
+                        Task { await model.keeper(sessionID, take: n) }
+                    } label: {
+                        dark(on ? "star.fill" : "star", on ? "Remove the star" : "Star as keeper", tint: on ? .yellow : .white)
                     }
                     .buttonStyle(.press)
                 } else {
@@ -1619,7 +1656,7 @@ struct Viewer: View {
             guard file.isVideo || file.isAudio, reviewPath == nil else { return }
             let p = AVPlayer(url: model.api.media(file.path))
             player = p
-            try? AVAudioSession.sharedInstance().setCategory(.playback)
+            AVAudioSession.sharedInstance().use(.playback)
             p.play()  // the user tapped this file himself
         }
         .onDisappear { player?.pause() }

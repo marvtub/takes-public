@@ -93,9 +93,9 @@ struct PhonePlatformPost: Codable, Hashable {
     var limit: Int
 }
 
-/// A post on a side a plugin adds to the Post tab (2026-10-07): the Show HN or Reddit launch post.
+/// A post on a side a plugin adds to the Post tab (2026-10-07), for example a launch post.
 struct PhoneSidePost: Codable, Hashable {
-    /// The side's id ("hn", "reddit") and name.
+    /// The side's id and name.
     var side: String
     var name: String
     /// The post's file name: what the phone sends back with a change.
@@ -149,8 +149,10 @@ struct PhoneSessionDetail: Codable {
     var storyboard: [PhoneShot]?
     /// Every platform with a post, LinkedIn first. Older phones read only `post`.
     var posts: [PhonePlatformPost]?
-    /// The posts on the plugins' sides (Show HN, Reddit). Nil in the public copy.
+    /// The posts on the plugins' sides. Nil in the public copy.
     var sides: [PhoneSidePost]?
+    /// The style this video is edited in (PhoneStyles.swift).
+    var style: PhoneSessionStyle?
 }
 
 /// One published post on the phone's performance tab: its latest numbers.
@@ -206,6 +208,30 @@ final class PhoneServer: PhoneHandler, @unchecked Sendable {
         self.app = app
         root = app.library.root.standardizedFileURL
         phones = (try? JSONDecoder.iso.decode([PairedPhone].self, from: Data(contentsOf: Self.phonesFile))) ?? []
+    }
+
+    /// For tests: a server over one folder, with no app and no paired phones. Not started.
+    /// `demo` (the README's phone pictures): any caller on 127.0.0.1 may ask, and pairing needs no click.
+    init(root: URL, demo: Bool = false) {
+        self.root = root.standardizedFileURL
+        self.demo = demo
+    }
+    private var demo = false
+
+    /// Whose posts these are. The demo never shows the Mac's own profile: only the made-up creator
+    /// that scripts/public/demo.py writes to <root>/.creator.json.
+    private var currentProfile: PhoneProfile {
+        guard demo else { return Self.profile() }
+        let c = demoCreator
+        return PhoneProfile(name: c["name"] ?? "Sam Rivera", headline: c["headline"] ?? "Video creator",
+                            photo: demoPhoto != nil)
+    }
+    private var demoCreator: [String: String] {
+        let f = lock.withLock { root }.appending(path: ".creator.json")
+        return ((try? JSONSerialization.jsonObject(with: Data(contentsOf: f))) as? [String: String]) ?? [:]
+    }
+    private var demoPhoto: URL? {
+        demoCreator["avatar"].map { URL(fileURLWithPath: $0) }.flatMap { FileManager.default.fileExists(atPath: $0.path) ? $0 : nil }
     }
 
     @MainActor
@@ -272,6 +298,7 @@ final class PhoneServer: PhoneHandler, @unchecked Sendable {
 
     /// nil when the request may go on; else the error to send.
     func gate(_ req: PhoneRequest, needsToken: Bool = true) -> PhoneError? {
+        if demo { return nil }
         guard let who = req.header("tailscale-user-login") else {
             return PhoneError(403, "Only through Tailscale")
         }
@@ -342,6 +369,8 @@ final class PhoneServer: PhoneHandler, @unchecked Sendable {
         if !Features.socialBoards, req.path.hasPrefix("/api/copilot") || req.path == "/api/performance" {
             return .error(404, "Not in this build")
         }
+        // The demo shows no phone build: that is this Mac's own.
+        if demo && req.path.hasPrefix("/api/update") { return .error(404, "Not in the demo") }
         switch (req.method, req.path) {
         case ("GET", "/api/update"): return .encode(PhoneUpdate.shared.status())
         case ("POST", "/api/update/install"):
@@ -413,13 +442,13 @@ final class PhoneServer: PhoneHandler, @unchecked Sendable {
             await MainActor.run { self.doc(s)?.toggleKeeper(n) }
             return .encode(["ok": true])
         case ("GET", "/api/comments"):
-            guard let s = session(req.query["id"]) else { return .error(404, "No such session") }
+            guard let s = commentRoot(req.query["id"]) else { return .error(404, "No such session") }
             return .encode(CommentStore.read(s).comments)
         case ("POST", "/api/comments"):
             // {"file": "script.md" | "posts/linkedin.md", "quote": "…" (none = all of it), "text": "…"}
             // or {"file": "edits/hook-v2.mp4", "start": 3.0, "end": 6.0, "rect": [x, y, w, h], "text": "…"}
             // or {"file": "storyboard/storyboard.json", "shot": "s3", "text": "…"}: feedback on a storyboard shot.
-            guard let s = session(req.query["id"]) else { return .error(404, "No such session") }
+            guard let s = commentRoot(req.query["id"]) else { return .error(404, "No such session") }
             guard let b = try? JSONDecoder().decode(PhoneComment.self, from: req.body),
                   let text = b.text?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty else {
                 return .error(400, "A comment needs some text")
@@ -428,7 +457,7 @@ final class PhoneServer: PhoneHandler, @unchecked Sendable {
                 guard Storyboard.read(s)?.shots.contains(where: { $0.id == shot }) == true else { return .error(404, "No such shot") }
                 return .encode(CommentStore.addText(s, file: Storyboard.commentFile, quote: nil, text: text, shot: shot))
             }
-            if Self.commentable(b.file) {
+            if Self.commentable(b.file) || (library(req.query["id"]) != nil && ["README.md", "tokens.json"].contains(b.file)) {
                 let quote = b.quote.flatMap { $0.isEmpty ? nil : $0 }
                 return .encode(CommentStore.addText(s, file: b.file, quote: quote, text: text))
             }
@@ -440,7 +469,7 @@ final class PhoneServer: PhoneHandler, @unchecked Sendable {
                                                  end: video ? end : nil, rect: rect, text: text))
         case ("POST", "/api/comments/reply"):
             // {"id": "c3", "text": "…"} or {"id": "c3", "resolved": "true" | "false"}
-            guard let s = session(req.query["id"]) else { return .error(404, "No such session") }
+            guard let s = commentRoot(req.query["id"]) else { return .error(404, "No such session") }
             guard let b = try? JSONDecoder().decode([String: String].self, from: req.body), let id = b["id"] else {
                 return .error(400, "Which comment?")
             }
@@ -482,7 +511,23 @@ final class PhoneServer: PhoneHandler, @unchecked Sendable {
             let failed = await MainActor.run { side.phoneSave?(s, b) }
             if let failed { return .error(failed.hasPrefix("It changed") ? 409 : 400, failed) }
             return .encode(["ok": true])
+        case ("GET", "/api/styles"):
+            return .encode(await styles())
+        case ("GET", "/api/style"):
+            // ?name=<Style>, or ?id=<library folder inside the root> (a project's own looks).
+            let dir = req.query["name"].flatMap { n in StyleLib.styleNames(root: libraryRoot).contains(n) ? StyleLib.style(n, root: libraryRoot) : nil }
+                ?? library(req.query["id"])
+            guard let dir else { return .error(404, "No such style") }
+            return .encode(await style(dir))
+        case ("POST", "/api/style"):
+            let b = (try? JSONDecoder().decode([String: String].self, from: req.body)) ?? [:]
+            return await MainActor.run { self.changeStyle(b) }
+        case ("POST", "/api/session/style"):
+            guard let s = session(req.query["id"]) else { return .error(404, "No such session") }
+            let b = (try? JSONDecoder().decode([String: String].self, from: req.body)) ?? [:]
+            return await MainActor.run { self.setStyle(b, in: s) }
         case ("GET", "/api/profile/photo"):
+            if demo { return demoPhoto.map { .file($0, type: "image/jpeg") } ?? .error(404, "No photo") }
             guard FileManager.default.fileExists(atPath: LinkedIn.photoURL.path) else { return .error(404, "No photo") }
             return .file(LinkedIn.photoURL, type: "image/jpeg")
         case ("GET", "/api/performance"):
@@ -652,12 +697,13 @@ final class PhoneServer: PhoneHandler, @unchecked Sendable {
         out.append(Data(",\"social\":".utf8))
         out.append(social ?? Data("null".utf8))
         out.append(Data(",\"profile\":".utf8))
-        out.append((try? enc.encode(Self.profile())) ?? Data("null".utf8))
+        out.append((try? enc.encode(currentProfile)) ?? Data("null".utf8))
         out.append(Data("}".utf8))
         return out
     }
 
     private func pair(_ req: PhoneRequest) async -> PhoneResponse {
+        if demo { return .encode(["token": "demo"]) }
         let name = (try? JSONDecoder().decode([String: String].self, from: req.body))?["name"] ?? "iPhone"
         let r = PhonePairRequest(name: String(name.prefix(60)), login: req.header("tailscale-user-login") ?? "")
         let allowed: Bool = await withCheckedContinuation { c in
@@ -797,7 +843,7 @@ final class PhoneServer: PhoneHandler, @unchecked Sendable {
         let sides = await MainActor.run { Plugins.postSides.flatMap { $0.phone?(s) ?? [] } }
         let allComments = CommentStore.read(s).comments
         let open = allComments.filter(\.open).count
-        let profile = Self.profile()
+        let profile = currentProfile
         var board: [PhoneShot]?
         if let b = Storyboard.read(s) {
             var shots: [PhoneShot] = []
@@ -816,7 +862,8 @@ final class PhoneServer: PhoneHandler, @unchecked Sendable {
                                   script: (try? String(contentsOf: s.appending(path: "script.md"), encoding: .utf8)) ?? "",
                                   files: files, post: post, chat: chat, openComments: open, profile: profile,
                                   storyboard: board?.isEmpty == false ? board : nil,
-                                  posts: Self.platformPosts(s), sides: sides.isEmpty ? nil : sides)
+                                  posts: Self.platformPosts(s), sides: sides.isEmpty ? nil : sides,
+                                  style: Self.sessionStyle(s, meta: meta, root: root))
     }
 
     private func chat(_ s: URL) async -> PhoneChat {
@@ -840,6 +887,7 @@ final class PhoneServer: PhoneHandler, @unchecked Sendable {
         case "Post": place = "on this session's Post tab, looking at the LinkedIn post"
         case "Comments": place = "on the Comments board"
         case "Performance": place = "on the Performance board"
+        case "Styles": place = "on the Styles board (every style, its guide, colours, type and parts)"
         case let other?: place = "on the \(other) screen"
         case nil: place = ""
         }
@@ -872,6 +920,11 @@ final class PhoneServer: PhoneHandler, @unchecked Sendable {
         }
         return ok ? .encode(["ok": true]) : .error(409, "Takes is still replying. Wait, or stop it.")
     }
+
+    /// For the style routes (PhoneStyles.swift).
+    var libraryRoot: URL { lock.withLock { root } }
+    var appModel: AppModel? { app }
+    @MainActor func sessionDoc(_ s: URL) -> SessionDoc? { doc(s) }
 
     @MainActor
     private func doc(_ s: URL) -> SessionDoc? {
@@ -955,6 +1008,7 @@ final class PhoneServer: PhoneHandler, @unchecked Sendable {
         case "board:comments": "find"
         case "board:comments-post": "post"
         case "board:performance": "performance"
+        case "board:styles": "styles"
         default: nil
         }
     }
@@ -964,6 +1018,7 @@ final class PhoneServer: PhoneHandler, @unchecked Sendable {
         switch lane {
         case "post": return hub.commentsPost
         case "performance": return hub.board
+        case "styles": return hub.styles
         default: return hub.comments
         }
     }
@@ -982,7 +1037,7 @@ final class PhoneServer: PhoneHandler, @unchecked Sendable {
             let text = (b["text"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             guard !text.isEmpty else { return .error(400, "The message is empty") }
             // While a run works, the message steers it (as ⌘Return on the Mac).
-            await MainActor.run { self.boardChat(lane)?.send(text, title: lane == "performance" ? "Performance" : "Comments", onStage: nil, now: true, origin: Self.origin(b)) }
+            await MainActor.run { self.boardChat(lane)?.send(text, title: lane == "performance" ? "Performance" : lane == "styles" ? "Styles" : "Comments", onStage: nil, now: true, origin: Self.origin(b)) }
             return .encode(["ok": true])
         case ("POST", "/api/chat/stop"):
             await MainActor.run { self.boardChat(lane)?.stop() }
@@ -1009,7 +1064,7 @@ final class PhoneServer: PhoneHandler, @unchecked Sendable {
             .sorted { ($0["created"] as? String ?? "") < ($1["created"] as? String ?? "") }
         var out: [String: Any] = ["items": items, "finding": finding, "posting": posting, "redrafting": redrafting]
         // Your name and photo, for your comment under the post (as on LinkedIn).
-        if let p = try? JSONSerialization.jsonObject(with: JSONEncoder().encode(Self.profile())) { out["profile"] = p }
+        if let p = try? JSONSerialization.jsonObject(with: JSONEncoder().encode(currentProfile)) { out["profile"] = p }
         return (try? JSONSerialization.data(withJSONObject: out, options: [.withoutEscapingSlashes])) ?? Data("{}".utf8)
     }
 
@@ -1142,7 +1197,7 @@ final class PhoneServer: PhoneHandler, @unchecked Sendable {
         guard let app, !lock.withLock({ events.isEmpty }) else { return }
         let root = app.library.root.standardizedFileURL
         var chats: [(String, ClaudeChat)] = [("board:comments", app.chats.comments), ("board:comments-post", app.chats.commentsPost),
-                                              ("board:performance", app.chats.board)]
+                                              ("board:performance", app.chats.board), ("board:styles", app.chats.styles)]
         for c in app.chats.all {
             guard let s = c.session?.standardizedFileURL, s.path.hasPrefix(root.path + "/") else { continue }
             chats.append((String(s.path.dropFirst(root.path.count + 1)), c))

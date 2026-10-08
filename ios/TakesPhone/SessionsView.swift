@@ -257,7 +257,7 @@ struct SessionsView: View {
 
     // MARK: Foot
 
-    /// Update, Performance and Comments, under a hairline: the Mac's sidebar foot.
+    /// Update, Performance, Comments and Styles, under a hairline: the Mac's sidebar foot.
     private var foot: some View {
         VStack(spacing: 1) {
             UpdatePill()
@@ -266,6 +266,7 @@ struct SessionsView: View {
                 footRow("Performance", icon: "chart.bar.xaxis") { tab?.wrappedValue = "performance" }
                 footRow("Comments", icon: "text.bubble") { tab?.wrappedValue = "comments" }
             }
+            footRow("Styles", icon: "square.stack") { tab?.wrappedValue = "styles" }
         }
         .padding(.horizontal, 10).padding(.top, 6).padding(.bottom, 4)
         .overlay(alignment: .top) { Rectangle().fill(Palette.border).frame(height: 1) }

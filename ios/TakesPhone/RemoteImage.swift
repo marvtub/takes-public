@@ -30,7 +30,10 @@ struct RemoteImage<Content: View, Placeholder: View>: View {
                 if image !== hit { image = hit }
                 return
             }
-            if let img = await ImageCache.shared.load(url, maxPixels: maxPixels) { image = img }
+            if let img = await ImageCache.shared.load(url, maxPixels: maxPixels, early: { image = $0 }),
+               !Task.isCancelled, image !== img {
+                image = img
+            }
         }
     }
 }
@@ -42,22 +45,34 @@ final class ImageCache: @unchecked Sendable {
         c.totalCostLimit = 120 * 1024 * 1024
         return c
     }()
-    /// Disk cache for the bytes; the Mac says how long they stay fresh.
+    /// Disk cache for the bytes. The Mac sends Last-Modified, so an unchanged picture costs a 304.
+    /// A sleeping Mac fails in 10 s, not the default 60.
     private let session: URLSession = {
         let c = URLSessionConfiguration.default
         c.urlCache = URLCache(memoryCapacity: 0, diskCapacity: 300 * 1024 * 1024)
+        c.timeoutIntervalForRequest = 10
         return URLSession(configuration: c)
     }()
 
     func memory(_ url: URL) -> UIImage? { cache.object(forKey: url as NSURL) }
 
-    func load(_ url: URL, maxPixels: CGFloat) async -> UIImage? {
-        // Offline: the copy on disk, however old (2026-10-03).
-        var hit = try? await session.data(from: url)
-        if hit == nil {
-            hit = try? await session.data(for: URLRequest(url: url, cachePolicy: .returnCacheDataDontLoad))
+    /// The copy on disk first, however old, handed to `early` at once; then the Mac's copy, decoded
+    /// only when its bytes differ. Offline, the disk copy stays (2026-10-03, 2026-10-08).
+    func load(_ url: URL, maxPixels: CGFloat, early: (@MainActor (UIImage) -> Void)? = nil) async -> UIImage? {
+        let old = try? await session.data(for: URLRequest(url: url, cachePolicy: .returnCacheDataDontLoad))
+        var shown: UIImage?
+        if let old, Self.ok(old.1), let img = await decoded(old.0, url, maxPixels) {
+            shown = img
+            if !Task.isCancelled { await early?(img) }
         }
-        guard let (data, resp) = hit, (resp as? HTTPURLResponse)?.statusCode ?? 200 == 200 else { return nil }
+        guard let fresh = try? await session.data(from: url), Self.ok(fresh.1) else { return shown }
+        if let old, shown != nil, old.0 == fresh.0 { return shown }
+        return await decoded(fresh.0, url, maxPixels) ?? shown
+    }
+
+    private static func ok(_ r: URLResponse) -> Bool { (r as? HTTPURLResponse)?.statusCode ?? 200 == 200 }
+
+    private func decoded(_ data: Data, _ url: URL, _ maxPixels: CGFloat) async -> UIImage? {
         let img = await Task.detached(priority: .userInitiated) { Self.decode(data, maxPixels: maxPixels) }.value
         if let img { cache.setObject(img, forKey: url as NSURL, cost: Int(img.size.width * img.size.height * img.scale * img.scale * 4)) }
         return img

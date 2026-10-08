@@ -57,7 +57,7 @@ final class Outbox: ObservableObject {
             case .say: return "Message: \(string("text") ?? "")"
             case .take: return "Take \(name ?? "")"
             case .archive: return query["on"] == "0" ? "Unarchive" : "Archive"
-            case .side: return string("status").map { $0 == "posted" ? "Launch post marked posted" : "Launch post back to draft" } ?? "Launch post edit"
+            case .side: return string("status").map { $0 == "posted" ? "Post marked posted" : "Post back to draft" } ?? "Post edit"
             }
         }
     }

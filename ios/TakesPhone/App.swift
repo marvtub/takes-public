@@ -69,10 +69,20 @@ struct Root: View {
     @EnvironmentObject var model: Model
 
     var body: some View {
-        switch model.phase {
-        case .pairing: PairView()
-        case .locked: LockView()
-        case .open: Tabs()
+        if model.phase == .pairing {
+            PairView()
+        } else {
+            // The relock covers the screens instead of ending them: after Face ID, the user is back
+            // on the same video, tab and scroll place, and nothing loads again (2026-10-08).
+            ZStack {
+                if model.opened {
+                    Tabs()
+                        .allowsHitTesting(model.phase == .open)
+                        .accessibilityHidden(model.phase != .open)
+                }
+                if model.phase == .locked { LockView().transition(.opacity) }
+            }
+            .animation(Brand.quick, value: model.phase)
         }
     }
 }
@@ -90,6 +100,7 @@ struct Tabs: View {
             SessionsView().toolbar(.hidden, for: .tabBar).tag("videos")
             CopilotView().toolbar(.hidden, for: .tabBar).tag("comments")
             NavigationStack { PerformanceView() }.toolbar(.hidden, for: .tabBar).tag("performance")
+            NavigationStack { StylesView() }.toolbar(.hidden, for: .tabBar).tag("styles")
         }
         .environment(\.tabBar, $tab)
     }

@@ -1532,7 +1532,13 @@ struct TakeRow: View {
     let takes: [Take]
     @State private var name = ""
     @State private var hooks: [Hook] = []
+    /// What the take says, from its transcript (Transcripts.swift).
+    @State private var said: String?
     @FocusState private var editing: Bool
+
+    private var voiceFile: URL? {
+        Transcripts.voiceTakes(takes).first.map(doc.fileURL)
+    }
 
     private func trash() {
         if takes.contains(where: { doc.fileURL($0) == app.preview }) { app.preview = nil }
@@ -1599,7 +1605,22 @@ struct TakeRow: View {
                     trashButton
                 }
             }
-            Spacer()
+            if let said, !said.isEmpty {
+                Text(said)
+                    .font(Theme.sans(12)).foregroundStyle(Theme.muted)
+                    .lineLimit(1).truncationMode(.tail)
+                    .help(said)
+                    .contextMenu {
+                        Button("Copy Transcript") {
+                            NSPasteboard.general.clearContents()
+                            NSPasteboard.general.setString(said, forType: .string)
+                        }
+                    }
+            } else if let v = voiceFile, Transcripts.shared.waiting(v) {
+                Text(Transcripts.shared.current == v.standardizedFileURL ? "Transcribing…" : "Waiting to transcribe")
+                    .font(Theme.sans(12)).foregroundStyle(Theme.muted.opacity(0.7))
+            }
+            Spacer(minLength: 4)
             Button(action: trash) { Image(systemName: "trash").foregroundStyle(Theme.muted) }
                 .help("Move take to Trash")
                 .disabled(app.isRecording)
@@ -1612,6 +1633,10 @@ struct TakeRow: View {
         .onDisappear { if name != (takes.first?.name ?? "") { doc.nameTake(number, name) } }
         .onAppear { hooks = HookStore.read(doc.url).hooks }
         .onChange(of: takes.first?.name) { _, n in name = n ?? "" }
+        .task(id: "\(Transcripts.shared.version) \(voiceFile?.path ?? "")") {
+            guard let v = voiceFile else { said = nil; return }
+            said = await Task.detached(priority: .utility) { Transcript.text(for: v) }.value
+        }
     }
 }
 
