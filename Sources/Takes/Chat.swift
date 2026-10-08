@@ -308,6 +308,12 @@ final class ClaudeChat {
 
     nonisolated static func file(_ session: URL) -> URL { session.appending(path: ".claude-chat.json") }
     nonisolated static var boardFolder: URL { URL.applicationSupportDirectory.appending(path: "Takes") }
+    /// What a plugin board tells its chat, by board name (Plugins/). Read on every send, so it can
+    /// name what the board shows right now.
+    static var boardContexts: [String: @MainActor () -> String] = [:]
+    /// What a plugin board's empty chat says, and the asks it offers (label, ask), by board name.
+    /// Without one, the empty chat spoke about the Performance board's numbers (2026-10-07).
+    static var boardIntros: [String: (title: String, line: String, asks: [(String, String)])] = [:]
 
     /// Which board a chat without a session belongs to: "board" (Performance) or "comments".
     let boardName: String
@@ -642,12 +648,17 @@ final class ClaudeChat {
             if let onStage {
                 context += " Right now he has \(CommentStore.path(of: onStage, in: session)) open in the player."
             } else if UserDefaults.standard.string(forKey: "rightTab") == "post",
+                      let side = Plugins.postSide(UserDefaults.standard.string(forKey: "postPlatform") ?? "") {
+                context += " " + side.context(session)
+            } else if UserDefaults.standard.string(forKey: "rightTab") == "post",
                       case let p = PostPlatform.stored(UserDefaults.standard.string(forKey: "postPlatform") ?? "") {
                 // Which post he looks at, so "make it shorter" lands on the right one (2026-10-04).
                 context += " Right now he has the Post tab open on the \(p.name) side (\(p.rel))."
             }
         } else if boardName.hasPrefix("comments") {
             context = CopilotAsk.context
+        } else if let plugin = Self.boardContexts[boardName] {
+            context = plugin()
         } else if boardName == "styles" {
             context = """
             The user is talking to you from the Styles board inside his Takes app. It shows his named \
@@ -1113,7 +1124,20 @@ final class ChatHub {
     var commentsChat: ClaudeChat { commentsLane == "post" ? commentsPost : comments }
 
     /// The app quits: stop every running reply and save where it got to.
-    func stopAll() { chats.values.forEach { $0.quit() }; board.quit(); comments.quit(); commentsPost.quit(); styles.quit() }
+    func stopAll() {
+        chats.values.forEach { $0.quit() }; boards.values.forEach { $0.quit() }
+        board.quit(); comments.quit(); commentsPost.quit(); styles.quit()
+    }
+
+    /// A plugin board's own chat, made on first use (Plugins/). Its context comes from
+    /// `ClaudeChat.boardContexts` under the same name.
+    private var boards: [String: ClaudeChat] = [:]
+    func boardChat(_ name: String) -> ClaudeChat {
+        if let c = boards[name] { return c }
+        let c = ClaudeChat(session: nil, board: name)
+        boards[name] = c
+        return c
+    }
 
     /// The chat of a session, if it has one open this run. Never makes one (the sidebar asks).
     func existing(_ session: URL) -> ClaudeChat? { chats[session.standardizedFileURL] }
@@ -1158,11 +1182,13 @@ struct BoardChatCorner: View {
     var hub: ChatHub
     var comments = false
     var styles = false
+    /// A plugin board's chat (`hub.boardChat`).
+    var target: ChatTarget? = nil
     var body: some View {
-        ChatCornerBody(hub: hub, target: comments ? ChatTarget.comments(hub)
+        ChatCornerBody(hub: hub, target: target ?? (comments ? ChatTarget.comments(hub)
                                        : styles ? ChatTarget(chat: hub.styles, title: "Styles", session: nil)
-                                                  : ChatTarget(chat: hub.board, title: "Performance", session: nil))
-            .id(comments ? hub.commentsLane : styles ? "styles" : "board")
+                                                  : ChatTarget(chat: hub.board, title: "Performance", session: nil)))
+            .id(target?.chat.boardName ?? (comments ? hub.commentsLane : styles ? "styles" : "board"))
     }
 }
 
@@ -1596,6 +1622,12 @@ private struct ChatPanel: View {
                 VStack(alignment: .leading, spacing: 6) {
                     suggestion("I left comments on my styles. Read them with get_comments for each style library, fix each part as a new version, and reply to each one.", "Fix my comments")
                     suggestion("Render preview.mp4 and preview.png for every style that has none, from the shared sample clip.", "Render missing previews")
+                }
+            } else if let intro = ClaudeChat.boardIntros[chat.boardName] {
+                Text(intro.title).font(Theme.display(22)).foregroundStyle(Theme.ink)
+                Text(intro.line).font(Theme.sans(12.5)).foregroundStyle(Theme.muted)
+                VStack(alignment: .leading, spacing: 6) {
+                    ForEach(intro.asks, id: \.0) { label, ask in suggestion(ask, label) }
                 }
             } else if target.session == nil {
                 Text("Ask Takes about your numbers.").font(Theme.display(22)).foregroundStyle(Theme.ink)

@@ -241,6 +241,18 @@ struct AssetsPane: View {
     /// The thumbnail the post's video starts with (Cover.swift).
     /// Thumbnails a post uses as its cover (Post tab > Cover).
     @State private var coverRels: Set<String> = []
+    /// Sections that show every file; the others show the first four (2026-10-07).
+    @State private var showAll: Set<String> = []
+    /// Folders folded into a pile of small thumbnails. One list for every session: a folder he
+    /// folds (stills, say) stays folded in the next session too.
+    @AppStorage("assets.folded") private var foldedStore = ""
+    private var folded: Set<String> { Set(foldedStore.split(separator: "\n").map(String.init)) }
+    private func fold(_ name: String) {
+        var f = folded
+        if f.contains(name) { f.remove(name) } else { f.insert(name) }
+        withAnimation(Theme.spring) { foldedStore = f.sorted().joined(separator: "\n") }
+    }
+    static let firstFew = 4
 
     var body: some View {
         let _ = Perf.body("AssetsPane")
@@ -351,10 +363,25 @@ struct AssetsPane: View {
     private func section(_ name: String, _ items: [Asset]) -> some View {
         // Once per section, not once per tile.
         let open = Dictionary(grouping: comments.all.filter(\.open), by: \.file).mapValues(\.count)
+        let isFolded = folded.contains(name)
+        let all = showAll.contains(name) || items.count <= Self.firstFew
+        // The file in the player stays in view, even when it is past the first four.
+        let shown = all ? items : Array(items.prefix(Self.firstFew))
+            + items.dropFirst(Self.firstFew).filter { $0.url == app.preview || picked.contains($0.url) }
         return VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 8) {
                 let title = name.isEmpty ? "Session folder" : name.prefix(1).uppercased() + name.dropFirst()
-                Text(title).font(Theme.sans(12.5, .medium)).foregroundStyle(Theme.muted)
+                Button { fold(name) } label: {
+                    HStack(spacing: 5) {
+                        Image(systemName: "chevron.right").font(.system(size: 9, weight: .bold))
+                            .rotationEffect(.degrees(isFolded ? 0 : 90))
+                        Text(title).font(Theme.sans(12.5, .medium))
+                    }
+                    .foregroundStyle(Theme.muted)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help(isFolded ? "Open this section" : "Fold this section into a pile")
                 Spacer()
                 Text(count(items)).font(Theme.sans(12)).foregroundStyle(Theme.faint)
                 Button { reveal(name.isEmpty || name == "takes" ? doc.url : doc.url.appending(path: name)) } label: {
@@ -363,26 +390,50 @@ struct AssetsPane: View {
                 .buttonStyle(IconButtonStyle())
                 .help("Show this folder in Finder")
             }
-            LazyVGrid(columns: [GridItem(.adaptive(minimum: wide ? 160 : 130, maximum: 260), spacing: wide ? 18 : 12)],
-                      alignment: .leading, spacing: wide ? 22 : 16) {
-                ForEach(items) { a in
-                    AssetTile(asset: a, selected: app.preview == a.url, picked: picked.contains(a.url) && picked.count > 1,
-                              openComments: open[a.rel] ?? 0,
-                              inPost: posts(showing: a),
-                              pinned: PostPlatform.allCases.filter { postPick[$0] == a.rel },
-                              isCover: coverRels.contains(a.rel),
-                              onPin: a.kind == .video || a.kind == .image ? { pin(a, $0) } : nil)
-                        .background(GeometryReader { g in
-                            Color.clear.preference(key: TileFrames.self, value: [a.url: g.frame(in: .named("assets"))])
-                        })
-                        // Act on the first click. A plain onTapGesture next to a double-tap waits out the
-                        // double-click interval (~0.4 s) first. The second click of a double is skipped.
-                        .gesture(TapGesture(count: 2).onEnded { NSWorkspace.shared.openSoon(a.url) })
-                        .simultaneousGesture(TapGesture().onEnded { if NSApp.firstClick { click(a) } })
-                        .onDrag { NSItemProvider(contentsOf: a.url) ?? NSItemProvider() }
-                        .contextMenu {
-                            if picked.count > 1 && picked.contains(a.url) { bulkMenu } else { menu(a) }
+            if isFolded {
+                AssetPile(items: items) { fold(name) }
+                    .transition(.opacity.combined(with: .scale(scale: 0.96, anchor: .topLeading)))
+            } else {
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: wide ? 160 : 130, maximum: 260), spacing: wide ? 18 : 12)],
+                          alignment: .leading, spacing: wide ? 22 : 16) {
+                    ForEach(shown) { a in
+                        AssetTile(asset: a, selected: app.preview == a.url, picked: picked.contains(a.url) && picked.count > 1,
+                                  openComments: open[a.rel] ?? 0,
+                                  inPost: posts(showing: a),
+                                  pinned: PostPlatform.allCases.filter { postPick[$0] == a.rel },
+                                  isCover: coverRels.contains(a.rel),
+                                  onPin: a.kind == .video || a.kind == .image ? { pin(a, $0) } : nil)
+                            .background(GeometryReader { g in
+                                Color.clear.preference(key: TileFrames.self, value: [a.url: g.frame(in: .named("assets"))])
+                            })
+                            // Act on the first click. A plain onTapGesture next to a double-tap waits out the
+                            // double-click interval (~0.4 s) first. The second click of a double is skipped.
+                            .gesture(TapGesture(count: 2).onEnded { NSWorkspace.shared.openSoon(a.url) })
+                            .simultaneousGesture(TapGesture().onEnded { if NSApp.firstClick { click(a) } })
+                            .onDrag { NSItemProvider(contentsOf: a.url) ?? NSItemProvider() }
+                            .contextMenu {
+                                if picked.count > 1 && picked.contains(a.url) { bulkMenu } else { menu(a) }
+                            }
+                    }
+                }
+                if items.count > Self.firstFew {
+                    Button {
+                        withAnimation(Theme.spring) {
+                            if showAll.contains(name) { showAll.remove(name) } else { showAll.insert(name) }
                         }
+                    } label: {
+                        HStack(spacing: 5) {
+                            Text(showAll.contains(name) ? "Show fewer" : "Show all \(items.count)")
+                            Image(systemName: showAll.contains(name) ? "chevron.up" : "chevron.down")
+                                .font(.system(size: 9, weight: .bold))
+                        }
+                        .font(Theme.sans(12, .medium)).foregroundStyle(Theme.accentInk)
+                        .padding(.horizontal, 12).padding(.vertical, 6)
+                        .background(Theme.hover, in: Capsule())
+                        .contentShape(Capsule())
+                    }
+                    .buttonStyle(.plain)
+                    .frame(maxWidth: .infinity)
                 }
             }
         }
@@ -792,6 +843,70 @@ struct AssetTile: View {
         if duration != nil { return nil }
         let ext = asset.url.pathExtension.uppercased()
         return ext.isEmpty ? nil : ext
+    }
+}
+
+/// A folded section: small thumbnails in a loose pile that runs to the right, spread a little
+/// wider on hover. A click opens the section again (2026-10-07).
+struct AssetPile: View {
+    let items: [Asset]
+    let open: () -> Void
+    @State private var hover = false
+    static let most = 12
+
+    var body: some View {
+        let few = Array(items.prefix(Self.most))
+        Button(action: open) {
+            HStack(spacing: 14) {
+                HStack(spacing: hover ? -14 : -30) {
+                    ForEach(Array(few.enumerated()), id: \.element.id) { i, a in
+                        PileThumb(asset: a)
+                            .rotationEffect(.degrees(Self.tilt(i) * (hover ? 0.5 : 1)))
+                            .offset(y: Self.lift(i) * (hover ? 0.4 : 1))
+                            .zIndex(Double(few.count - i))
+                    }
+                }
+                if items.count > few.count {
+                    Text("+\(items.count - few.count)").font(Theme.sans(12, .semibold)).foregroundStyle(Theme.faint)
+                }
+            }
+            .padding(.leading, 4).padding(.vertical, 6)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { h in withAnimation(Theme.spring) { hover = h } }
+        .help("Open this section")
+    }
+
+    /// A small, fixed tilt and lift for each card, so the pile looks the same every time.
+    static func tilt(_ i: Int) -> Double { [-5, 3, -2, 4, -3, 2, -4, 3, -1, 4, -3, 2][i % 12] }
+    static func lift(_ i: Int) -> CGFloat { [0, -2, 1, -1, 2, 0, -2, 1, -1, 2, 0, -1][i % 12] }
+}
+
+private struct PileThumb: View {
+    let asset: Asset
+    @State private var image: NSImage?
+
+    init(asset: Asset) {
+        self.asset = asset
+        _image = State(initialValue: Thumbs.shared.cached(asset))
+    }
+
+    var body: some View {
+        Theme.stage
+            .frame(width: 52, height: 65)
+            .overlay {
+                if let image {
+                    Image(nsImage: image).resizable().aspectRatio(contentMode: .fill)
+                } else {
+                    Image(systemName: asset.kind == .audio ? "waveform" : asset.kind == .image ? "photo" : asset.kind == .video ? "film" : "doc")
+                        .font(.system(size: 14)).foregroundStyle(.white.opacity(0.35))
+                }
+            }
+            .clipShape(RoundedRectangle(cornerRadius: 7))
+            .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(Theme.paper.opacity(0.9), lineWidth: 1.5))
+            .shadow(color: Theme.shadow, radius: 4, y: 2)
+            .task(id: asset) { if image == nil { image = await Thumbs.shared.image(asset) } }
     }
 }
 

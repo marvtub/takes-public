@@ -112,7 +112,7 @@ struct PrompterFollowTests {
         #expect(l.frame.height == 152)
         #expect(l.band == 32)
         #expect(abs(l.frame.midX - 756) <= 1)
-        #expect(l.frame.width == NotchLayout.minWidth)  // 185 + 260 is less than the least width
+        #expect(l.frame.width == NotchLayout.minWidth)  // 185 + 330 is less than the least width
     }
 
     @Test func noNotchMeansUnderTheMenuBar() {
@@ -125,6 +125,13 @@ struct PrompterFollowTests {
 
     @Test func moreLinesMakeATallerPanel() {
         #expect(NotchPanel.body(lines: 4) > NotchPanel.body(lines: 3))
+    }
+
+    @Test func notchIntroHasThreeStepsAndNamesRealButtons() {
+        #expect(NotchView.intro.count == 3)
+        let all = NotchView.intro.reduce(into: Set<String>()) { $0.formUnion($1.buttons) }
+        #expect(all.isSubset(of: ["play", "voice", "record"]))
+        #expect(NotchView.intro.allSatisfy { !$0.title.contains("Claude") && !$0.text.contains("Claude") })
     }
 
     @Test func voiceFollowSwitchIsRemembered() {
@@ -238,7 +245,8 @@ struct PrompterShots {
     @Test func notch() throws {
         guard ProcessInfo.processInfo.environment["TAKES_SNAPSHOT"] != nil else { return }
         fonts()
-        for (name, lines) in [("notch-3", 3), ("notch-5", 5)] {
+        for (name, lines, intro) in [("notch-3", 3, 3), ("notch-5", 5, 3), ("notch-intro-1", 5, 0), ("notch-intro-2", 5, 1), ("notch-intro-3", 5, 2)] {
+            UserDefaults.standard.set(intro, forKey: NotchView.introKey)
             let body = NotchPanel.body(lines: lines)
             let l = NotchLayout.make(screen: CGRect(x: 0, y: 0, width: 1512, height: 982), visibleTop: 950,
                                      notch: CGSize(width: 185, height: 32), body: body)
@@ -246,11 +254,39 @@ struct PrompterShots {
             // A grey "desktop" behind it, to see the shape.
             let v = ZStack(alignment: .top) {
                 Color(white: 0.55)
-                NotchView(layout: l, close: {}).environment(app(said: 9)).frame(width: l.frame.width, height: l.frame.height)
+                NotchView(layout: l, close: {}, lit: name == "notch-intro-1" ? 1 : 0).environment(app(said: 9))
+                    .frame(width: l.frame.width + 2 * NotchView.margin, height: l.frame.height + NotchView.margin)
             }
-            try shoot(v, CGSize(width: l.frame.width + 80, height: l.frame.height + 30), name)
+            try shoot(v, CGSize(width: l.frame.width + 2 * NotchView.margin + 40, height: l.frame.height + NotchView.margin + 20), name)
         }
         UserDefaults.standard.removeObject(forKey: "notchLines")
+        UserDefaults.standard.removeObject(forKey: NotchView.introKey)
+    }
+
+    /// The glow at its brightest. ImageRenderer draws blur; the AppKit snapshot above does not.
+    @Test func glow() throws {
+        guard let dir = ProcessInfo.processInfo.environment["TAKES_SNAPSHOT"] else { return }
+        let l = NotchLayout.make(screen: CGRect(x: 0, y: 0, width: 1512, height: 982), visibleTop: 950,
+                                 notch: CGSize(width: 185, height: 32), body: NotchPanel.body(lines: 3))
+        let shape = NotchShape(band: l.band, notchWidth: l.notchWidth)
+        let v = ZStack(alignment: .top) {
+            Color(white: 0.93)
+            ZStack(alignment: .top) {
+                ZStack {
+                    shape.fill(Theme.accent).blur(radius: 22).opacity(0.7)
+                    shape.stroke(Theme.accent, lineWidth: 3).blur(radius: 6)
+                }
+                shape.fill(.black)
+            }
+            .frame(width: l.frame.width, height: l.frame.height)
+        }
+        .frame(width: l.frame.width + 2 * NotchView.margin + 40, height: l.frame.height + NotchView.margin + 20)
+        let r = ImageRenderer(content: v)
+        r.scale = 2
+        let img = try #require(r.nsImage)
+        let tiff = try #require(img.tiffRepresentation)
+        let rep = try #require(NSBitmapImageRep(data: tiff))
+        try rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: dir).appending(path: "notch-glow.png"))
     }
 
     @Test func window() throws {
@@ -275,6 +311,10 @@ struct PrompterShots {
         for (name, width) in [("bar-wide", 1000.0), ("bar-narrow", 560.0)] {
             try shoot(ScriptPane(doc: SessionDoc(url: s)).environment(app), CGSize(width: width, height: 420), name, dark: false)
         }
+        // With the script in the notch, Record shows a small recorder, not a second prompter.
+        app.notchOpen = true
+        try shoot(ScriptPane(doc: SessionDoc(url: s)).environment(app), CGSize(width: 560, height: 520), "record-notch-open", dark: false)
+        try shoot(ZStack { ScriptPane(doc: SessionDoc(url: s)); NotchTourShade() }.environment(app), CGSize(width: 900, height: 420), "tour-shade", dark: false)
     }
 }
 
@@ -293,6 +333,10 @@ struct NotchLiveCheck {
         let n = NotchPanel.shared.contentForTest?.window?.windowNumber ?? 0
         let info = (CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] ?? [])
             .first { ($0[kCGWindowNumber as String] as? Int) == n }
+        // Hover labels need mouse-moved events while Takes is not the active app.
+        func areas(_ v: NSView) -> [NSTrackingArea] { v.trackingAreas + v.subviews.flatMap(areas) }
+        let opts = areas(NotchPanel.shared.contentForTest ?? NSView()).map(\.options)
+        print("NOTCH tracking areas: \(opts.count) activeAlways: \(opts.filter { $0.contains(.activeAlways) }.count)")
         print("NOTCH on screen: \(info != nil) sharing: \(info?[kCGWindowSharingState as String] ?? "-") layer: \(info?[kCGWindowLayer as String] ?? "-")")
         // screencapture counts from the top left of the main display.
         let top = (NSScreen.screens.first?.frame.maxY ?? 0) - l.frame.maxY

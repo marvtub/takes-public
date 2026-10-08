@@ -35,7 +35,7 @@ struct SearchTests {
         doc.save()
         let app = AppModel()
         app.library.setRoot(root)
-        let launch = MediaSearch.places("launch", app: app)
+        let launch = MediaSearch.places("takes launch", app: app)
         #expect(launch.map(\.kind) == ["session"])
         #expect(launch.first?.title == "Takes launch video")
         #expect(launch.first?.text == "Weekly Challenge")

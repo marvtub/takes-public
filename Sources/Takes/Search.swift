@@ -390,7 +390,7 @@ final class MediaSearch {
         var rows: [(Hit, String)] = []
         var boards: [(String, AppModel.Board)] = [("Styles", .styles)]
         if Features.socialBoards { boards = [("Performance", .performance), ("Comments", .comments)] + boards }
-        boards += Plugins.all.map { ($0.title, .plugin($0.id)) }
+        boards += Plugins.boards.map { ($0.title, .plugin($0.id)) }
         for (t, b) in boards {
             rows.append((Hit(path: lib.root, kind: "board", start: 0, title: t, board: b), t))
         }

@@ -71,6 +71,11 @@ final class AppModel {
         return shot.map { "\(doc.url.path)#shot-\($0.id)" } ?? "\(doc.url.path)#\(doc.activeDraft)"
     }
 
+    /// The script shows in the notch panel. Record then shows a small stand-in, not a second
+    /// prompter that scrolls along with it.
+    var notchOpen = false
+    /// The notch's quick tour runs: the main window goes dark, so the eye goes to the notch.
+    var notchTour = false
     var phase: Phase = .idle { didSet { if phase != oldValue { holdCamera() } } }
     var error: String?
     var naming = false

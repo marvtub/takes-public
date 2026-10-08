@@ -40,7 +40,7 @@ struct TakesApp: App {
                     Button("Performance") { app.toggle(.performance) }.keyboardShortcut("j", modifiers: [.command, .shift])
                     Button("Comments") { app.toggle(.comments) }.keyboardShortcut("m", modifiers: [.command, .shift])
                 }
-                ForEach(Plugins.all) { p in
+                ForEach(Plugins.boards) { p in
                     Button(p.title) { app.toggle(.plugin(p.id)) }.keyboardShortcut(KeyEquivalent(p.key), modifiers: [.command, .shift])
                 }
                 Button("Styles") { app.toggle(.styles) }.keyboardShortcut("y", modifiers: [.command, .shift])
@@ -205,6 +205,8 @@ struct ContentView: View {
         }
         .coordinateSpace(name: "shell")
         .ignoresSafeArea(.container, edges: .top)
+        .overlay { if app.notchTour { NotchTourShade().transition(.opacity) } }
+        .animation(Theme.motion, value: app.notchTour)
         .animation(.easeOut(duration: 0.2), value: savedColumns)
         .onReceive(NotificationCenter.default.publisher(for: .takesToggleSidebar)) { _ in
             savedColumns = showsSidebar ? "detailOnly" : "all"
@@ -238,8 +240,8 @@ struct ContentView: View {
                 } else if app.board == .comments {
                     CommentsBoard(hub: app.chats, store: app.copilot, root: library.root)
                         .transition(.opacity)
-                } else if case .plugin(let id)? = app.board, let p = Plugins.named(id) {
-                    p.board(app).transition(.opacity)
+                } else if case .plugin(let id)? = app.board, let board = Plugins.named(id)?.board {
+                    board(app).transition(.opacity)
                 } else {
                     DetailView(library: library, camera: app.camera, screen: app.screen)
                 }
@@ -300,7 +302,7 @@ struct BoardRows: View {
                 PerformanceRow(board: app.performance, selected: app.board == .performance) { app.board = .performance }
                 CommentsRow(store: app.copilot, runner: app.copilot.runner, chat: app.chats.comments, post: app.chats.commentsPost, selected: app.board == .comments) { app.board = .comments }
             }
-            ForEach(Plugins.all) { p in
+            ForEach(Plugins.boards) { p in
                 PluginRow(plugin: p, app: app, selected: app.board == .plugin(p.id)) { app.board = .plugin(p.id) }
             }
         }
@@ -2160,6 +2162,10 @@ struct ScriptPane: View {
     private var scriptFile: String { doc.activeDraft == "main" ? "script.md" : "variants/\(doc.activeDraft).md" }
     private var scriptComments: [Comment] { comments.on(scriptFile) }
 
+    /// On Record, the notch takes over: one prompter at a time. The Script tab keeps the text
+    /// to edit, but it does not scroll.
+    private var inNotch: Bool { app.notchOpen && onRecord == nil }
+
     var body: some View {
         let _ = Perf.body("ScriptPane")
         VStack(spacing: 0) {
@@ -2169,6 +2175,9 @@ struct ScriptPane: View {
                 DraftBar(doc: doc, showHistory: $showHistory)
                 HookPicker(doc: doc)
             }
+            if inNotch {
+                NotchStandIn()
+            } else {
             if !app.isRecording {
                 ScriptCommentList(comments: scriptComments, focused: focused) { c in
                     withAnimation(Theme.motion) { draft = nil; focused = c.id }
@@ -2179,18 +2188,21 @@ struct ScriptPane: View {
                 // A storyboard shot shows only its own lines.
                 Prompter(text: app.shot.map { s in .constant(s.say) } ?? Binding(get: { doc.activeText }, set: { doc.activeText = $0 }),
                          contentKey: app.shot.map { "\(doc.url.path)#shot-\($0.id)" } ?? "\(doc.url.path)#\(doc.activeDraft)",
-                         fontSize: app.fontSize, scrolling: app.scrolling,
+                         fontSize: app.fontSize, scrolling: app.scrolling && !app.notchOpen,
                          speed: app.speed, editable: !app.isRecording, resetToken: app.resetToken,
                          dark: app.lightsDown,
                          highlights: app.isRecording ? [] : scriptComments.filter(\.open).compactMap(\.quote),
                          reveal: reveal,
                          onSelect: { selection = $0 },
                          onComment: startComment,
-                         voice: app.following ? app.voice : nil)
+                         voice: app.following && !app.notchOpen ? app.voice : nil)
                 if doc.activeText.isEmpty {
+                    // In the script's own font, size and place, so the cursor sits just before it.
+                    // The text view starts at its inset (40, 36) plus 5 pt of line padding on each side.
                     Text("Paste your script here.\nOr have Takes write script.md into the session folder.")
-                        .font(Theme.sans(18)).foregroundStyle(Theme.faint)
-                        .padding(.horizontal, 40).padding(.top, 40)
+                        .font(Font(Theme.prompter(app.fontSize))).lineSpacing(app.fontSize * 0.35)
+                        .foregroundStyle(Theme.faint)
+                        .padding(.horizontal, 45).padding(.top, 36)
                         .allowsHitTesting(false)
                 }
                 // Reading line: keep your eyes here.
@@ -2228,6 +2240,7 @@ struct ScriptPane: View {
             // The round chat button sits over the bar's right end, except beside the chat.
             .padding(.trailing, 64)
             .background(Theme.paper)
+            }
         }
         .background(Theme.paper)
         // Daylight while you prepare; the prompter goes dark from the countdown on.
@@ -2347,6 +2360,95 @@ struct ScriptPane: View {
 
 /// Two more places for the script (2026-10-07): the notch, under the camera, and a window of its
 /// own that can be mirrored.
+/// The main window while the notch's quick tour runs: dark, with a pointer up to the notch.
+struct NotchTourShade: View {
+    var body: some View {
+        ZStack(alignment: .top) {
+            Color.black.opacity(0.6).contentShape(Rectangle()).onTapGesture {}
+            HStack(spacing: 10) {
+                Image(systemName: "arrow.up").font(.system(size: 12, weight: .bold))
+                Text("The quick tour is in the notch, at the top of your screen").font(Theme.sans(13, .medium))
+                Button("Skip tour") { UserDefaults.standard.set(NotchView.intro.count, forKey: NotchView.introKey) }
+                    .buttonStyle(.plain).font(Theme.sans(12.5, .semibold)).foregroundStyle(Theme.accent)
+            }
+            .foregroundStyle(.white)
+            .padding(.horizontal, 16).frame(height: 36)
+            .background(.black.opacity(0.75), in: Capsule())
+            .overlay(Capsule().strokeBorder(.white.opacity(0.15), lineWidth: 0.5))
+            .padding(.top, 44)
+        }
+        .ignoresSafeArea()
+    }
+}
+
+/// Record while the script is in the notch (2026-10-07): the notch is the prompter, so this
+/// column is a simple recorder, with no second copy of the script scrolling along.
+struct NotchStandIn: View {
+    @Environment(AppModel.self) private var app
+
+    var body: some View {
+        VStack(spacing: 18) {
+            Spacer(minLength: 12)
+            // A small picture of the notch with lines of text under it.
+            ZStack(alignment: .top) {
+                NotchShape(band: 14, notchWidth: 56).fill(.black)
+                VStack(spacing: 5) {
+                    ForEach([0.8, 0.95, 0.6], id: \.self) { w in
+                        Capsule().fill(.white.opacity(0.75)).frame(width: 150 * w, height: 4)
+                    }
+                }
+                .padding(.top, 26)
+            }
+            .frame(width: 180, height: 62)
+            VStack(spacing: 6) {
+                Text("Your script is in the notch").font(Theme.sans(18, .semibold)).foregroundStyle(Theme.ink)
+                Text("Read it right under your camera. Press play and talk, and it follows your voice.")
+                    .font(Theme.sans(13)).foregroundStyle(Theme.muted)
+                    .multilineTextAlignment(.center).frame(maxWidth: 300)
+            }
+            Button { app.toggleRecord() } label: {
+                HStack(spacing: 8) {
+                    RoundedRectangle(cornerRadius: app.isRecording ? 2 : 6).fill(.white)
+                        .frame(width: app.isRecording ? 10 : 12, height: app.isRecording ? 10 : 12)
+                    Text(app.isRecording ? "Stop the take" : "Record a take")
+                }
+                .font(Theme.sans(14, .semibold)).foregroundStyle(.white)
+                .padding(.horizontal, 22).frame(height: 40)
+                .background(Theme.danger, in: Capsule())
+                .contentShape(Capsule())
+            }
+            .buttonStyle(.plain)
+            .help("Start or stop a take: camera and mic")
+            HStack(spacing: 8) {
+                Button { app.scrolling.toggle() } label: {
+                    Label(app.scrolling ? (app.following ? "Stop listening" : "Pause") : (app.following ? "Listen" : "Scroll"),
+                          systemImage: app.scrolling ? "pause.fill" : "play.fill")
+                        .padding(.horizontal, 8).frame(height: 28)
+                }
+                .buttonStyle(PillGhostStyle())
+                .background(Theme.hover, in: Capsule())
+                .help("Start or stop the script in the notch")
+                ToggleChip(title: "Voice", icon: "waveform", on: Binding(get: { app.followVoice }, set: { app.followVoice = $0 }))
+                    .help("On: the text follows your voice. Off: it scrolls at a set speed.")
+                Button { app.resetToken += 1 } label: {
+                    Image(systemName: "arrow.up.to.line").frame(width: 28, height: 28)
+                }
+                .buttonStyle(PillGhostStyle())
+                .background(Theme.hover, in: Capsule())
+                .help("Back to the top")
+            }
+            .font(Theme.sans(12, .medium))
+            Spacer(minLength: 12)
+            Button("Show the script here instead") { NotchPanel.shared.hide() }
+                .buttonStyle(.plain).font(Theme.sans(12)).foregroundStyle(Theme.accent)
+                .padding(.bottom, 16)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding(.horizontal, 20)
+        .background(Theme.paper)
+    }
+}
+
 /// The menu item for the prompter window: a view, to get `openWindow`.
 struct PrompterWindowButton: View {
     @Environment(\.openWindow) private var openWindow

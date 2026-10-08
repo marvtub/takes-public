@@ -535,13 +535,23 @@ final class PostStore: ObservableObject {
 struct PostPane: View {
     var doc: SessionDoc
     @AppStorage("postPlatform") private var raw = PostPlatform.linkedin.rawValue
-    /// The platform before the last switch: the new pane's switch slides its pill over from it.
-    @State private var from: PostPlatform?
+    /// The side before the last switch: the new pane's switch slides its pill over from it.
+    @State private var from: String?
 
     var body: some View {
         let _ = Perf.body("PostPane")
-        let p = PostPlatform.stored(raw)
-        PlatformPostPane(doc: doc, platform: p, from: from, pick: { from = p; raw = $0.rawValue }).id(p)
+        if let side = Plugins.postSide(raw) {
+            // A side a plugin adds.
+            side.pane(doc.url, AnyView(PostSideSwitch(doc: doc, current: raw, from: from, pick: pick))).id(raw)
+        } else {
+            let p = PostPlatform.stored(raw)
+            PlatformPostPane(doc: doc, platform: p, from: from, pick: pick).id(p)
+        }
+    }
+
+    private func pick(_ id: String) {
+        from = Plugins.postSide(raw) != nil ? raw : PostPlatform.stored(raw).rawValue
+        raw = id
     }
 }
 
@@ -551,7 +561,8 @@ struct PlatformPostPane: View {
     @Environment(\.paneShown) private var paneShown
     var doc: SessionDoc
     let platform: PostPlatform
-    let pick: (PostPlatform) -> Void
+    let from: String?
+    let pick: (String) -> Void
     @StateObject private var post: PostStore
     @StateObject private var comments = CommentStore()
     @State private var expanded = false
@@ -571,15 +582,10 @@ struct PlatformPostPane: View {
     /// The hook under the pointer in the hooks drawer: the post shows it until the pointer leaves.
     @State private var previewHook: Hook?
 
-    /// Where the switch's pill stands. It starts on the platform before and springs to this one
-    /// (2026-10-04): each platform is a new pane, so without it the pill jumped.
-    @State private var pill: PostPlatform
-    @Namespace private var switchNS
-
-    init(doc: SessionDoc, platform: PostPlatform, from: PostPlatform? = nil, pick: @escaping (PostPlatform) -> Void) {
+    init(doc: SessionDoc, platform: PostPlatform, from: String? = nil, pick: @escaping (String) -> Void) {
         self.doc = doc
         self.platform = platform
-        _pill = State(initialValue: from ?? platform)
+        self.from = from
         self.pick = pick
         _post = StateObject(wrappedValue: PostStore(platform))
         _hooks = StateObject(wrappedValue: HookStore(file: { PostFile.hooksURL($0, platform) }))
@@ -803,7 +809,7 @@ struct PlatformPostPane: View {
     /// The one bar of the post: platform, versions, length, and three quiet actions. It floats.
     private var toolbar: some View {
         HStack(spacing: 14) {
-            platformSwitch
+            PostSideSwitch(doc: doc, current: platform.rawValue, from: from, pick: { post.close(); pick($0) })
             if post.content != nil {
                 PostDraftBar(post: post, showHistory: $showHistory)
                 Spacer(minLength: 8)
@@ -849,46 +855,6 @@ struct PlatformPostPane: View {
         .padding(.horizontal, 20).frame(height: 52)
         .background(.bar)
         .overlay(alignment: .bottom) { Rule().opacity(0.6) }
-    }
-
-    /// LinkedIn | X | YouTube | Vertical. A dot marks the sides that have a post.
-    private var platformSwitch: some View {
-        HStack(spacing: 0) {
-            ForEach(PostPlatform.shown) { p in
-                let on = p == pill
-                let has = FileManager.default.fileExists(atPath: PostFile.url(doc.url, p).path)
-                Button { if p != platform { post.close(); pick(p) } } label: {
-                    HStack(spacing: 6) {
-                        PlatformLogo(platform: p.name, size: 11)
-                            .opacity(on || has ? 1 : 0.45)
-                            .overlay(alignment: .topTrailing) {
-                                if has && !on { Circle().fill(Theme.accent).frame(width: 4, height: 4).offset(x: 3, y: -2) }
-                            }
-                        if on { Text(p.name).font(Theme.sans(12.5, .medium)).lineLimit(1).fixedSize() }
-                    }
-                    .foregroundStyle(on ? Theme.ink : Theme.faint)
-                    .padding(.horizontal, on ? 10 : 8).frame(height: 24)
-                    .background {
-                        if on {
-                            RoundedRectangle(cornerRadius: 6).fill(Theme.paper)
-                                .shadow(color: Theme.shadow, radius: 2, y: 1)
-                                .matchedGeometryEffect(id: "platform", in: switchNS)
-                        }
-                    }
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .help(p == .vertical ? "One vertical video and caption for TikTok, Instagram Reels and YouTube Shorts"
-                      : on ? "The \(p.name) post" : has ? "Show the \(p.name) post" : "No \(p.name) post yet: show that side")
-            }
-        }
-        .padding(2)
-        .background(Theme.hover, in: RoundedRectangle(cornerRadius: 8))
-        .fixedSize()
-        .onAppear {
-            guard pill != platform else { return }
-            DispatchQueue.main.async { withAnimation(Theme.spring) { pill = platform } }
-        }
     }
 
     /// LinkedIn: characters of 3,000, with a ring. X: posts in the thread and the longest one.
@@ -1924,5 +1890,71 @@ struct GiantLogos: View {
         .allowsHitTesting(false)
         .accessibilityHidden(true)
         .onAppear { shown = true }
+    }
+}
+
+/// LinkedIn | X | YouTube | Vertical, then the sides a plugin adds. A dot marks the sides that have a post.
+struct PostSideSwitch: View {
+    var doc: SessionDoc
+    /// The side on show: a platform's raw value or a plugin side's id.
+    let current: String
+    let pick: (String) -> Void
+    /// Where the pill stands. It starts on the side before and springs to this one (2026-10-04):
+    /// each side is a new pane, so without it the pill jumped.
+    @State private var pill: String
+    @Namespace private var switchNS
+
+    init(doc: SessionDoc, current: String, from: String?, pick: @escaping (String) -> Void) {
+        self.doc = doc
+        self.current = current
+        self.pick = pick
+        _pill = State(initialValue: from ?? current)
+    }
+
+    var body: some View {
+        HStack(spacing: 0) {
+            ForEach(PostPlatform.shown) { p in
+                let has = FileManager.default.fileExists(atPath: PostFile.url(doc.url, p).path)
+                item(p.rawValue, p.name, has: has, mark: AnyView(PlatformLogo(platform: p.name, size: 11)),
+                     help: p == .vertical ? "One vertical video and caption for TikTok, Instagram Reels and YouTube Shorts"
+                         : p.rawValue == pill ? "The \(p.name) post" : has ? "Show the \(p.name) post" : "No \(p.name) post yet: show that side")
+            }
+            ForEach(Plugins.postSides) { s in
+                item(s.id, s.name, has: s.has(doc.url), mark: s.mark(), help: s.help)
+            }
+        }
+        .padding(2)
+        .background(Theme.hover, in: RoundedRectangle(cornerRadius: 8))
+        .fixedSize()
+        .onAppear {
+            guard pill != current else { return }
+            DispatchQueue.main.async { withAnimation(Theme.spring) { pill = current } }
+        }
+    }
+
+    private func item(_ id: String, _ name: String, has: Bool, mark: AnyView, help: String) -> some View {
+        let on = id == pill
+        return Button { if id != current { pick(id) } } label: {
+            HStack(spacing: 6) {
+                mark
+                    .opacity(on || has ? 1 : 0.45)
+                    .overlay(alignment: .topTrailing) {
+                        if has && !on { Circle().fill(Theme.accent).frame(width: 4, height: 4).offset(x: 3, y: -2) }
+                    }
+                if on { Text(name).font(Theme.sans(12.5, .medium)).lineLimit(1).fixedSize() }
+            }
+            .foregroundStyle(on ? Theme.ink : Theme.faint)
+            .padding(.horizontal, on ? 10 : 8).frame(height: 24)
+            .background {
+                if on {
+                    RoundedRectangle(cornerRadius: 6).fill(Theme.paper)
+                        .shadow(color: Theme.shadow, radius: 2, y: 1)
+                        .matchedGeometryEffect(id: "platform", in: switchNS)
+                }
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(help)
     }
 }

@@ -2,13 +2,14 @@ import AppKit
 import SwiftUI
 
 /// Takes › Settings (⌘,): Appearance (mode, palette, accent, text size), Higgsfield (AI video,
-/// 2026-10-06), Voices (ElevenLabs) and the archived sessions, which the sidebar no longer shows.
+/// 2026-10-06), Voices (ElevenLabs), the archived sessions, which the sidebar no longer shows, and
+/// in the admin build what is private and what is public (2026-10-07).
 struct SettingsView: View {
     var library: Library
     @AppStorage("settingsPage") private var page = SettingsPage.appearance.rawValue
 
     enum SettingsPage: String, CaseIterable, Identifiable {
-        case appearance, search, higgsfield, voices, archived
+        case appearance, search, higgsfield, voices, archived, privacy
         var id: String { rawValue }
         var name: String {
             switch self {
@@ -17,6 +18,7 @@ struct SettingsView: View {
             case .higgsfield: return "Higgsfield"
             case .voices: return "Voices"
             case .archived: return "Archived"
+            case .privacy: return "Private"
             }
         }
         var icon: String {
@@ -26,17 +28,20 @@ struct SettingsView: View {
             case .higgsfield: return "sparkles"
             case .voices: return "waveform"
             case .archived: return "archivebox"
+            case .privacy: return "lock"
             }
         }
+        /// Private shows only where there is a list (the admin build).
+        static var shown: [SettingsPage] { allCases.filter { $0 != .privacy || !PrivatePlugins.features.isEmpty } }
     }
 
     var body: some View {
-        let current = SettingsPage(rawValue: page) ?? .appearance
+        let current = SettingsPage(rawValue: page).flatMap { SettingsPage.shown.contains($0) ? $0 : nil } ?? .appearance
         HStack(spacing: 0) {
             VStack(alignment: .leading, spacing: 2) {
                 Text("Settings").font(Theme.display(17)).foregroundStyle(Theme.ink)
                     .padding(.horizontal, 10).padding(.bottom, 12)
-                ForEach(SettingsPage.allCases) { p in
+                ForEach(SettingsPage.shown) { p in
                     Button { withAnimation(Theme.motion) { page = p.rawValue } } label: {
                         Label(p.name, systemImage: p.icon)
                             .font(Theme.sans(13, p == current ? .semibold : .regular))
@@ -61,6 +66,7 @@ struct SettingsView: View {
                 case .higgsfield: HiggsfieldPage()
                 case .voices: VoicesPage()
                 case .archived: ArchivedPage(library: library)
+                case .privacy: PrivatePage(features: PrivatePlugins.features)
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -138,6 +144,68 @@ private struct ArchivedRow: View {
         .padding(.horizontal, 12).padding(.vertical, 9)
         .background(RoundedRectangle(cornerRadius: 9).fill(hover ? Theme.hover : .clear))
         .onHover { hover = $0 }
+    }
+}
+
+// MARK: - Private
+
+/// What is private and what is public (2026-10-07), from Plugins/Private/FeatureMap.swift.
+struct PrivatePage: View {
+    let features: [FeatureEntry]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Private and public").font(Theme.display(17)).foregroundStyle(Theme.ink)
+                Text("This build has everything. The public copy on GitHub has only what is public.")
+                    .font(Theme.sans(12)).foregroundStyle(Theme.muted)
+            }
+            .padding(20)
+            Rule()
+            ScrollView {
+                VStack(alignment: .leading, spacing: 22) {
+                    ForEach(FeatureEntry.Kind.allCases, id: \.self) { kind in
+                        let rows = features.filter { $0.kind == kind }
+                        if !rows.isEmpty { group(kind, rows) }
+                    }
+                }
+                .padding(20)
+            }
+        }
+    }
+
+    private func group(_ kind: FeatureEntry.Kind, _ rows: [FeatureEntry]) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                Circle().fill(kind == .shipped ? Theme.live : kind == .ownFiles ? Theme.faint : Theme.accent).frame(width: 6, height: 6)
+                Text(kind.rawValue.uppercased()).font(Theme.sans(10.5, .semibold)).tracking(0.6).foregroundStyle(Theme.muted)
+                Text("\(rows.count)").font(Theme.mono(10.5)).foregroundStyle(Theme.faint)
+            }
+            VStack(spacing: 0) {
+                ForEach(Array(rows.enumerated()), id: \.element.id) { i, f in
+                    if i > 0 { Rule().opacity(0.6) }
+                    row(f)
+                }
+            }
+            .background(RoundedRectangle(cornerRadius: 10).fill(Theme.surface))
+            .overlay(RoundedRectangle(cornerRadius: 10).stroke(Theme.border, lineWidth: 1))
+        }
+    }
+
+    private func row(_ f: FeatureEntry) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 10) {
+            Image(systemName: f.icon).font(.system(size: 12)).foregroundStyle(Theme.muted).frame(width: 18)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(f.name).font(Theme.sans(13, .medium)).foregroundStyle(Theme.ink)
+                Text(f.what).font(Theme.sans(11.5)).foregroundStyle(Theme.muted).fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 12)
+            if !f.code.isEmpty {
+                Text(f.code.filter { !$0.hasPrefix("plugin ") }.joined(separator: "\n"))
+                    .font(Theme.mono(10.5)).foregroundStyle(Theme.faint).multilineTextAlignment(.trailing)
+            }
+        }
+        .padding(.horizontal, 12).padding(.vertical, 9)
     }
 }
 
