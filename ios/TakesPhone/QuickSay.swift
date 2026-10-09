@@ -12,6 +12,8 @@ struct QuickSay: View {
     var placeholder = "Tell Takes…"
     /// Adds the context Claude needs to the typed text, as it goes out.
     var wrap: (String) -> String = { $0 }
+    /// Runs just before the message goes out (the record screen sends the take first).
+    var before: () -> Void = {}
     @State private var draft = ""
     @State private var voice = VoiceNote()
     @State private var sent = false
@@ -104,6 +106,7 @@ struct QuickSay: View {
             let dictated = spoke
             draft = ""
             typing = false
+            before()
             if await model.say(wrap(text), in: sessionID, from: from, voice: dictated) {
                 sent = true
                 try? await Task.sleep(for: .seconds(5))

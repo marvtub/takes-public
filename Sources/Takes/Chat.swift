@@ -592,7 +592,7 @@ final class ClaudeChat {
             return
         }
         guard let claude = Self.claudePath else {
-            append(ChatMessage(role: .error, text: "Can't find the claude command. Install Claude Code, then try again."))
+            append(ChatMessage(role: .error, text: "The chat is not set up yet. Click Finish setup in the sidebar, then try again."))
             return
         }
         if Self.isCompact(text) && !log.started {

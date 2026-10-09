@@ -4,7 +4,7 @@ import Testing
 
 // 2026-10-02: each session opens on the tab and the file it showed last.
 
-struct SessionViewTests {
+@Suite(.serialized) struct SessionViewTests {
     @Test func keepsTabFileAndTimePerSession() {
         let a = URL(fileURLWithPath: "/tmp/takes-view-\(UUID().uuidString)/p/a")
         let b = URL(fileURLWithPath: "/tmp/takes-view-\(UUID().uuidString)/p/b")
@@ -29,6 +29,28 @@ struct SessionViewTests {
         #expect(raw == "edits/cut-v2.mp4")
         // A session never seen opens on Record.
         #expect(SessionView.read(URL(fileURLWithPath: "/tmp/nowhere")).mode == .record)
+    }
+
+    // 2026-10-08: a session never seen opens where its session.json says (the demo session).
+    @Test func newSessionOpensWhereItSays() throws {
+        let s = URL(fileURLWithPath: "/tmp/takes-view-\(UUID().uuidString)/p/demo")
+        try FileManager.default.createDirectory(at: s, withIntermediateDirectories: true)
+        defer {
+            try? FileManager.default.removeItem(at: s.deletingLastPathComponent().deletingLastPathComponent())
+            var all = UserDefaults.standard.dictionary(forKey: SessionView.key) ?? [:]
+            all[s.path] = nil
+            UserDefaults.standard.set(all, forKey: SessionView.key)
+        }
+        var meta = SessionMeta(title: "Demo", createdAt: Date())
+        meta.opens = ["tab": "assets", "file": "edits/first-video-v1.mp4"]
+        try Store.encoder.encode(meta).write(to: s.appending(path: "session.json"))
+
+        let v = SessionView.read(s)
+        #expect(v.mode == .assets)
+        #expect(v.file?.path == s.appending(path: "edits/first-video-v1.mp4").path)
+        // Once a tab is picked, that wins.
+        SessionView.write(s, mode: .post, file: nil, time: nil)
+        #expect(SessionView.read(s).mode == .post)
     }
 }
 

@@ -360,13 +360,14 @@ struct UpdateButton: View {
 /// The waiting build's changes, grouped by area, each one opens to its full message. The Update
 /// tooltip only listed eight commit titles (2026-10-04). The list is as tall as its changes, up
 /// to 560 points: a ScrollView alone in a popover shrank to one row and hid the rest (2026-10-04).
+/// The height comes from the first layout (`FitHeight`): measured a moment later, the popover had
+/// already opened at 177 points and showed only the middle of the list (2026-10-08).
 /// With up to six changes, every one starts open.
 struct WhatsNew: View {
     let staged: Updater.Staged
     let updater: Updater
     let update: () -> Void
     @State private var expanded: Set<String>
-    @State private var listHeight: CGFloat = 0
 
     init(staged: Updater.Staged, updater: Updater, expanded: Set<String>? = nil, update: @escaping () -> Void) {
         self.staged = staged; self.updater = updater; self.update = update
@@ -394,20 +395,10 @@ struct WhatsNew: View {
             }
             .padding(.horizontal, 18).padding(.top, 16).padding(.bottom, 12)
             Divider().overlay(Theme.border)
-            ScrollView {
-                VStack(alignment: .leading, spacing: 16) {
-                    ForEach(groups, id: \.area) { g in
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(g.area.uppercased()).font(Theme.sans(10.5, .semibold)).tracking(0.6).foregroundStyle(Theme.faint)
-                                .padding(.horizontal, 8)
-                            ForEach(g.changes) { c in row(c) }
-                        }
-                    }
-                }
-                .padding(.horizontal, 10).padding(.vertical, 14)
-                .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { listHeight = $0 }
+            FitHeight(max: 560) {
+                list.hidden().accessibilityHidden(true)
+                ScrollView { list }
             }
-            .frame(height: min(max(listHeight, 60), 560))
             Divider().overlay(Theme.border)
             HStack(spacing: 10) {
                 Text(updater.waitingFor.map { "Waits until \($0) is done." } ?? "Takes restarts on the new build.")
@@ -431,6 +422,19 @@ struct WhatsNew: View {
         }
         .frame(width: 440)
         .background(Theme.paper)
+    }
+
+    private var list: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            ForEach(groups, id: \.area) { g in
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(g.area.uppercased()).font(Theme.sans(10.5, .semibold)).tracking(0.6).foregroundStyle(Theme.faint)
+                        .padding(.horizontal, 8)
+                    ForEach(g.changes) { c in row(c) }
+                }
+            }
+        }
+        .padding(.horizontal, 10).padding(.vertical, 14)
     }
 
     private func row(_ c: Updater.Change) -> some View {
@@ -460,5 +464,22 @@ struct WhatsNew: View {
             .contentShape(RoundedRectangle(cornerRadius: 8))
         }
         .buttonStyle(.plain)
+    }
+}
+
+/// Two views: a hidden copy of the content, measured at the given width, and the ScrollView that
+/// shows it. Takes the copy's height, up to `max`, in the same layout pass.
+struct FitHeight: Layout {
+    var max: CGFloat
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let width = proposal.width ?? subviews[0].sizeThatFits(.unspecified).width
+        let height = subviews[0].sizeThatFits(ProposedViewSize(width: width, height: nil)).height
+        return CGSize(width: width, height: min(height, max))
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        subviews[0].place(at: bounds.origin, proposal: ProposedViewSize(width: bounds.width, height: nil))
+        subviews[1].place(at: bounds.origin, proposal: ProposedViewSize(bounds.size))
     }
 }

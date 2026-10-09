@@ -1,0 +1,22 @@
+{
+  "assets/Motion/captions-v1.mp4": {
+    "added": "2026-10-08",
+    "from": "shipped with Takes",
+    "note": "Karaoke captions over footage (src/captions)."
+  },
+  "assets/Motion/figure-v1.mp4": {
+    "added": "2026-10-08",
+    "from": "shipped with Takes",
+    "note": "Figure page: two hairline bars (src/figure)."
+  },
+  "assets/Motion/lower-third-v1.mp4": {
+    "added": "2026-10-08",
+    "from": "shipped with Takes",
+    "note": "Lower third over footage (src/lower-third)."
+  },
+  "assets/Motion/title-card-v1.mp4": {
+    "added": "2026-10-08",
+    "from": "shipped with Takes",
+    "note": "Title card on paper (src/title-card)."
+  }
+}

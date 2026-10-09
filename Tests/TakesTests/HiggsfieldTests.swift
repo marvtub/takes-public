@@ -14,6 +14,13 @@ struct HiggsfieldTests {
         #expect(Higgsfield.state(ok: false, out: "") == .signedOut(nil))
     }
 
+    // 2026-10-08: after the sign-in, Takes picks the only workspace by itself.
+    @Test func oneWorkspaceIsPickedForYou() {
+        #expect(Higgsfield.onlyWorkspace(#"[{"id": "w1", "name": null, "is_selected": false}]"#) == "w1")
+        #expect(Higgsfield.onlyWorkspace(#"[{"id": "w1"}, {"id": "w2"}]"#) == nil)
+        #expect(Higgsfield.onlyWorkspace("Error: Not authenticated.") == nil)
+    }
+
     @Test func aShotShowsItsClipOnTheWay() throws {
         let json = #"{"shots": [{"id": "a1", "say": "Hi.", "sketch": "A desk.", "generating": "generated/shot-a1-v1.mp4"}, {"id": "b2", "sketch": "Cards.", "clip_error": "Session expired."}]}"#
         let b = try JSONDecoder().decode(Storyboard.self, from: Data(json.utf8))

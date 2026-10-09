@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=1920, height=1080" />
+    <!-- Magazine title card: paper with grain, a small-caps kicker, a serif headline whose second
+         line is italic. Words rise out of a blur, 0.09 s apart. Hard cut in and out.
+         Starts from HyperFrames' titlecard-calm (Apache-2.0), changed for this style.
+         Edit TEXT and AT below; for a 1080x1920 or 1080x1350 frame, change the sizes in :root. -->
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+    <style>
+      @font-face { font-family: "Instrument Serif"; src: url("../../fonts/InstrumentSerif-Regular.ttf"); font-weight: 400; }
+      @font-face { font-family: "Instrument Serif"; src: url("../../fonts/InstrumentSerif-Italic.ttf"); font-style: italic; font-weight: 400; }
+      @font-face { font-family: "Inter"; src: url("../../fonts/Inter-Medium.ttf"); font-weight: 500; }
+      :root { --paper: #f2ede3; --ink: #1a1814; --muted: #645d52; --rule: #cfc5b3;
+              --serif: "Instrument Serif", serif; --sans: "Inter", sans-serif;
+              --w: 1920px; --h: 1080px; --head: 150px; --label: 20px; }
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      html, body { width: var(--w); height: var(--h); overflow: hidden; background: var(--paper); }
+      #root { position: relative; width: 100%; height: 100%; background: var(--paper); }
+      #grain { position: absolute; inset: 0; opacity: 0.08; mix-blend-mode: multiply;
+        background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='260' height='260'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' seed='3'/><feColorMatrix type='saturate' values='0'/></filter><rect width='260' height='260' filter='url(%23n)'/></svg>"); }
+      #lockup { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; }
+      #kicker { font-family: var(--sans); font-weight: 500; font-size: var(--label); letter-spacing: 0.2em; text-transform: uppercase; color: var(--muted); margin-bottom: 40px; }
+      .hl { font-family: var(--serif); font-size: var(--head); line-height: 1.06; letter-spacing: -0.015em; color: var(--ink); white-space: nowrap; }
+      #l2 { font-style: italic; }
+      .wd { display: inline-block; }
+    </style>
+  </head>
+  <body>
+    <div id="root" data-composition-id="main" data-start="0" data-duration="3.5" data-width="1920" data-height="1080">
+      <div id="grain"></div>
+      <div id="lockup"><div id="kicker"></div><div class="hl" id="l1"></div><div class="hl" id="l2"></div></div>
+    </div>
+    <script>
+      // The text, and when each word lands (seconds). Put the times on the spoken words when
+      // the card sits over a voice.
+      const TEXT = { kicker: "Chapter one", l1: "A hundred times", l2: "bigger." };
+      const AT = { kicker: 0.1, first: 0.3, stagger: 0.09, l2: 0.9 };
+
+      document.getElementById("kicker").textContent = TEXT.kicker;
+      const words = (id, text) => text.split(" ").map((w, i, a) => {
+        const s = document.createElement("span"); s.className = "wd"; s.textContent = w;
+        const el = document.getElementById(id); el.appendChild(s);
+        if (i < a.length - 1) el.appendChild(document.createTextNode(" "));
+        return s;
+      });
+      const w1 = words("l1", TEXT.l1), w2 = words("l2", TEXT.l2);
+
+      window.__timelines = window.__timelines || {};
+      const tl = gsap.timeline({ paused: true });
+      const rise = { opacity: 1, y: 0, filter: "blur(0px)", duration: 0.4, ease: "power3.out" };
+      gsap.set([...w1, ...w2], { opacity: 0, y: 30, filter: "blur(12px)" });
+      gsap.set("#kicker", { opacity: 0, y: 12 });
+      tl.to("#kicker", { opacity: 1, y: 0, duration: 0.4, ease: "power3.out" }, AT.kicker);
+      w1.forEach((s, i) => tl.to(s, rise, AT.first + i * AT.stagger));
+      w2.forEach((s, i) => tl.to(s, rise, AT.l2 + i * AT.stagger));
+      tl.set({}, {}, 3.5);
+      window.__timelines["main"] = tl;
+      tl.seek(0);
+    </script>
+  </body>
+</html>

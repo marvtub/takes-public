@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=1920, height=1080" />
+    <!-- Magazine lower third: a serif name, a hairline that draws under it, and one small-caps line.
+         White with a soft shadow, over footage. No card, no box.
+         Starts from HyperFrames' lt-side-rule (Apache-2.0): its bar is a hairline here, and the type
+         is this style's. Put your clip next to this file as footage.mp4, and edit TEXT and AT. -->
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+    <style>
+      @font-face { font-family: "Instrument Serif"; src: url("../../fonts/InstrumentSerif-Regular.ttf"); font-weight: 400; }
+      @font-face { font-family: "Instrument Serif"; src: url("../../fonts/InstrumentSerif-Italic.ttf"); font-style: italic; font-weight: 400; }
+      @font-face { font-family: "Inter"; src: url("../../fonts/Inter-Regular.ttf"); font-weight: 400; }
+      @font-face { font-family: "Inter"; src: url("../../fonts/Inter-Medium.ttf"); font-weight: 500; }
+      @font-face { font-family: "Inter"; src: url("../../fonts/Inter-SemiBold.ttf"); font-weight: 600; }
+      :root { --serif: "Instrument Serif", serif; --sans: "Inter", sans-serif; }
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      html, body { width: 1920px; height: 1080px; overflow: hidden; background: #1a1814; }
+      #root { position: relative; width: 100%; height: 100%; overflow: hidden; }
+      #footage { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+      #lt { position: absolute; left: 128px; bottom: 150px; color: #fff; text-shadow: 0 2px 18px rgba(0, 0, 0, 0.55); }
+      #name { font-family: var(--serif); font-size: 96px; line-height: 1; white-space: nowrap; }
+      #rule { height: 1.5px; background: rgba(255, 255, 255, 0.75); margin: 18px 0 16px; transform-origin: 0 50%; box-shadow: 0 1px 8px rgba(0, 0, 0, 0.35); }
+      #line { font-family: var(--sans); font-weight: 500; font-size: 22px; letter-spacing: 0.2em; text-transform: uppercase; white-space: nowrap; }
+    </style>
+  </head>
+  <body>
+    <div id="root" data-composition-id="main" data-start="0" data-duration="5" data-width="1920" data-height="1080">
+      <video id="footage" src="footage.mp4" data-start="0" data-duration="5" data-track-index="0" muted playsinline></video>
+      <div id="lt"><div id="name"></div><div id="rule"></div><div id="line"></div></div>
+    </div>
+    <script>
+      const TEXT = { name: "Your Name", line: "What you do, in five words" };
+      const AT = { in: 0.3, out: 4.4 };
+
+      document.getElementById("name").textContent = TEXT.name;
+      document.getElementById("line").textContent = TEXT.line;
+      window.__timelines = window.__timelines || {};
+      const tl = gsap.timeline({ paused: true });
+      gsap.set(["#name", "#line"], { opacity: 0, y: 24, filter: "blur(8px)" });
+      gsap.set("#rule", { scaleX: 0 });
+      // In: the name, the hairline draws, then the line. Out: about half as long, all together.
+      tl.to("#name", { opacity: 1, y: 0, filter: "blur(0px)", duration: 0.45, ease: "power3.out" }, AT.in);
+      tl.to("#rule", { scaleX: 1, duration: 0.6, ease: "power3.out" }, AT.in + 0.12);
+      tl.to("#line", { opacity: 1, y: 0, filter: "blur(0px)", duration: 0.45, ease: "power3.out" }, AT.in + 0.24);
+      tl.to(["#name", "#line"], { opacity: 0, y: -10, duration: 0.25, ease: "power2.in" }, AT.out);
+      tl.to("#rule", { scaleX: 0, transformOrigin: "100% 50%", duration: 0.25, ease: "power2.in" }, AT.out);
+      tl.set({}, {}, 5);
+      window.__timelines["main"] = tl;
+      tl.seek(0);
+    </script>
+  </body>
+</html>

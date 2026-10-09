@@ -89,7 +89,7 @@ class Higgsfield(unittest.TestCase):
         self.assertNotIn("generating", shot)
         self.assertNotIn("video", shot)
         self.assertIn("Session expired", shot["clip_error"])
-        self.assertIn("Settings", shot["clip_error"])
+        self.assertIn("Plugins › Higgsfield", shot["clip_error"])
         self.assertEqual(t.hf_jobs(self.s)[0]["status"], "error")
 
     def test_a_storyboard_rewrite_keeps_the_running_clip(self):
@@ -129,7 +129,7 @@ class Higgsfield(unittest.TestCase):
         t.higgsfield_cli, real = (lambda: None), t.higgsfield_cli
         try:
             self.assertFalse(t.t_higgsfield_status({})["installed"])
-            with self.assertRaisesRegex(ValueError, "Settings"):
+            with self.assertRaisesRegex(ValueError, "Plugins › Higgsfield"):
                 t.t_higgsfield({"session": self.s, "prompt": "x"})
         finally:
             t.higgsfield_cli = real

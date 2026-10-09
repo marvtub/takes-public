@@ -1,22 +1,22 @@
 import AppKit
 import SwiftUI
 
-/// Takes › Settings (⌘,): Appearance (mode, palette, accent, text size), Higgsfield (AI video,
-/// 2026-10-06), Voices (ElevenLabs), the archived sessions, which the sidebar no longer shows, and
-/// in the admin build what is private and what is public (2026-10-07).
+/// Takes › Settings (⌘,): Appearance (mode, palette, accent, text size), Gemini (what the key is
+/// for, 2026-10-08), the archived sessions, which the sidebar no longer shows, and in the admin
+/// build what is private and what is public (2026-10-07). Higgsfield, Voices and the plugins moved
+/// to the Plugins board in the sidebar (2026-10-08).
 struct SettingsView: View {
     var library: Library
     @AppStorage("settingsPage") private var page = SettingsPage.appearance.rawValue
 
     enum SettingsPage: String, CaseIterable, Identifiable {
-        case appearance, search, higgsfield, voices, archived, privacy
+        case appearance, search, gemini, archived, privacy
         var id: String { rawValue }
         var name: String {
             switch self {
             case .appearance: return "Appearance"
             case .search: return "Search"
-            case .higgsfield: return "Higgsfield"
-            case .voices: return "Voices"
+            case .gemini: return "Gemini"
             case .archived: return "Archived"
             case .privacy: return "Private"
             }
@@ -25,14 +25,20 @@ struct SettingsView: View {
             switch self {
             case .appearance: return "paintpalette"
             case .search: return "magnifyingglass"
-            case .higgsfield: return "sparkles"
-            case .voices: return "waveform"
+            case .gemini: return "key"
             case .archived: return "archivebox"
             case .privacy: return "lock"
             }
         }
         /// Private shows only where there is a list (the admin build).
-        static var shown: [SettingsPage] { allCases.filter { $0 != .privacy || !PrivatePlugins.features.isEmpty } }
+        static var shown: [SettingsPage] {
+            allCases.filter {
+                switch $0 {
+                case .privacy: return !PrivatePlugins.features.isEmpty
+                default: return true
+                }
+            }
+        }
     }
 
     var body: some View {
@@ -63,8 +69,7 @@ struct SettingsView: View {
                 switch current {
                 case .appearance: AppearancePage()
                 case .search: SearchPage()
-                case .higgsfield: HiggsfieldPage()
-                case .voices: VoicesPage()
+                case .gemini: GeminiPage()
                 case .archived: ArchivedPage(library: library)
                 case .privacy: PrivatePage(features: PrivatePlugins.features)
                 }

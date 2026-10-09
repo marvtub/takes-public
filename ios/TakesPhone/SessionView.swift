@@ -88,10 +88,9 @@ struct SessionView: View {
         .fullScreenCover(item: $recording) { mode in
             switch mode {
             case .prompter:
-                PrompterRecorder(script: detail?.script ?? "") { url in
-                    recording = nil
-                    if let url { model.outbox.take(url, name: "phone-take.mov", session: session.id, asTake: true, shot: nil) }
-                }
+                PrompterRecorder(script: detail?.script ?? "", sessionID: session.id,
+                                 send: { model.outbox.take($0, name: "phone-take.mov", session: session.id, asTake: true, shot: nil) },
+                                 close: { recording = nil }, toChat: { recording = nil; tab = .chat })
             case .camera:
                 CameraPicker { url in
                     recording = nil
@@ -102,10 +101,9 @@ struct SessionView: View {
         }
         .fullScreenCover(item: $shooting) { shot in
             // A take for one storyboard shot: the prompter shows only its lines.
-            PrompterRecorder(script: shot.say) { url in
-                shooting = nil
-                if let url { model.outbox.take(url, name: "phone-take.mov", session: session.id, asTake: true, shot: shot.id) }
-            }
+            PrompterRecorder(script: shot.say, sessionID: session.id,
+                             send: { model.outbox.take($0, name: "phone-take.mov", session: session.id, asTake: true, shot: shot.id) },
+                             close: { shooting = nil }, toChat: { shooting = nil; tab = .chat })
         }
         .fullScreenCover(item: $showing) { f in
             Viewer(file: f, sessionID: session.id, onDone: { showing = nil; Task { await reload() } })

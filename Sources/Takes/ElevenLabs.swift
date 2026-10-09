@@ -145,21 +145,21 @@ final class ElevenLabs {
     nonisolated static let voiceoverAsk = "Make a voice-over of the script with the voiceover tool, in my default voice."
 }
 
-/// Takes › Settings › Voices.
+/// Plugins › Voices (Settings › Voices until 2026-10-08). The board draws the title.
 struct VoicesPage: View {
     private var el = ElevenLabs.shared
     @State private var key = ""
     @State private var query = ""
     @State private var changingKey = false
 
+    static let plugin = TakesPlugin(
+        id: "voices", title: "Voices", icon: "waveform", key: " ",
+        help: "Voice-overs, fixed words and other voices with ElevenLabs, in your own voice or any other. Uses the characters of your ElevenLabs plan.",
+        badge: { _ in AnyView(EmptyView()) }, board: nil,
+        settings: { _ in AnyView(VoicesPage()) })
+
     var body: some View {
-        ScrollView {
             VStack(alignment: .leading, spacing: 22) {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("Voices").font(Theme.display(26)).foregroundStyle(Theme.ink)
-                    Text("Voice-overs, fixed words and other voices with ElevenLabs, in your own voice or any other. Uses the characters of your ElevenLabs plan.")
-                        .font(Theme.sans(12.5)).foregroundStyle(Theme.muted).fixedSize(horizontal: false, vertical: true)
-                }
                 card { account }
                 if case .ready = el.state {
                     section("Your voices", "The default voice speaks when you do not name one.") {
@@ -195,8 +195,6 @@ struct VoicesPage: View {
                         .font(Theme.sans(12)).foregroundStyle(Theme.faint)
                 }
             }
-            .padding(.horizontal, 32).padding(.vertical, 28)
-        }
         .task { await el.refresh() }
     }
 

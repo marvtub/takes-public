@@ -506,7 +506,8 @@ private struct ShotSplit: Layout {
 
 private struct ShotDetail: View {
     @Environment(AppModel.self) var app
-    @Environment(\.openSettings) private var openSettings
+    /// Plugins › Higgsfield off: no ✦.
+    @AppStorage(Plugins.removedKey) private var pluginsRemoved = ""
     @Environment(\.paneShown) private var shown
     var doc: SessionDoc
     var shot: StoryShot
@@ -588,7 +589,7 @@ private struct ShotDetail: View {
                     .help(clip != nil ? "This clip was made with \(m)" : "This sketch was drawn with \(m)")
             }
             Spacer()
-            generate
+            if Plugins.isInstalled("higgsfield") { generate }
             record
             HStack(spacing: 2) {
                 arrow("chevron.left", -1, off: number == 1)
@@ -705,7 +706,7 @@ private struct ShotDetail: View {
     }
 
     /// ✦ next to the record dot (2026-10-06): Takes makes this shot's clip with Higgsfield. Not set up
-    /// yet: it opens Settings › Higgsfield.
+    /// yet: it opens Plugins › Higgsfield.
     private var generate: some View {
         Button { makeClip() } label: {
             Image(systemName: "sparkles").font(.system(size: 12, weight: .semibold))
@@ -724,8 +725,7 @@ private struct ShotDetail: View {
             let hf = Higgsfield.shared
             if !hf.ready { await hf.check() }
             guard hf.ready else {
-                UserDefaults.standard.set(SettingsView.SettingsPage.higgsfield.rawValue, forKey: "settingsPage")
-                openSettings()
+                app.openPlugin("higgsfield")
                 return
             }
             app.chats.chat(doc.url).send(Higgsfield.shotPrompt(shot), title: doc.meta.title, onStage: nil)

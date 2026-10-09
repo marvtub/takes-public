@@ -533,9 +533,10 @@ private struct ShotNotes: View {
 }
 
 /// A clip that loops on its own, filling its frame. Muted, it mixes with your music.
-private struct ClipLoop: UIViewRepresentable {
+struct ClipLoop: UIViewRepresentable {
     let url: URL
     var sound = false
+    var gravity: AVLayerVideoGravity = .resizeAspectFill
 
     final class Box: UIView {
         override class var layerClass: AnyClass { AVPlayerLayer.self }
@@ -546,7 +547,7 @@ private struct ClipLoop: UIViewRepresentable {
 
     func makeUIView(context: Context) -> Box {
         let v = Box()
-        v.playerLayer.videoGravity = .resizeAspectFill
+        v.playerLayer.videoGravity = gravity
         v.playerLayer.player = v.player
         v.player.isMuted = !sound
         AVAudioSession.sharedInstance().use(sound ? .playback : .ambient, sound ? [] : .mixWithOthers)

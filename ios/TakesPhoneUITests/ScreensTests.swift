@@ -114,6 +114,39 @@ final class ScreensTests: XCTestCase {
         shot(app, "22-new-video")
     }
 
+    /// Record: the script in the island panel, then the take plays with "Ask Takes", the record
+    /// button and a small "Send to Mac". TAKES_FAKE_TAKE stands in for the camera.
+    func testRecordReview() throws {
+        let env = ProcessInfo.processInfo.environment
+        let app = XCUIApplication()
+        app.launchEnvironment["TAKES_SERVER"] = env["TAKES_SERVER"] ?? "http://127.0.0.1:8797"
+        app.launchEnvironment["TAKES_FAKE_TAKE"] = env["TAKES_FAKE_TAKE"]
+        addUIInterruptionMonitor(withDescription: "Allow") { alert in
+            for b in ["Allow", "OK", "Allow While Using App"] where alert.buttons[b].exists { alert.buttons[b].tap(); return true }
+            return false
+        }
+        app.launch()
+        if app.buttons["Connect"].waitForExistence(timeout: 5) { app.buttons["Connect"].tap() }
+        if app.buttons["Videos"].waitForExistence(timeout: 15) { app.buttons["Videos"].tap() }
+        app.buttons.matching(identifier: "session-row").element(boundBy: 0).tap()
+        XCTAssertTrue(app.buttons["Record a take"].waitForExistence(timeout: 10))
+        app.buttons["Record a take"].tap()
+        sleep(3)
+        app.tap()
+        shot(app, "50-record-island")
+        app.buttons["Record"].tap()
+        sleep(1)
+        shot(app, "51-recording")
+        app.buttons["Stop"].tap()
+        XCTAssertTrue(app.buttons["Send to Mac"].waitForExistence(timeout: 10))
+        sleep(2)
+        shot(app, "52-take-review")
+        app.buttons["Record another take"].tap()
+        XCTAssertTrue(app.buttons["Record"].waitForExistence(timeout: 10))
+        sleep(1)
+        shot(app, "53-record-again")
+    }
+
     /// The review deck: one draft at a time, copy by tap, approve by swiping right.
     /// The performance tab alone: its charts, scrolled through.
     func testPerformanceBoard() throws {

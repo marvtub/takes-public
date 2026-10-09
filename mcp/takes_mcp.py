@@ -17,6 +17,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unicodedata
 import urllib.error
 import urllib.parse
@@ -1343,7 +1344,7 @@ def draw_gemini(prompt, out, fmt, model, images=(), size="1K"):
     import urllib.request
     key = gemini_key()
     if not key:
-        raise ValueError("No GOOGLE_AI_API_KEY in ~/.claude/.env.")
+        raise ValueError("No Gemini key. Add one in Takes › Settings › Gemini.")
     parts = [{"text": prompt}]
     for f in images:
         mime = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp"}.get(
@@ -1571,7 +1572,7 @@ ELEVEN_TTS_MODEL = "eleven_multilingual_v2"
 ELEVEN_STS_MODEL = "eleven_multilingual_sts_v2"
 ELEVEN_STT_MODEL = "scribe_v1"
 ELEVEN_KEYCHAIN = "Takes ElevenLabs"
-ELEVEN_SETUP = "Open Takes › Settings › Voices and paste your ElevenLabs API key."
+ELEVEN_SETUP = "Open Takes › Plugins › Voices and paste your ElevenLabs API key."
 ELEVEN_CHUNK = 2500  # characters per text-to-speech call; neighbours go along as previous/next text
 ELEVEN_FIT = (0.8, 1.25)  # how far fix_words may speed up or slow down new words to fit the old slot
 
@@ -1730,12 +1731,12 @@ def pick_voice(voices, ref):
 
 
 def resolve_voice(ref):
-    """(voice_id, name): the asked voice, else the default from Settings › Voices."""
+    """(voice_id, name): the asked voice, else the default from Plugins › Voices."""
     if not ref:
         d = read_voices_config().get("default")
         if d and d.get("id"):
             return d["id"], d.get("name") or d["id"]
-        raise ValueError("No default voice yet. Pick one in Takes › Settings › Voices, or pass voice.")
+        raise ValueError("No default voice yet. Pick one in Takes › Plugins › Voices, or pass voice.")
     voices = eleven_voices()
     v = pick_voice(voices, ref)
     if not v:
@@ -2105,14 +2106,14 @@ def t_change_voice(a):
 
 # ---------- Higgsfield: AI video (2026-10-06) ----------
 #
-# Video only: images go to GPT Image directly (make_image), much cheaper. Takes runs the official `higgsfield` CLI (signed in once from Takes › Settings › Higgsfield, the
+# Video only: images go to GPT Image directly (make_image), much cheaper. Takes runs the official `higgsfield` CLI (signed in once from Takes › Plugins › Higgsfield, the
 # same browser sign-in as Higgsfield's own MCP, no API key). A job runs detached like the sketches:
 # the tool returns at once, the file lands in <session>/generated/, and a storyboard shot plays it.
 
 GENERATED_DIR = "generated"
 HF_VIDEO_MODEL = "seedance_2_5"
 HF_WORKFLOWS = ("reframe", "draw_to_video")
-HF_SETUP = "Open Takes › Settings › Higgsfield: Install, then Sign in."
+HF_SETUP = "Open Takes › Plugins › Higgsfield: Install, then Sign in."
 
 
 def higgsfield_cli():
@@ -3861,8 +3862,26 @@ VOICE_DEFAULTS = {"strength": 1.0, "loudness": "normal", "on": True}
 
 
 def voice_script():
-    return os.environ.get("TAKES_VOICE_SCRIPT") or os.path.expanduser(
-        "~/.agents/skills/voice-cleanup/scripts/clean_voice.py")
+    """The cleanup script: the copy that ships next to this file (build.sh puts both in the app)."""
+    if os.environ.get("TAKES_VOICE_SCRIPT"):
+        return os.environ["TAKES_VOICE_SCRIPT"]
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "clean_voice.py")
+
+
+def ensure_uv():
+    """uv runs the cleanup with its Python packages. A new Mac has none: get it once with
+    Astral's installer into ~/.local/bin, where Takes also puts ffmpeg."""
+    uv = find_tool("uv")
+    if uv:
+        return uv
+    env = dict(os.environ, UV_INSTALL_DIR=os.path.expanduser("~/.local/bin"), UV_NO_MODIFY_PATH="1")
+    r = subprocess.run(["/bin/sh", "-c", "curl -LsSf https://astral.sh/uv/install.sh | sh"],
+                       env=env, capture_output=True, text=True, timeout=300)
+    uv = find_tool("uv")
+    if not uv:
+        raise ValueError("Could not install uv (%s). Install it from https://docs.astral.sh/uv and try again."
+                         % ((r.stderr or r.stdout).strip().splitlines() or ["no output"])[-1][:120])
+    return uv
 
 
 def find_tool(name):
@@ -3972,9 +3991,7 @@ def voice_run(s, n, kind):
         if os.environ.get("TAKES_VOICE_CMD"):  # tests: a stand-in for the script
             base = json.loads(os.environ["TAKES_VOICE_CMD"]) + [src]
         else:
-            uv, script = find_tool("uv"), voice_script()
-            if not uv:
-                raise ValueError("uv is not installed (brew install uv).")
+            uv, script = ensure_uv(), voice_script()  # the first run also downloads Python 3.11 and the model
             if not os.path.exists(script):
                 raise ValueError("The voice-cleanup script is missing: %s" % script)
             base = [uv, "run", "-q", "--python", "3.11", "--with", "clearvoice", "--with", "soundfile",
@@ -4133,15 +4150,18 @@ def gemini_key():
     for k in ("GEMINI_API_KEY", "GOOGLE_AI_API_KEY", "GOOGLE_API_KEY"):
         if os.environ.get(k):
             return os.environ[k]
-    for env in (os.path.expanduser("~/.claude/.env"),):
-        try:
-            for line in open(env):
-                k, _, v = line.strip().partition("=")
-                if k.strip().removeprefix("export ").strip() in ("GEMINI_API_KEY", "GOOGLE_AI_API_KEY"):
-                    return v.strip().strip('"').strip("'")
-        except OSError:
-            pass
-    return None
+    # ~/.claude/.env: Takes › Settings › Gemini saves GEMINI_API_KEY there; it wins over an older GOOGLE_AI_API_KEY.
+    found = {}
+    try:
+        for line in open(os.path.expanduser("~/.claude/.env")):
+            k, _, v = line.strip().partition("=")
+            k = k.strip().removeprefix("export ").strip()
+            v = v.strip().strip('"').strip("'")
+            if k in ("GEMINI_API_KEY", "GOOGLE_AI_API_KEY") and v:
+                found[k] = v
+    except OSError:
+        pass
+    return found.get("GEMINI_API_KEY") or found.get("GOOGLE_AI_API_KEY")
 
 
 DESCRIBE_PROMPT = """You describe one B-roll video for a video editor's library. The person in it (if any) is \
@@ -4245,7 +4265,7 @@ def describe_video(src, prompt=None, schema=None, ask="Describe this clip.", fps
         return json.loads(r.stdout)
     key = gemini_key()
     if not key:
-        raise ValueError("No Gemini key: set GOOGLE_AI_API_KEY in ~/.claude/.env.")
+        raise ValueError("No Gemini key. Add one in Takes › Settings › Gemini.")
     ffmpeg = find_tool("ffmpeg")
     if not ffmpeg:
         raise ValueError("ffmpeg is not installed. Open Takes and click Finish setup, or run brew install ffmpeg.")
@@ -5126,7 +5146,7 @@ TOOLS = [
     ("voices", "ElevenLabs voices: the account's own voices (the user's clone, designed and saved voices), the "
      "default voice, the plan and characters left. search=<words> searches the ElevenLabs voice library "
      "(with gender, accent, language, age, use_case); add=<add id from search> with name saves one to the "
-     "account; set_default=<voice> makes a voice the default. Not set up: tell him to open Settings › Voices.",
+     "account; set_default=<voice> makes a voice the default. Not set up: tell him to open Plugins › Voices.",
      {"search": S, "gender": S, "accent": S, "language": S, "age": S, "use_case": S,
       "add": {"type": "string", "description": "'<public_owner_id>/<voice_id>' from a search result."},
       "name": {"type": "string", "description": "With add: the name the voice gets in the account."},
@@ -5146,7 +5166,7 @@ TOOLS = [
      "-14 LUFS), shown on the Assets tab with the voice's name. Write the text as spoken words only. Costs "
      "ElevenLabs characters (about one per letter): one voice-over per ask.",
      {"session": SESSION, "text": {"type": "string", "description": "The words to say. Leave out for script.md."},
-      "voice": {"type": "string", "description": "A voice name or id from the ElevenLabs account (voices). Leave out for the default voice (the user picks it in Settings › Voices)."}, "name": {"type": "string", "description": "Short file name. Default voiceover-<voice>."},
+      "voice": {"type": "string", "description": "A voice name or id from the ElevenLabs account (voices). Leave out for the default voice (the user picks it in Plugins › Voices)."}, "name": {"type": "string", "description": "Short file name. Default voiceover-<voice>."},
       "model": {"type": "string", "description": "ElevenLabs model id. Default eleven_multilingual_v2; eleven_v3 is more expressive."},
       "stability": {"type": "number", "description": "0-1. Lower = more emotion, higher = steadier."},
       "similarity": {"type": "number", "description": "0-1. How close to the original voice."},
@@ -5165,7 +5185,7 @@ TOOLS = [
       "old": {"type": "string", "description": "The words to replace, as said."},
       "new": {"type": "string", "description": "The words to say instead."},
       "near": {"type": "number", "description": "When old is said more than once: about where, in seconds."},
-      "start": {"type": "number"}, "end": {"type": "number"}, "voice": {"type": "string", "description": "A voice name or id from the ElevenLabs account (voices). Leave out for the default voice (the user picks it in Settings › Voices)."},
+      "start": {"type": "number"}, "end": {"type": "number"}, "voice": {"type": "string", "description": "A voice name or id from the ElevenLabs account (voices). Leave out for the default voice (the user picks it in Plugins › Voices)."},
       "model": {"type": "string"}, "stability": {"type": "number"}, "similarity": {"type": "number"},
       "style": {"type": "number"}, "speed": {"type": "number"}},
      ["session", "new"], t_fix_words),
@@ -5173,7 +5193,7 @@ TOOLS = [
      "and emotion. The user acts the line, a character voice comes out. Whole file or start/end (at most "
      "5 minutes); writes generated/<file>-<voice>-vN.wav, and an .mp4 with the video for a video.",
      {"session": SESSION, "take": {"type": "string", "description": "Take number."},
-      "file": {"type": "string", "description": "Or a session file."}, "voice": {"type": "string", "description": "A voice name or id from the ElevenLabs account (voices). Leave out for the default voice (the user picks it in Settings › Voices)."},
+      "file": {"type": "string", "description": "Or a session file."}, "voice": {"type": "string", "description": "A voice name or id from the ElevenLabs account (voices). Leave out for the default voice (the user picks it in Plugins › Voices)."},
       "start": {"type": "number"}, "end": {"type": "number"},
       "remove_noise": {"type": "boolean", "description": "Remove background noise first."},
       "model": {"type": "string", "description": "Default eleven_multilingual_sts_v2."}},
@@ -5188,7 +5208,7 @@ TOOLS = [
      "drawing. Change a video: video=<session file> with params {mode: video_edit} (Seedance), or "
      "workflow=reframe with aspect_ratio for a new shape. Default model: seedance_2_5; other models by id (`higgsfield model list` in Bash; `higgsfield model get <id>` for params). "
      "Each job costs the user's Higgsfield credits: one job per ask, never a batch he did not ask for. "
-     "Not installed or not signed in: tell him to open Settings › Higgsfield.",
+     "Not installed or not signed in: tell him to open Plugins › Higgsfield.",
      {"session": SESSION,
       "prompt": {"type": "string", "description": "What the result shows. Not needed for workflow=reframe."},
       "shot": {"type": "string", "description": "A storyboard shot id: the clip becomes that shot's video."},
@@ -5534,7 +5554,7 @@ if __name__ == "__main__":
         sketch_run(sys.argv[2])
     elif sys.argv[1:2] == ["--higgsfield-run"]:
         higgsfield_run(sys.argv[2], sys.argv[3])
-    elif sys.argv[1:2] == ["--eleven"]:  # the app's Settings › Voices: one tool, JSON in and out
+    elif sys.argv[1:2] == ["--eleven"]:  # the app's Plugins › Voices: one tool, JSON in and out
         try:
             if sys.argv[2] == "save_key":
                 eleven_save_key(sys.stdin.read())

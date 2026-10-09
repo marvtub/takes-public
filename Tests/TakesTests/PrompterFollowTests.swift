@@ -354,3 +354,18 @@ struct NotchLiveCheck {
         NotchPanel.shared.hide()
     }
 }
+
+/// Record opens the notch by itself until you close it (2026-10-08).
+@MainActor
+struct NotchOnRecord {
+    @Test func onUntilYouCloseIt() {
+        let d = UserDefaults.standard, k = NotchPanel.autoKey
+        let old = d.object(forKey: k)
+        defer { d.set(old, forKey: k) }
+        d.removeObject(forKey: k)
+        #expect(NotchPanel.auto)
+        NotchPanel.shared.close()
+        #expect(!NotchPanel.auto)
+        #expect(!NotchPanel.shared.autoOpened)
+    }
+}

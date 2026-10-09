@@ -31,7 +31,7 @@ It installs Takes, ffmpeg and Claude Code, signs you in to Claude and opens Take
 <details>
 <summary>Other ways to install</summary>
 
-- **Download:** get `Takes.dmg` from [Releases](https://github.com/marvtub/takes-public/releases/latest) and drag Takes to Applications. Takes is not notarized yet, so open System Settings > Privacy & Security and click **Open Anyway** once. Then click **Finish setup** in the sidebar.
+- **Download:** get `Takes.dmg` from [Releases](https://github.com/marvtub/takes-public/releases/latest) and drag Takes to Applications. Takes is not notarized yet, so open System Settings > Privacy & Security and click **Open Anyway** once ([pictures of each step](https://gettakes.app/download)). Then click **Finish setup** in the sidebar.
 - **From source:** clone this repo, `brew install ffmpeg`, then `./build.sh install`.
 
 </details>
@@ -71,7 +71,7 @@ flowchart LR
 ## Good to know
 
 - **Needs:** a Mac with Apple silicon, macOS 15+ and a Claude plan.
-- **Optional:** `whisper` for transcripts, a `GEMINI_API_KEY` for storyboard sketches.
+- **Optional:** `whisper` for transcripts. A Gemini key for storyboard sketches, B-roll names and best cuts: Settings › Gemini says what it adds and saves it.
 - **Questions and ideas:** [Discussions](https://github.com/marvtub/takes-public/discussions). Takes does not take pull requests, so one person keeps it consistent. Forks are welcome.
 - The pictures are the real app on a made-up library.
 

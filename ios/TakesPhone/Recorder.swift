@@ -152,6 +152,15 @@ final class Camera: NSObject, ObservableObject {
         since = nil
         UIApplication.shared.isIdleTimerDisabled = false
         let portrait = portrait
+        #if targetEnvironment(simulator)
+        // UI tests: the simulator has no camera, so a test video stands in for the take.
+        if let fake = ProcessInfo.processInfo.environment["TAKES_FAKE_TAKE"] {
+            let url = FileManager.default.temporaryDirectory.appending(path: "outbox/take-\(UUID().uuidString).mov")
+            try? FileManager.default.copyItem(at: URL(filePath: fake), to: url)
+            file = url
+            return
+        }
+        #endif
         writer.finish { [weak self] url, error in
             Task { @MainActor in
                 guard let self else { return }
@@ -159,6 +168,17 @@ final class Camera: NSObject, ObservableObject {
                 self.file = await Orientation.fix(url, portrait: portrait)
             }
         }
+    }
+
+    /// The camera rests while a take plays back, so the take's sound plays from the speaker.
+    func rest() {
+        let s = session
+        Task.detached { s.stopRunning() }
+    }
+
+    func wake() {
+        let s = session
+        Task.detached { s.startRunning() }
     }
 
     func stop() {
@@ -609,10 +629,17 @@ struct PrompterTextView: UIViewRepresentable {
 // MARK: - Recorder screen
 
 /// The screen shows only the script, the time and the buttons to record (2026-10-03: less on
-/// screen). Scroll mode, speed and text size sit behind the settings button.
+/// screen). Scroll mode, speed and text size sit behind the settings button. With no script there
+/// is no prompter: only the camera (2026-10-08).
 struct PrompterRecorder: View {
     let script: String
-    let done: (URL?) -> Void
+    /// Prompts about a take go to this session's chat.
+    let sessionID: String
+    /// Sends a take to the Mac as the session's next take.
+    let send: (URL) -> Void
+    let close: () -> Void
+    /// Closes the recorder and opens the chat.
+    let toChat: () -> Void
     @StateObject private var camera = Camera()
     @StateObject private var prompter = PrompterText()
     @AppStorage("prompterFollowVoice") private var followVoice = true
@@ -620,8 +647,10 @@ struct PrompterRecorder: View {
     @AppStorage("prompterSize") private var size = 26.0
     @State private var note: String?
     @State private var settings = false
+    /// The take on screen went to the Mac already.
+    @State private var sent = false
 
-    private var shown: String { script.isEmpty ? "No script in this session. Talk freely." : script }
+    private var hasScript: Bool { !script.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
 
     var body: some View {
         GeometryReader { g in
@@ -629,44 +658,73 @@ struct PrompterRecorder: View {
             ZStack {
                 Color.black.ignoresSafeArea()
                 CameraPreview(camera: camera).ignoresSafeArea()
+                #if targetEnvironment(simulator)
+                if let fake = ProcessInfo.processInfo.environment["TAKES_FAKE_TAKE"] {
+                    ClipLoop(url: URL(filePath: fake)).ignoresSafeArea()
+                }
+                #endif
+                if hasScript {
+                    island(g, landscape: landscape)
+                        .padding(.top, 8)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                        .ignoresSafeArea(edges: .top)
+                }
                 VStack(spacing: 0) {
-                    PrompterTextView(text: prompter)
-                        .frame(height: g.size.height * (landscape ? 0.5 : 0.38))
-                        .background(LinearGradient(colors: [.black.opacity(0.75), .black.opacity(0.35)], startPoint: .top, endPoint: .bottom))
-                        .overlay(alignment: .topTrailing) {
-                            if !camera.recording {
-                                Button { settings = true } label: {
-                                    Image(systemName: "slider.horizontal.3").font(.inter(.callout, .semibold))
-                                        .frame(width: 36, height: 36).background(.black.opacity(0.45), in: Circle())
-                                }
-                                .foregroundStyle(.white).padding(10)
-                                .accessibilityLabel("Prompter settings")
-                            }
-                        }
                     Spacer()
                     controls
                 }
-                if let file = camera.file, !camera.recording { review(file) }
+                if let file = camera.file, !camera.recording { review(file).transition(.opacity) }
                 if let p = camera.problem ?? note {
                     Text(p).padding().background(.black.opacity(0.7), in: RoundedRectangle(cornerRadius: 10))
                         .foregroundStyle(.white).padding()
                         .onTapGesture { camera.problem = nil; note = nil }
                 }
             }
+            .animation(Brand.spring, value: camera.file)
         }
         .statusBarHidden()
         .sheet(isPresented: $settings) { settingsSheet }
         .task { await setUp() }
-        .onDisappear { camera.stop(); prompter.stopTimer() }
-        .onChange(of: size) { _, s in prompter.set(shown, size: s) }
+        .onDisappear {
+            camera.stop()
+            prompter.stopTimer()
+            // A copy went to the Mac; this one only played here.
+            if sent, let f = camera.file { try? FileManager.default.removeItem(at: f) }
+        }
+        .onChange(of: size) { _, s in prompter.set(script, size: s) }
         .onChange(of: wpm) { _, w in prompter.wordsPerMinute = w }
         .onChange(of: followVoice) { _, on in Task { await setVoice(on) } }
         .onChange(of: camera.recording) { _, on in prompter.scrolling = on && !camera.paused }
         .onChange(of: camera.paused) { _, p in prompter.scrolling = camera.recording && !p }
+        .onChange(of: camera.file) { _, f in if f != nil { camera.rest() } }
+    }
+
+    /// The script in a black panel that grows out of the Dynamic Island, as the Mac's grows out of
+    /// the notch (2026-10-08): the eyes stay next to the lens. The text starts under the island.
+    private func island(_ g: GeometryProxy, landscape: Bool) -> some View {
+        let under = landscape ? 10 : max(10, g.safeAreaInsets.top - 14)
+        return PrompterTextView(text: prompter)
+            // The last line fades out instead of being cut.
+            .mask(LinearGradient(stops: [.init(color: .black, location: 0.8), .init(color: .clear, location: 1)],
+                                 startPoint: .top, endPoint: .bottom))
+            .padding(.top, under)
+            .frame(width: landscape ? g.size.width * 0.62 : g.size.width + g.safeAreaInsets.leading + g.safeAreaInsets.trailing - 16,
+                   height: g.size.height * (landscape ? 0.42 : 0.22) + under)
+            .background(.black, in: RoundedRectangle(cornerRadius: landscape ? 28 : 40, style: .continuous))
+            .overlay(alignment: .bottomTrailing) {
+                if !camera.recording {
+                    Button { settings = true } label: {
+                        Image(systemName: "slider.horizontal.3").font(.system(size: 13, weight: .semibold))
+                            .frame(width: 30, height: 30).background(.white.opacity(0.14), in: Circle())
+                    }
+                    .foregroundStyle(.white.opacity(0.85)).padding(10)
+                    .accessibilityLabel("Prompter settings")
+                }
+            }
     }
 
     private func setUp() async {
-        prompter.set(shown, size: size)
+        prompter.set(script, size: size)
         prompter.wordsPerMinute = wpm
         // A tap on the script pauses the take and goes on again.
         prompter.tapped = { [weak camera] in
@@ -675,6 +733,8 @@ struct PrompterRecorder: View {
         }
         camera.voice.hints = Array(Set(prompter.follower.words.filter { $0.count > 3 }))
         camera.voice.heard = { [weak prompter] words in prompter?.heard(words) }
+        // No script: nothing to follow, so no speech recognition.
+        guard hasScript else { await camera.start(listen: false); return }
         let voice = followVoice ? await VoiceFollow.allowed() : false
         if followVoice && !voice {
             followVoice = false
@@ -692,7 +752,7 @@ struct PrompterRecorder: View {
         }
         note = nil
         prompter.voiceMode = on
-        prompter.set(shown, size: size)
+        prompter.set(script, size: size)
         camera.setListening(on)
     }
 
@@ -732,7 +792,7 @@ struct PrompterRecorder: View {
                 }
             }
             HStack {
-                Button("Cancel") { if camera.recording { camera.toggle() }; done(nil) }
+                Button("Cancel") { if camera.recording { camera.toggle() }; close() }
                     .font(.inter(.callout, .semibold)).foregroundStyle(.white).frame(width: 80)
                     .buttonStyle(.press)
                 Spacer()
@@ -772,20 +832,66 @@ struct PrompterRecorder: View {
         .background(LinearGradient(colors: [.clear, .black.opacity(0.65)], startPoint: .top, endPoint: .bottom))
     }
 
+    /// After a take it plays at once, with sound. The main thing to do is ask Takes about it; a
+    /// record button starts the next take; sending it to the Mac is small, at the top (2026-10-08:
+    /// "Retake / Send to the Mac" asked for a choice before the user had seen the take).
     private func review(_ file: URL) -> some View {
-        VStack(spacing: 14) {
-            Spacer()
-            Text("Take recorded").font(.nunito(.title3)).foregroundStyle(.white)
-            HStack(spacing: 12) {
-                Button("Retake") { try? FileManager.default.removeItem(at: file); camera.file = nil; prompter.toTop() }
-                    .buttonStyle(.pill(.quiet)).environment(\.colorScheme, .dark)
-                Button { done(file) } label: { Label("Send to the Mac", systemImage: "arrow.up.circle.fill") }
-                    .buttonStyle(.pill())
+        ZStack {
+            Color.black.ignoresSafeArea()
+            ClipLoop(url: file, sound: true, gravity: .resizeAspect).ignoresSafeArea()
+            VStack(spacing: 0) {
+                HStack {
+                    if !sent {
+                        Button { next(file) } label: {
+                            Image(systemName: "trash").font(.system(size: 16, weight: .semibold))
+                                .frame(width: 40, height: 40).background(.black.opacity(0.45), in: Circle())
+                        }
+                        .accessibilityLabel("Delete this take")
+                    }
+                    Spacer()
+                    Button { keep(file); close() } label: {
+                        Label(sent ? "Done" : "Send to Mac", systemImage: sent ? "checkmark" : "arrow.up")
+                            .font(.inter(.footnote, .semibold))
+                            .padding(.horizontal, 14).frame(height: 36)
+                            .background(.black.opacity(0.45), in: Capsule())
+                    }
+                }
+                .foregroundStyle(.white).buttonStyle(.press)
+                .padding(.horizontal, 16).padding(.top, 8)
+                Spacer()
+                QuickSay(sessionID: sessionID, toChat: toChat, from: "Record", placeholder: "Ask Takes about this take…",
+                         wrap: { "About the take I just recorded on my phone (the newest take in this session; it may still be uploading): " + $0 },
+                         before: { keep(file) })
+                    .environment(\.colorScheme, .dark)
+                Button { Brand.tap(.medium); keep(file); next(file) } label: {
+                    ZStack {
+                        Circle().stroke(.white, lineWidth: 3).frame(width: 58, height: 58)
+                        Circle().fill(Palette.danger).frame(width: 46, height: 46)
+                    }
+                }
+                .buttonStyle(Pressable(scale: 0.92, haptic: false))
+                .accessibilityLabel("Record another take")
+                .padding(.top, 10).padding(.bottom, 12)
             }
-            Spacer().frame(height: 60)
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(.black.opacity(0.55))
+    }
+
+    /// Sends the take on screen to the Mac, once. A copy goes (a clone, no extra space): the
+    /// outbox moves its file, and this one keeps playing.
+    private func keep(_ file: URL) {
+        guard !sent else { return }
+        let copy = file.deletingLastPathComponent().appending(path: "send-" + file.lastPathComponent)
+        send((try? FileManager.default.copyItem(at: file, to: copy)) != nil ? copy : file)
+        sent = true
+    }
+
+    /// Back to the camera for the next take. A take not sent is deleted.
+    private func next(_ file: URL) {
+        camera.file = nil
+        sent = false
+        try? FileManager.default.removeItem(at: file)
+        prompter.toTop()
+        camera.wake()
     }
 }
 

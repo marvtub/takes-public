@@ -44,6 +44,9 @@ final class Onboarding {
         withAnimation(Theme.motion) { shown = false }
     }
 
+    /// Sessions vs projects, in one line (2026-10-08: a new user did not know what a session is).
+    static let sessionLine = "A session is one video: its script, takes, edits and posts. A project holds sessions, like a folder."
+
     /// Writing a script needs only Claude. ffmpeg comes in later, for the edit.
     static var canWrite: Bool { Setup.shared.claude == .ok && Setup.shared.signedIn == .ok }
 
@@ -169,8 +172,8 @@ struct OnboardingCard: View {
 
 // MARK: - The pages
 
-/// Every page: an illustration on a soft glow, then a title and two lines.
-private struct PageFrame<Art: View>: View {
+/// Every page: an illustration on a soft glow, then a title and two lines. FirstTake uses it too.
+struct PageFrame<Art: View>: View {
     let title: String
     let text: String
     var note: String? = nil
@@ -452,6 +455,9 @@ private struct StartPage: View {
                 Text("Tell Takes your idea. It writes the script into a new session, and you read it on camera.")
                     .font(Theme.sans(14.5)).foregroundStyle(Theme.muted).multilineTextAlignment(.center)
                     .frame(maxWidth: 580)
+                Text(Onboarding.sessionLine)
+                    .font(Theme.sans(12.5)).foregroundStyle(Theme.faint).multilineTextAlignment(.center)
+                    .frame(maxWidth: 580)
             }
             .arrive(0)
             .padding(.bottom, 28)
@@ -586,7 +592,7 @@ private struct StartPage: View {
 
 /// PageMotion's arrive (blur, rise, fade), started when the page shows and slowed by the pace.
 /// `index` sets the order.
-private struct ArriveOnShow: ViewModifier {
+struct ArriveOnShow: ViewModifier {
     @Environment(\.accessibilityReduceMotion) var still
     let index: Int
     @State private var on = false
@@ -604,6 +610,6 @@ private struct ArriveOnShow: ViewModifier {
     }
 }
 
-private extension View {
+extension View {
     func arrive(_ index: Int) -> some View { modifier(ArriveOnShow(index: index)) }
 }

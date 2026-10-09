@@ -420,7 +420,7 @@ final class CopilotRunner: ObservableObject {
 
     private func start(ask: String, system: String) {
         guard let claude = Namer.claudePath else {
-            state = .failed("Can't find the claude command.", Date())
+            state = .failed("The chat is not set up yet. Click Finish setup in the sidebar.", Date())
             return
         }
         let p = Process()

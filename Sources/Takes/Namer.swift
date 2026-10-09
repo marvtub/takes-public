@@ -3,7 +3,7 @@ import Foundation
 /// Names sessions from their script. Tries fast hosted models first, in order:
 ///
 ///   1. DeepSeek Flash (api.deepseek.com)     DEEPSEEK_API_KEY     ~1s
-///   2. Gemini 3.8 Flash (Google AI)          GOOGLE_AI_API_KEY    ~0.8s
+///   2. Gemini 3.8 Flash (Google AI)          GEMINI_API_KEY       ~0.8s
 ///   3. The local `claude` CLI (Haiku)        slow: the CLI takes seconds to boot
 ///   4. The first words of the script
 ///
@@ -22,7 +22,7 @@ enum Namer {
         """
         let keys = Keys.load()
         if let k = keys["DEEPSEEK_API_KEY"], let t = clean(await deepSeek("deepseek-flash", prompt, key: k)) { return t }
-        if let k = keys["GOOGLE_AI_API_KEY"] ?? keys["GEMINI_API_KEY"],
+        if let k = keys["GEMINI_API_KEY"] ?? keys["GOOGLE_AI_API_KEY"],
            let t = clean(await gemini("gemini-3.8-flash", prompt, key: k)) { return t }
         if let t = clean(await askClaude(script: excerpt, project: project)) { return t }
         return fallback(text)

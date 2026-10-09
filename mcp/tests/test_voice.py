@@ -106,5 +106,17 @@ class Voice(unittest.TestCase):
             t.t_clean_voice({"session": self.s, "take": 7})
 
 
+    def test_script_ships_with_the_server(self):
+        # The public copy has no skill folder: the script next to takes_mcp.py must be there.
+        here = os.path.dirname(os.path.abspath(t.__file__))
+        self.assertTrue(os.path.exists(os.path.join(here, "clean_voice.py")))
+        old = os.environ.pop("TAKES_VOICE_SCRIPT", None)
+        try:
+            self.assertTrue(os.path.exists(t.voice_script()))
+        finally:
+            if old is not None:
+                os.environ["TAKES_VOICE_SCRIPT"] = old
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -43,7 +43,7 @@ final class AssetStore: ObservableObject {
     @Published private(set) var assets: [Asset] = []
     private(set) var url: URL?
     /// Files the script system and the take list own. Not shown here.
-    nonisolated static let skipFiles: Set<String> = ["script.md", "session.json", "SESSION.md", ".order.json", "hooks.json", "comments.json", "evergreen.json", "cuts.json"]
+    nonisolated static let skipFiles: Set<String> = ["script.md", "session.json", "SESSION.md", ".order.json", "hooks.json", "comments.json", "evergreen.json", "cuts.json", "plan.json"]
     nonisolated static let skipFolders: Set<String> = ["variants", "history", "comments", "posts", "voice", "storyboard"]
     /// Shown first, in this order. Other folders follow A–Z, loose files last.
     static let known = ["edits", "thumbnails", "stills", "assets", "takes"]
@@ -457,14 +457,16 @@ struct AssetsPane: View {
         }
         if a.kind == .video || a.kind == .image {
             // Puts the ask in the chat box; the user types what to change (2026-10-06).
-            // Images go to GPT Image directly, videos to Higgsfield.
-            Button(a.kind == .video ? "Change with Higgsfield…" : "Change Image…") {
-                let chat = app.chats.chat(doc.url)
-                chat.draft = a.kind == .video ? Higgsfield.changeDraft(a.rel) : Higgsfield.imageDraft(a.rel)
-                app.chats.open = true
+            // Images go to GPT Image directly, videos to Higgsfield (when its plugin is on).
+            if a.kind == .image || Plugins.isInstalled("higgsfield") {
+                Button(a.kind == .video ? "Change with Higgsfield…" : "Change Image…") {
+                    let chat = app.chats.chat(doc.url)
+                    chat.draft = a.kind == .video ? Higgsfield.changeDraft(a.rel) : Higgsfield.imageDraft(a.rel)
+                    app.chats.open = true
+                }
             }
         }
-        if a.kind == .video || a.kind == .audio {
+        if a.kind == .video || a.kind == .audio, Plugins.isInstalled("voices") {
             // ElevenLabs (2026-10-06): the ask goes in the chat box, the user finishes it.
             Button("Fix Words…") { draft(ElevenLabs.fixDraft(a.rel)) }
             Button("Change Voice…") { draft(ElevenLabs.voiceDraft(a.rel)) }

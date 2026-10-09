@@ -202,9 +202,30 @@ struct SetupButton: View {
     }
 }
 
-/// The three steps, each with its state and the button that does it.
+/// The three steps, each with its state and the button that does it, then the optional Gemini key.
 struct SetupPanel: View {
     var setup: Setup
+    @Environment(\.openSettings) private var openSettings
+    @State private var hasGemini = GeminiKey.found
+
+    /// Not a step: Takes works without it. It says what the key adds and opens Settings › Gemini.
+    private var gemini: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: hasGemini ? "checkmark.circle.fill" : "key")
+                .font(.system(size: 13)).foregroundStyle(hasGemini ? Theme.accent : Theme.faint)
+                .frame(width: 15).padding(.top, 1)
+            VStack(alignment: .leading, spacing: 3) {
+                Text("Optional: a Gemini key").font(Theme.sans(13, .medium)).foregroundStyle(Theme.ink)
+                Text("For storyboard sketches, B-roll names and best cuts. Everything else works without it.")
+                    .font(Theme.sans(12)).foregroundStyle(Theme.muted).fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 8)
+            Button(hasGemini ? "Details" : "Add Key") {
+                UserDefaults.standard.set(SettingsView.SettingsPage.gemini.rawValue, forKey: "settingsPage")
+                openSettings()
+            }
+        }
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -225,10 +246,12 @@ struct SetupPanel: View {
                      setup.ffmpeg, action: "Download", busy: "Downloading…", setup.installFFmpeg)
             }
             .padding(18)
+            Divider().overlay(Theme.border)
+            gemini.padding(.horizontal, 18).padding(.vertical, 14)
         }
         .frame(width: 400)
         .background(Theme.paper)
-        .task { await setup.check() }
+        .task { await setup.check(); hasGemini = GeminiKey.found }
     }
 
     private func step(_ title: String, _ detail: String, _ status: Setup.Status, action: String, busy: String,

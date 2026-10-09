@@ -1895,6 +1895,8 @@ struct GiantLogos: View {
 
 /// LinkedIn | X | YouTube | Vertical, then the sides a plugin adds. A dot marks the sides that have a post.
 struct PostSideSwitch: View {
+    /// The Plugins board can turn a plugin off: draw again without it.
+    @AppStorage(Plugins.removedKey) private var pluginsRemoved = ""
     var doc: SessionDoc
     /// The side on show: a platform's raw value or a plugin side's id.
     let current: String

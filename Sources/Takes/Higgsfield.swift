@@ -32,8 +32,25 @@ final class Higgsfield {
     func check() async {
         if case .working = state { return }
         guard let cli = Self.cli else { state = .missing; return }
-        let (ok, out) = await Task.detached(priority: .utility) { Setup.run(cli, ["account", "status"]) }.value
+        var (ok, out) = await Task.detached(priority: .utility) { Setup.run(cli, ["account", "status"]) }.value
+        // The sign-in leaves no workspace picked, and the button looped back to "Sign in" (2026-10-08).
+        // With one workspace, pick it; with more, the message says to pick one.
+        if !ok, out.lowercased().contains("no workspace selected") {
+            (ok, out) = await Task.detached(priority: .utility) {
+                let (_, list) = Setup.run(cli, ["workspace", "list", "--json"])
+                guard let id = Higgsfield.onlyWorkspace(list) else { return (false, out) }
+                _ = Setup.run(cli, ["workspace", "set", id])
+                return Setup.run(cli, ["account", "status"])
+            }.value
+        }
         state = Self.state(ok: ok, out: out)
+    }
+
+    /// The id from `higgsfield workspace list --json` when there is exactly one workspace.
+    nonisolated static func onlyWorkspace(_ json: String) -> String? {
+        guard let all = try? JSONSerialization.jsonObject(with: Data(json.utf8)) as? [[String: Any]],
+              all.count == 1 else { return nil }
+        return all[0]["id"] as? String
     }
 
     nonisolated static func state(ok: Bool, out: String) -> State {
@@ -115,18 +132,18 @@ final class Higgsfield {
     nonisolated static func imageDraft(_ rel: String) -> String { "Change \(rel) with make_image: " }
 }
 
-/// Takes › Settings › Higgsfield.
+/// Plugins › Higgsfield (Settings › Higgsfield until 2026-10-08). The board draws the title.
 struct HiggsfieldPage: View {
     private var hf = Higgsfield.shared
 
+    static let plugin = TakesPlugin(
+        id: "higgsfield", title: "Higgsfield", icon: "sparkles", key: " ",
+        help: "Make and change videos with AI: Seedance, Kling, Veo and 30+ more video models. Uses the credits of your Higgsfield plan.",
+        badge: { _ in AnyView(EmptyView()) }, board: nil,
+        settings: { _ in AnyView(HiggsfieldPage()) })
+
     var body: some View {
-        ScrollView {
             VStack(alignment: .leading, spacing: 22) {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("Higgsfield").font(Theme.display(26)).foregroundStyle(Theme.ink)
-                    Text("Make and change videos with AI, inside Takes: Seedance, Kling, Veo and 30+ more video models. Uses the credits of your Higgsfield plan.")
-                        .font(Theme.sans(12.5)).foregroundStyle(Theme.muted).fixedSize(horizontal: false, vertical: true)
-                }
                 account
                     .padding(16)
                     .background(RoundedRectangle(cornerRadius: 12).fill(Theme.paper))
@@ -140,8 +157,6 @@ struct HiggsfieldPage: View {
                         .font(Theme.sans(12)).foregroundStyle(Theme.faint)
                 }
             }
-            .padding(.horizontal, 32).padding(.vertical, 28)
-        }
         .task { await hf.check() }
     }
 

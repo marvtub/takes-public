@@ -77,7 +77,7 @@ class ElevenLabs(unittest.TestCase):
             os.environ.pop(k, None)
 
     def test_without_a_default_voice_it_says_where_to_pick_one(self):
-        with self.assertRaisesRegex(ValueError, "Settings › Voices"):
+        with self.assertRaisesRegex(ValueError, "Plugins › Voices"):
             t.t_voiceover({"session": self.s, "text": "Hi"})
 
     def test_a_voice_is_found_by_the_start_of_its_name_and_becomes_the_default(self):
@@ -173,7 +173,7 @@ class ElevenLabs(unittest.TestCase):
         home = os.environ.get("HOME")
         os.environ["HOME"] = self.root  # no ~/.claude/.env
         try:
-            with self.assertRaisesRegex(ValueError, "Settings › Voices"):
+            with self.assertRaisesRegex(ValueError, "Plugins › Voices"):
                 t.t_voices({"set_default": "x"})
         finally:
             os.environ["HOME"] = home

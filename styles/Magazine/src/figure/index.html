@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=1920, height=1080" />
+    <!-- Magazine figure page: running header with a hairline, a red FIG. kicker, a serif title, two
+         hairline bars with big serif numerals, and the source as a muted footnote. The accent goes on
+         the number that matters, nothing else. Edit FIG below. -->
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+    <style>
+      @font-face { font-family: "Instrument Serif"; src: url("../../fonts/InstrumentSerif-Regular.ttf"); font-weight: 400; }
+      @font-face { font-family: "Instrument Serif"; src: url("../../fonts/InstrumentSerif-Italic.ttf"); font-style: italic; font-weight: 400; }
+      @font-face { font-family: "Inter"; src: url("../../fonts/Inter-Regular.ttf"); font-weight: 400; }
+      @font-face { font-family: "Inter"; src: url("../../fonts/Inter-Medium.ttf"); font-weight: 500; }
+      @font-face { font-family: "Inter"; src: url("../../fonts/Inter-SemiBold.ttf"); font-weight: 600; }
+      :root { --paper: #f2ede3; --ink: #1a1814; --muted: #645d52; --rule: #cfc5b3; --accent: #b8322a;
+              --serif: "Instrument Serif", serif; --sans: "Inter", sans-serif; }
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      html, body { width: 1920px; height: 1080px; overflow: hidden; background: var(--paper); }
+      #root { position: relative; width: 100%; height: 100%; background: var(--paper); color: var(--ink); }
+      #grain { position: absolute; inset: 0; opacity: 0.08; mix-blend-mode: multiply;
+        background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='260' height='260'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' seed='3'/><feColorMatrix type='saturate' values='0'/></filter><rect width='260' height='260' filter='url(%23n)'/></svg>"); }
+      .label { font-family: var(--sans); font-weight: 500; font-size: 18px; letter-spacing: 0.2em; text-transform: uppercase; }
+      #head { position: absolute; left: 128px; right: 128px; top: 80px; display: flex; justify-content: space-between; color: var(--muted); padding-bottom: 14px; border-bottom: 1px solid var(--rule); }
+      #kicker { position: absolute; left: 128px; top: 210px; color: var(--accent); }
+      #title { position: absolute; left: 128px; top: 250px; font-family: var(--serif); font-size: 96px; line-height: 1; }
+      #title em { font-style: italic; }
+      #rows { position: absolute; left: 128px; right: 128px; top: 470px; }
+      .row { display: grid; grid-template-columns: 220px 1fr 380px; align-items: center; height: 170px; border-top: 1px solid var(--rule); }
+      .row .label { color: var(--muted); }
+      .bar { height: 3px; background: var(--ink); transform-origin: 0 50%; }
+      .num { font-family: var(--serif); font-size: 120px; line-height: 0.9; text-align: right; white-space: nowrap; }
+      .hot .bar, .hot .num { background-color: transparent; color: var(--accent); }
+      .hot .bar { background: var(--accent); }
+      #foot { position: absolute; left: 128px; bottom: 80px; font-family: var(--sans); font-size: 19px; color: var(--muted); }
+    </style>
+  </head>
+  <body>
+    <div id="root" data-composition-id="main" data-start="0" data-duration="5" data-width="1920" data-height="1080">
+      <div id="grain"></div>
+      <div id="head" class="label"><span id="topic"></span><span id="page"></span></div>
+      <div id="kicker" class="label"></div>
+      <div id="title"></div>
+      <div id="rows"></div>
+      <div id="foot"></div>
+    </div>
+    <script>
+      // value: the bar's length is value / max. hot: the row that gets the accent.
+      const FIG = {
+        topic: "Video, by hand", page: "12", kicker: "Fig. 1 — Time for one video",
+        title: "From an afternoon <em>to a coffee.</em>",
+        rows: [{ label: "Before", value: 120, text: "2 h" }, { label: "Now", value: 25, text: "25 min", hot: true }],
+        source: "Source: one creator's own log, 20 videos.",
+      };
+
+      document.getElementById("topic").textContent = FIG.topic;
+      document.getElementById("page").textContent = FIG.page;
+      document.getElementById("kicker").textContent = FIG.kicker;
+      document.getElementById("title").innerHTML = FIG.title;
+      document.getElementById("foot").textContent = FIG.source;
+      const max = Math.max(...FIG.rows.map(r => r.value));
+      const rows = document.getElementById("rows");
+      FIG.rows.forEach(r => {
+        const el = document.createElement("div"); el.className = "row" + (r.hot ? " hot" : "");
+        el.innerHTML = '<span class="label"></span><div><div class="bar"></div></div><span class="num"></span>';
+        el.querySelector(".label").textContent = r.label;
+        el.querySelector(".bar").style.width = (100 * r.value / max) + "%";
+        el.querySelector(".num").textContent = r.text;
+        rows.appendChild(el);
+      });
+
+      window.__timelines = window.__timelines || {};
+      const tl = gsap.timeline({ paused: true });
+      const rise = { opacity: 1, y: 0, filter: "blur(0px)", duration: 0.4, ease: "power3.out" };
+      // The page cuts in whole; only the figure moves: each bar draws, then its number lands.
+      gsap.set([".bar"], { scaleX: 0 });
+      gsap.set([".num"], { opacity: 0, y: 30, filter: "blur(12px)" });
+      document.querySelectorAll(".row").forEach((row, i) => {
+        const t = 0.5 + i * 0.6;
+        tl.to(row.querySelector(".bar"), { scaleX: 1, duration: 0.7, ease: "power3.out" }, t);
+        tl.to(row.querySelector(".num"), rise, t + 0.35);
+      });
+      tl.set({}, {}, 5);
+      window.__timelines["main"] = tl;
+      tl.seek(0);
+    </script>
+  </body>
+</html>

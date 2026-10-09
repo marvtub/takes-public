@@ -77,10 +77,19 @@ enum SessionView {
 
     static func read(_ session: URL) -> (mode: SessionMode, file: URL?, time: Double?) {
         let all = UserDefaults.standard.dictionary(forKey: key) ?? [:]
-        guard let v = all[session.standardizedFileURL.path] as? [String: Any] else { return (.record, nil, nil) }
+        // A session never shown here opens where its session.json says ("opens": {"tab", "file"}),
+        // so the demo session starts on its finished edit, not on a dark camera (2026-10-08).
+        guard let v = all[session.standardizedFileURL.path] as? [String: Any] ?? opens(session)
+        else { return (.record, nil, nil) }
         let mode = SessionMode(rawValue: v["tab"] as? String ?? "") ?? .record
         let file = (v["file"] as? String).map { $0.hasPrefix("/") ? URL(fileURLWithPath: $0) : session.appending(path: $0) }
         return (mode, file, v["time"] as? Double)
+    }
+
+    static func opens(_ session: URL) -> [String: Any]? {
+        guard let data = try? Data(contentsOf: session.appending(path: "session.json")),
+              let doc = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+        return doc["opens"] as? [String: Any]
     }
 
     static func write(_ session: URL, mode: SessionMode, file: URL?, time: Double?) {
@@ -139,7 +148,9 @@ struct Sidebar: View {
             }
             .padding(.horizontal, 10).padding(.bottom, 10)
             SessionList(library: library, queue: app.posts, filter: find)
-            Rule()
+            FirstVideoGuide()
+                .animation(Theme.spring, value: FirstTake.shared.guide)
+            Rule().padding(.top, FirstTake.shared.guide == nil ? 0 : 8)
             VStack(spacing: 1) {
                 BoardRows()
                 SideRow(selected: app.board == .styles) {
@@ -147,6 +158,11 @@ struct Sidebar: View {
                 }
                 .onTapGesture { app.board = .styles }
                 .help("Your styles side by side, the one this video uses, and the parts Takes kept")
+                SideRow(selected: app.board == .plugins) {
+                    NavLabel(icon: "puzzlepiece.extension", title: "Plugins", key: "⇧⌘P", active: app.board == .plugins)
+                }
+                .onTapGesture { app.board = .plugins }
+                .help("Turn plugins on and off, and set them up: Higgsfield, Voices and more")
             }
             .padding(.horizontal, 10).padding(.top, 8).padding(.bottom, 10)
         }

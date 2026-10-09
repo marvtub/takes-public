@@ -85,10 +85,41 @@ final class NotchPanel {
 
     var shown: Bool { panel?.isVisible == true }
 
-    func toggle(_ app: AppModel) { shown ? hide() : show(app) }
+    /// Record opens the notch by itself (2026-10-08: a new user never found it). Closing it
+    /// turns that off; opening it again turns it back on.
+    static let autoKey = "notchOnRecord"
+    static var auto: Bool { UserDefaults.standard.object(forKey: autoKey) as? Bool ?? true }
+    /// Record opened it, not you: it closes again when you leave Record.
+    private(set) var autoOpened = false
+
+    /// The menu item and the bar button: what you pick is what Record does next time.
+    func toggle(_ app: AppModel) {
+        UserDefaults.standard.set(!shown, forKey: Self.autoKey)
+        shown ? hide() : show(app)
+    }
+
+    /// The panel's close button and "Show the script here instead".
+    func close() {
+        UserDefaults.standard.set(false, forKey: Self.autoKey)
+        hide()
+    }
+
+    /// Record with a script shows (`on`) or goes away. Opens the notch if you have not turned that
+    /// off, and closes it on the way out only if it opened it, and never during a take. Not under tests:
+    /// the window pictures show Record with its own prompter.
+    func follow(record on: Bool, _ app: AppModel) {
+        if on {
+            guard Self.auto, !shown, !AppModel.testing else { return }
+            show(app)
+            autoOpened = true
+        } else if autoOpened, shown, !app.isRecording {
+            hide()
+        }
+    }
 
     func show(_ app: AppModel) {
         self.app = app
+        autoOpened = false
         // One prompter at a time: Record puts a small stand-in where the big script was.
         app.notchOpen = true
         let p = panel ?? make()
@@ -105,6 +136,7 @@ final class NotchPanel {
     }
 
     func hide() {
+        autoOpened = false
         panel?.orderOut(nil)
         app?.notchOpen = false
         app?.notchTour = false
@@ -131,7 +163,7 @@ final class NotchPanel {
         // The tour needs five lines of room; the panel goes back to your size after it.
         if UserDefaults.standard.integer(forKey: NotchView.introKey) < NotchView.intro.count { lines = max(lines, 5) }
         let layout = NotchLayout.make(for: screen, body: Self.body(lines: lines))
-        panel.contentView = NSHostingView(rootView: NotchView(layout: layout, glow: glow, close: { [weak self] in self?.hide() }).environment(app))
+        panel.contentView = NSHostingView(rootView: NotchView(layout: layout, glow: glow, close: { [weak self] in self?.close() }).environment(app))
         // Clear room round the sides and the bottom for the glow. Clicks there go to the app under it.
         let m = NotchView.margin
         let f = layout.frame

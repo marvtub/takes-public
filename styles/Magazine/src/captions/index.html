@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=1920, height=1080" />
+    <!-- Magazine captions: Inter 600, sentence case, left-aligned, one phrase at a time (26 characters
+         or fewer). Karaoke: each word goes from 40% to 100% opacity on its spoken time. No box, no
+         highlight colour. Put your clip next to this file as footage.mp4 and the words with their
+         start times (from the transcript) in WORDS. -->
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+    <style>
+      @font-face { font-family: "Instrument Serif"; src: url("../../fonts/InstrumentSerif-Regular.ttf"); font-weight: 400; }
+      @font-face { font-family: "Instrument Serif"; src: url("../../fonts/InstrumentSerif-Italic.ttf"); font-style: italic; font-weight: 400; }
+      @font-face { font-family: "Inter"; src: url("../../fonts/Inter-Regular.ttf"); font-weight: 400; }
+      @font-face { font-family: "Inter"; src: url("../../fonts/Inter-Medium.ttf"); font-weight: 500; }
+      @font-face { font-family: "Inter"; src: url("../../fonts/Inter-SemiBold.ttf"); font-weight: 600; }
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      html, body { width: 1920px; height: 1080px; overflow: hidden; background: #1a1814; }
+      #root { position: relative; width: 100%; height: 100%; overflow: hidden; }
+      #footage { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+      .cp { position: absolute; left: 128px; bottom: 110px; font-family: "Inter", sans-serif; font-weight: 600; font-size: 60px;
+            line-height: 1.2; color: #fff; text-shadow: 0 2px 14px rgba(0, 0, 0, 0.6); white-space: nowrap; }
+      .cp .w { display: inline-block; margin-right: 0.26em; }
+    </style>
+  </head>
+  <body>
+    <div id="root" data-composition-id="main" data-start="0" data-duration="6" data-width="1920" data-height="1080">
+      <video id="footage" src="footage.mp4" data-start="0" data-duration="6" data-track-index="0" muted playsinline></video>
+    </div>
+    <script>
+      // [word, start second]. A phrase ends after a word that ends in . , ? ! or when the next
+      // word would pass MAX characters.
+      const WORDS = [["Most", 0.3], ["people", 0.55], ["never", 0.9], ["edit.", 1.25], ["They", 1.9], ["record", 2.1],
+                     ["once,", 2.5], ["and", 2.95], ["post", 3.15], ["it", 3.4], ["as", 3.55], ["it", 3.7], ["is.", 3.85]];
+      const MAX = 26, END = 5.6;
+
+      const phrases = [];
+      let cur = [];
+      WORDS.forEach((w, i) => {
+        const len = cur.map(x => x[0]).join(" ").length;
+        if (cur.length && len + 1 + w[0].length > MAX) { phrases.push(cur); cur = []; }
+        cur.push(w);
+        if (/[.,?!]$/.test(w[0])) { phrases.push(cur); cur = []; }
+      });
+      if (cur.length) phrases.push(cur);
+
+      window.__timelines = window.__timelines || {};
+      const tl = gsap.timeline({ paused: true });
+      const root = document.getElementById("root");
+      phrases.forEach((p, k) => {
+        const el = document.createElement("div"); el.className = "cp"; root.appendChild(el);
+        const spans = p.map(([w]) => { const s = document.createElement("span"); s.className = "w"; s.textContent = w; el.appendChild(s); return s; });
+        const from = p[0][1], to = k + 1 < phrases.length ? phrases[k + 1][0][1] : END;
+        gsap.set(el, { opacity: 0 });
+        gsap.set(spans, { opacity: 0.4 });
+        tl.fromTo(el, { opacity: 0, y: 8 }, { opacity: 1, y: 0, duration: 0.18, ease: "power2.out", immediateRender: false }, from - 0.05);
+        spans.forEach((s, i) => tl.set(s, { opacity: 1 }, p[i][1]));
+        tl.set(el, { opacity: 0 }, to - 0.05);
+      });
+      tl.set({}, {}, 6);
+      window.__timelines["main"] = tl;
+      tl.seek(0);
+    </script>
+  </body>
+</html>

@@ -42,6 +42,7 @@ struct SessionMeta: Codable, Equatable {
     var sfx: [EffectCue]?  // sound effects placed on a video at a second (Sounds.swift)
     var style: String?  // the style this video uses (StyleLibrary.swift); nil = its project's
     var archived: Bool?  // out of the way: in the closed group at the bottom (phone swipe, sidebar menu)
+    var opens: [String: String]?  // first open: {"tab": "assets", "file": "edits/x.mp4"} (SessionView.read)
 }
 
 struct Project: Identifiable, Hashable {

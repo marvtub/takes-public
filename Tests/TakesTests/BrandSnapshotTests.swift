@@ -125,10 +125,6 @@ struct BrandSnapshotTests {
                 .environment(\.colorScheme, name == "dark" ? .dark : .light)
             let host = NSHostingView(rootView: v)
             host.appearance = NSAppearance(named: appearance)
-            // The list measures its changes after the first layout: fit again after that.
-            host.frame = NSRect(origin: .zero, size: host.fittingSize)
-            host.layoutSubtreeIfNeeded()
-            RunLoop.main.run(until: Date().addingTimeInterval(0.2))
             let size = host.fittingSize
             host.frame = NSRect(origin: .zero, size: size)
             let win = NSWindow(contentRect: NSRect(x: -3000, y: -3000, width: size.width, height: size.height), styleMask: .borderless, backing: .buffered, defer: false)

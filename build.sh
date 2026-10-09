@@ -31,6 +31,7 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp .build/release/Takes "$APP/Contents/MacOS/Takes"
 cp mcp/takes_mcp.py "$APP/Contents/Resources/takes_mcp.py"
+cp mcp/clean_voice.py "$APP/Contents/Resources/clean_voice.py"
 cp assets/Takes.icns "$APP/Contents/Resources/Takes.icns"
 mkdir -p "$APP/Contents/Resources/Fonts" && cp assets/fonts/*.ttf "$APP/Contents/Resources/Fonts/"
 mkdir -p "$APP/Contents/Resources/Onboarding" && cp assets/onboarding/creator.jpg "$APP/Contents/Resources/Onboarding/"
@@ -54,6 +55,16 @@ else
 fi
 # Skills for Claude Code that the app installs at launch (the public copy ships them in skills/).
 [[ -d skills ]] && cp -R skills "$APP/Contents/Resources/skills"
+# Default styles, copied into the library at launch (StyleLib.seed). Only what a style needs.
+if [[ -d styles ]]; then
+  mkdir -p "$APP/Contents/Resources/styles"
+  rsync -a --exclude 'snapshots/' --exclude 'renders/' --exclude 'footage.mp4' --exclude 'node_modules/' styles/ "$APP/Contents/Resources/styles/"
+fi
+# The skills the Skills plugin offers (private for now): Takes' own and those in plugins/skills.
+if [[ -d plugins/skills ]]; then
+  mkdir -p "$APP/Contents/Resources/plugin-skills"
+  for d in scripts/public/skills/*/ plugins/skills/*/; do [[ -f "$d/SKILL.md" ]] && cp -R "${d%/}" "$APP/Contents/Resources/plugin-skills/"; done
+fi
 # The stamp tells a running Takes that a staged build is new; the changes go in the Update tooltip.
 INSTALLED="$HOME/Applications/Takes.app"
 STAMP="$(git rev-parse --short HEAD)$(git diff --quiet HEAD -- Sources Package.swift 2>/dev/null || echo +) $(date '+%b %-d %H:%M')"

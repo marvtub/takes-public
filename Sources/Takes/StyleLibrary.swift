@@ -95,6 +95,35 @@ enum StyleLib {
         return (try? JSONSerialization.jsonObject(with: d)) as? [String: Any] ?? [:]
     }
 
+    /// The styles Takes ships, in the app's Resources/styles (2026-10-08: a new user saw an empty
+    /// Styles board). Each is copied into the library once. A style of the same name that is already
+    /// there stays as it is, and one you delete does not come back: "seededStyles" remembers, per
+    /// library folder. Returns the names it copied.
+    static let seededKey = "seededStyles"
+
+    @discardableResult
+    static func seed(from shipped: URL, root: URL, defaults: UserDefaults = .standard) -> [String] {
+        let fm = FileManager.default
+        let names = ((try? fm.contentsOfDirectory(at: shipped, includingPropertiesForKeys: nil, options: .skipsHiddenFiles)) ?? [])
+            .filter(\.hasDirectoryPath).map(\.lastPathComponent).sorted()
+        guard !names.isEmpty else { return [] }
+        let key = root.standardizedFileURL.path
+        var all = defaults.dictionary(forKey: seededKey) as? [String: [String]] ?? [:]
+        var done = Set(all[key] ?? [])
+        var copied: [String] = []
+        try? fm.createDirectory(at: styles(root: root), withIntermediateDirectories: true)
+        for n in names where !done.contains(n) {
+            let dest = style(n, root: root)
+            if !fm.fileExists(atPath: dest.path), (try? fm.copyItem(at: shipped.appending(path: n), to: dest)) != nil {
+                copied.append(n)
+            }
+            done.insert(n)
+        }
+        all[key] = done.sorted()
+        defaults.set(all, forKey: seededKey)
+        return copied
+    }
+
     /// He keeps a new style: it loses its "New" mark.
     static func keep(_ name: String, root: URL) {
         let url = style(name, root: root).appending(path: "style.json")
@@ -337,6 +366,13 @@ struct StylesBoard: View {
     @State private var projects: [URL] = []
     @State private var asking = false
     @State private var example = ""
+    /// When "Make it" was clicked (seconds since 1970), 0 when no style is being made. Kept so the
+    /// Making card comes back when you leave the board and return.
+    @AppStorage("styleMakingSince") private var makingSince: Double = 0
+    /// The style being made, checked on file changes, chat changes and every few seconds.
+    @State private var making: Making?
+    /// When the Styles chat last went idle while a style was being made.
+    @State private var idleSince: Date?
 
     private var openDir: URL? { opened ?? names.first.map { StyleLib.style($0, root: root) } }
     private var openName: String? { openDir.map { dir in
@@ -373,6 +409,20 @@ struct StylesBoard: View {
         .onChange(of: opened) { scan() }
         .onFilesChanged(in: StyleLib.user(root: root)) { if !app.isRecording { scan() } }
         .onExitCommand { app.styleFile = nil }
+        .onDrop(of: [.fileURL], isTargeted: nil) { providers in
+            NewStyleSheet.paths(from: providers) { example += (example.isEmpty ? "" : " ") + $0 }
+            asking = true
+            return true
+        }
+        .onChange(of: app.chats.styles.running) { checkMaking(); scan() }
+        // A chat that fails at once changes nothing on disk: look again every few seconds.
+        .task(id: makingSince) {
+            while makingSince > 0 && !Task.isCancelled {
+                checkMaking()
+                try? await Task.sleep(for: .seconds(4))
+            }
+            checkMaking()
+        }
     }
 
     /// A file opened from elsewhere (a link, get_library): open its library too.
@@ -408,7 +458,10 @@ struct StylesBoard: View {
             Button { asking = true } label: { Label("New style", systemImage: "plus") }
                 .buttonStyle(AccentButtonStyle(kind: .quiet))
                 .help("Takes makes a new style from your example: a link, a video, an image, or words")
-                .popover(isPresented: $asking, arrowEdge: .bottom) { examplePopover }
+                .sheet(isPresented: $asking) {
+                    NewStyleSheet(example: $example, busy: makingSince > 0, steps: Self.steps,
+                                  make: make, cancel: { asking = false })
+                }
         }
     }
 
@@ -416,8 +469,85 @@ struct StylesBoard: View {
 
     private var gallery: some View {
         LazyVGrid(columns: [GridItem(.adaptive(minimum: 180, maximum: 240), spacing: 20)], alignment: .leading, spacing: 24) {
-            ForEach(cards) { c in card(c) }
+            if let m = making { makingCard(m) }
+            ForEach(cards.filter { $0.name != making?.name }) { c in card(c) }
         }
+    }
+
+    // MARK: Making
+
+    /// The style Takes is making now: its name once the folder is there, and the step it is on.
+    struct Making: Equatable {
+        var name: String?
+        var step: Int       // 1 studies the example, 2 writes the style, 3 makes the preview
+        var stopped: Bool
+    }
+
+    /// The newest style made since `since` and the step it is on. create_style always makes a new
+    /// folder, so its creation date finds it. Step 2 starts with the folder, step 3 when a motion
+    /// part is kept (the parts come after the guide and tokens; the preview is last).
+    nonisolated static func progress(root: URL, since: Date) -> (name: String?, step: Int) {
+        let fm = FileManager.default
+        let fresh = StyleLib.styleNames(root: root).first { n in
+            let made = (try? StyleLib.style(n, root: root).resourceValues(forKeys: [.creationDateKey]))?.creationDate
+            return made.map { $0 >= since.addingTimeInterval(-2) } ?? false
+        }
+        guard let fresh else { return (nil, 1) }
+        let motion = StyleLib.style(fresh, root: root).appending(path: "assets/Motion")
+        let parts = ((try? fm.contentsOfDirectory(atPath: motion.path)) ?? []).filter { !$0.hasPrefix(".") }
+        return (fresh, parts.isEmpty ? 2 : 3)
+    }
+
+    private func checkMaking() {
+        guard makingSince > 0 else {
+            if making != nil { making = nil }
+            idleSince = nil
+            return
+        }
+        let since = Date(timeIntervalSince1970: makingSince)
+        let found = Self.progress(root: root, since: since)
+        // The chat goes idle for a moment between a run and a queued message: stopped only after it
+        // has been idle a few seconds, and never in the first 15 (the chat may not have started).
+        if app.chats.styles.running { idleSince = nil } else if idleSince == nil { idleSince = Date() }
+        let stopped = idleSince.map { Date().timeIntervalSince($0) > 5 } == true && Date().timeIntervalSince(since) > 15
+        let m = Making(name: found.name, step: found.step, stopped: stopped)
+        if m != making { making = m }
+    }
+
+    static let steps = ["Takes studies the example", "Takes writes the style guide, the colours and the fonts",
+                        "Takes builds a title card and captions, then makes a preview on a sample clip"]
+
+    private func makingCard(_ m: Making) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            VStack(alignment: .leading, spacing: 12) {
+                if m.stopped {
+                    Image(systemName: "pause.circle").font(.system(size: 22)).foregroundStyle(Theme.faint)
+                    Text("Takes stopped before the preview.").font(Theme.sans(12.5, .medium)).foregroundStyle(Theme.ink)
+                    HStack(spacing: 8) {
+                        Button("Open the chat") { app.chats.open = true }.buttonStyle(AccentButtonStyle(kind: .quiet))
+                        Button("Close") { makingSince = 0; checkMaking() }.buttonStyle(BracketButtonStyle(active: false))
+                    }
+                } else {
+                    ProgressView().controlSize(.small)
+                    Text("Step \(m.step) of 3").font(Theme.sans(11.5, .medium)).foregroundStyle(Theme.accent)
+                    Text(Self.steps[m.step - 1]).font(Theme.sans(12.5)).foregroundStyle(Theme.ink)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Text("You can keep working. The card shows the style when it is ready.")
+                        .font(Theme.sans(11.5)).foregroundStyle(Theme.faint)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .padding(16)
+            .frame(maxWidth: .infinity, alignment: .leading).aspectRatio(4.0 / 5.0, contentMode: .fit)
+            .background(Theme.surface, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .strokeBorder(Theme.accent.opacity(m.stopped ? 0 : 0.6), style: StrokeStyle(lineWidth: 1.5, dash: [5, 4])))
+            Text(m.name ?? "New style").font(Theme.display(15)).foregroundStyle(Theme.ink).lineLimit(1)
+            Text(m.stopped ? "Not finished" : "Making…").font(Theme.sans(11.5)).foregroundStyle(Theme.faint)
+        }
+        .contentShape(Rectangle())
+        .onTapGesture { app.chats.open = true }
+        .help("Takes makes this style in the Styles chat. Click to open the chat.")
     }
 
     /// A style: its preview, its name, and the videos that use it. The rest is in the tooltip.
@@ -489,33 +619,6 @@ struct StylesBoard: View {
         }
     }
 
-    private var examplePopover: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("New style from an example").font(Theme.sans(13, .semibold))
-            Text("Paste a link, drop a video or an image, or describe the look.")
-                .font(Theme.sans(11.5)).foregroundStyle(Theme.muted)
-            TextField("https://… or “big yellow captions, black cards”", text: $example, axis: .vertical)
-                .lineLimit(2...5).textFieldStyle(.roundedBorder).frame(width: 320)
-                .onSubmit(make)
-            HStack {
-                Spacer()
-                Button("Cancel") { asking = false }.buttonStyle(AccentButtonStyle(kind: .quiet))
-                Button("Make it", action: make).buttonStyle(AccentButtonStyle(kind: .solid))
-                    .disabled(example.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-            }
-        }
-        .padding(14)
-        .onDrop(of: [.fileURL], isTargeted: nil) { providers in
-            for p in providers {
-                _ = p.loadObject(ofClass: URL.self) { url, _ in
-                    guard let url else { return }
-                    Task { @MainActor in example += (example.isEmpty ? "" : " ") + url.path }
-                }
-            }
-            return true
-        }
-    }
-
     private var projectList: some View {
         VStack(alignment: .leading, spacing: 8) {
             SectionLabel(text: "looks only one project has")
@@ -548,6 +651,17 @@ struct StylesBoard: View {
         """)
         example = ""
         asking = false
+        makingSince = Date().timeIntervalSince1970
+        checkMaking()
+    }
+
+    /// The new style has its preview: the Making card becomes the style's own card.
+    private func finishMaking(_ found: [StyleCard]) {
+        guard let name = making?.name, let c = found.first(where: { $0.name == name }), c.video != nil else { return }
+        makingSince = 0
+        checkMaking()
+        opened = StyleLib.style(name, root: root)
+        app.show(toast: "\(name) is ready")
     }
 
     static func previewAsk(_ name: String) -> String {
@@ -557,7 +671,6 @@ struct StylesBoard: View {
     private func ask(_ text: String) {
         app.chats.styles.send(text, title: "Styles", onStage: nil)
         app.chats.open = true
-        app.show(toast: "Sent to Takes")
     }
 
     private func trash(_ c: StyleCard) {
@@ -578,6 +691,7 @@ struct StylesBoard: View {
                 return items.contains { $0 != "project.json" && !$0.hasPrefix(".") }
             }
             .sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
+        checkMaking()
         if let openDir {
             store.scan(openDir)
             comments.load(openDir)
@@ -586,6 +700,7 @@ struct StylesBoard: View {
         Task {
             let found = await Task.detached(priority: .utility) { StyleLib.cards(root: r) }.value
             if found != cards { cards = found }
+            finishMaking(found)
         }
     }
 
@@ -1173,5 +1288,107 @@ private struct StylePlayerLayer: NSViewRepresentable {
     }
     func updateNSView(_ v: NSView, context: Context) {
         (v.layer as? AVPlayerLayer)?.player = player
+    }
+}
+
+/// "New style": a drop area, a field for a link or words, a few ideas, and, the first time, what
+/// happens after Make it.
+struct NewStyleSheet: View {
+    @Binding var example: String
+    /// A style is being made: one at a time.
+    let busy: Bool
+    let steps: [String]
+    let make: () -> Void
+    let cancel: () -> Void
+    /// The sheet explained what happens once. After that it shows the steps only on a click.
+    @AppStorage("styleSheetSeen") private var seen = false
+    @State private var showSteps = false
+
+    private static let ideas = ["Yellow captions, black cards", "Magazine, serif titles", "Fast cuts, bold words"]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("New style").font(Theme.display(22)).foregroundStyle(Theme.ink)
+                Text("Show Takes a look you like. Takes turns it into a style that every video can use.")
+                    .font(Theme.sans(12.5)).foregroundStyle(Theme.muted)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            VStack(spacing: 8) {
+                Image(systemName: "square.and.arrow.down").font(.system(size: 20)).foregroundStyle(Theme.faint)
+                Text("Drop a video or an image here").font(Theme.sans(12.5, .medium)).foregroundStyle(Theme.ink)
+                Text("or paste a link to a reel, a TikTok or a YouTube video below")
+                    .font(Theme.sans(11.5)).foregroundStyle(Theme.faint)
+            }
+            .frame(maxWidth: .infinity).padding(.vertical, 22)
+            .background(Theme.surface, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .strokeBorder(Theme.border, style: StrokeStyle(lineWidth: 1.5, dash: [6, 5])))
+            .onDrop(of: [.fileURL], isTargeted: nil) { providers in
+                Self.paths(from: providers) { example += (example.isEmpty ? "" : " ") + $0 }
+                return true
+            }
+            TextField("https://… or describe the look", text: $example, axis: .vertical)
+                .lineLimit(2...5).textFieldStyle(.roundedBorder)
+                .onSubmit(submit)
+            HStack(spacing: 6) {
+                Text("Or try").font(Theme.sans(11.5)).foregroundStyle(Theme.faint)
+                ForEach(Self.ideas, id: \.self) { idea in
+                    Button(idea) { example = idea }.buttonStyle(.plain)
+                        .font(Theme.sans(11.5)).foregroundStyle(Theme.muted)
+                        .padding(.horizontal, 8).padding(.vertical, 3)
+                        .background(Theme.hover, in: Capsule())
+                }
+            }
+            if !seen || showSteps {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("What happens next").font(Theme.sans(12, .semibold)).foregroundStyle(Theme.ink)
+                    ForEach(Array(steps.enumerated()), id: \.offset) { i, step in
+                        HStack(alignment: .firstTextBaseline, spacing: 8) {
+                            Text("\(i + 1)").font(Theme.sans(11, .bold)).foregroundStyle(Theme.accent)
+                                .frame(width: 18, height: 18).background(Theme.accentSoft, in: Circle())
+                            Text(step).font(Theme.sans(12)).foregroundStyle(Theme.muted)
+                        }
+                    }
+                    Text("This runs in the Styles chat. You can keep working while it runs. Then comment on the preview and Takes changes the style.")
+                        .font(Theme.sans(11.5)).foregroundStyle(Theme.faint)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(12)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Theme.surface, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            }
+            HStack {
+                if seen && !showSteps {
+                    Button("What happens next?") { showSteps = true }.buttonStyle(.plain)
+                        .font(Theme.sans(12)).foregroundStyle(Theme.muted)
+                }
+                Spacer()
+                Button("Cancel", action: cancel).buttonStyle(AccentButtonStyle(kind: .quiet))
+                    .keyboardShortcut(.cancelAction)
+                Button("Make it", action: submit).buttonStyle(AccentButtonStyle(kind: .accent))
+                    .disabled(example.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || busy)
+                    .help(busy ? "Takes is making a style. Wait until it is ready." : "")
+            }
+        }
+        .padding(22)
+        .frame(width: 500)
+        .background(Theme.paper)
+    }
+
+    private func submit() {
+        guard !busy, !example.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        seen = true
+        make()
+    }
+
+    /// Dropped files as paths, one call each.
+    static func paths(from providers: [NSItemProvider], _ add: @escaping @MainActor (String) -> Void) {
+        for p in providers {
+            _ = p.loadObject(ofClass: URL.self) { url, _ in
+                guard let url else { return }
+                Task { @MainActor in add(url.path) }
+            }
+        }
     }
 }

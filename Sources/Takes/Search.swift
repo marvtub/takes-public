@@ -388,7 +388,7 @@ final class MediaSearch {
         guard !words.isEmpty else { return [] }
         let lib = app.library
         var rows: [(Hit, String)] = []
-        var boards: [(String, AppModel.Board)] = [("Styles", .styles)]
+        var boards: [(String, AppModel.Board)] = [("Styles", .styles), ("Plugins", .plugins)]
         if Features.socialBoards { boards = [("Performance", .performance), ("Comments", .comments)] + boards }
         boards += Plugins.boards.map { ($0.title, .plugin($0.id)) }
         for (t, b) in boards {

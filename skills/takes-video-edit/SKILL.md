@@ -43,6 +43,13 @@ Use the `takes` MCP, not file guessing.
    ("where I talk about pricing"). Hits have `path` and, for video and speech, `at` in seconds.
    Use it for b-roll and cutaways before you ask the user to film something.
 
+## Cut a talking-head video
+
+Every take has a transcript with word times (`get_session` → each take's `said` and
+`transcript`, a `.words.json` file). Cut at word edges with ffmpeg (below): start a little before
+the first word, end a little after the last. Write each version to `edits/<name>-vN.mp4`, then
+look at stills of it.
+
 ## Voice
 
 Call `clean_voice` with `session` and `take` (optional `strength` 0–1, `loudness` `normal`
@@ -56,7 +63,7 @@ Keep every intermediate audio file as float WAV (`pcm_f32le`). Integer WAVs clip
 
 ## New words, voice-over, other voices (ElevenLabs)
 
-These tools need an ElevenLabs key in Takes › Settings › Voices. When a tool says there is no key,
+These tools need an ElevenLabs key in Takes › Plugins › Voices. When a tool says there is no key,
 tell the user to open that page. Each call costs ElevenLabs characters (about one per letter), so
 make one call per ask.
 

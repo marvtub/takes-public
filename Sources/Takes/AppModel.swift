@@ -119,10 +119,10 @@ final class AppModel {
             holdCamera()
         }
     }
-    /// A board (performance, comments, styles, or a plugin's: Plugins.swift) fills the window in
-    /// place of the sessions. Like the post tab, it hides the camera and the player. It stays shut
-    /// while a take records.
-    enum Board: Equatable { case performance, comments, styles, plugin(String) }
+    /// A board (performance, comments, styles, the plugins, or a plugin's own: Plugins.swift) fills
+    /// the window in place of the sessions. Like the post tab, it hides the camera and the player.
+    /// It stays shut while a take records.
+    enum Board: Equatable { case performance, comments, styles, plugins, plugin(String) }
     var board: Board? {
         didSet {
             if board != nil && isRecording { board = nil; return }
@@ -130,6 +130,11 @@ final class AppModel {
             if board != nil { player?.pause() }
             holdCamera()
         }
+    }
+    /// The Plugins board with one plugin picked (✦ on a shot before Higgsfield is set up).
+    func openPlugin(_ id: String) {
+        UserDefaults.standard.set(id, forKey: Plugins.pickedKey)
+        board = .plugins
     }
     /// Opens the board, or shuts it when it is already open.
     func toggle(_ b: Board) {
@@ -234,6 +239,13 @@ final class AppModel {
         SessionView.write(s, mode: tab, file: preview, time: t.flatMap { $0.isFinite ? $0 : nil })
     }
 
+    /// Copies the styles the app ships into the library (StyleLib.seed), off the main thread.
+    nonisolated static func seedStyles(_ root: URL) {
+        guard !testing else { return }
+        let shipped = Bundle.main.bundleURL.appending(path: "Contents/Resources/styles")
+        Task.detached(priority: .utility) { StyleLib.seed(from: shipped, root: root) }
+    }
+
     /// Running under swift test (Swift Testing loads no XCTestCase, so that check missed it).
     nonisolated static let testing = NSClassFromString("XCTestCase") != nil
         || ProcessInfo.processInfo.processName.contains("swiftpm-testing-helper")
@@ -301,7 +313,8 @@ final class AppModel {
         // Changes Claude makes through the MCP server show up without a click: FSEvents tells us,
         // so an idle app does no disk work at all.
         watch.watch(library.root)
-        library.onRoot = { [weak self] url in self?.watch.watch(url) }
+        library.onRoot = { [weak self] url in self?.watch.watch(url); Self.seedStyles(url) }
+        Self.seedStyles(library.root)
         monitors.append(NotificationCenter.default.addObserver(
             forName: .takesFilesChanged, object: nil, queue: .main
         ) { [weak self] note in
@@ -586,7 +599,8 @@ final class AppModel {
                               hook: shot == nil ? HookStore.current(doc.activeText, HookStore.read(doc.url).hooks)?.text : nil,
                               shot: shot?.id)
             phase = .recording(Date())
-            if autoScroll { scrolling = true }
+            for h in Plugins.recordHooks { h.take(TakeMoment(session: doc.url, number: n, started: cs)) }
+            if autoScroll && Plugins.recordStage(doc.url) == nil { scrolling = true }
         } catch {
             self.error = error is CancellationError ? nil : error.localizedDescription
             await camera.stopRecording()
@@ -612,6 +626,7 @@ final class AppModel {
         async let a: Void = camera.stopRecording()
         async let b: Void = screen.stopRecording()
         _ = await (a, b)
+        for h in Plugins.recordHooks { h.take(TakeMoment(session: p.doc.url, number: p.number, started: nil)) }
 
         var takes = [Take(number: p.number, kind: .camera, file: p.cam.lastPathComponent,
                           startedAt: p.camStart, duration: await Self.duration(p.cam), script: p.script, hook: p.hook, shot: p.shot)]
@@ -627,6 +642,7 @@ final class AppModel {
         library.loadSessions()
         autoName(p.doc)
         endShot()
+        FirstTake.shared.afterTake(p.doc, number: p.number, library: library)
     }
 
     private static func duration(_ url: URL) async -> Double? {
@@ -737,7 +753,14 @@ final class AppModel {
         guard let action = KeyRouter.action(key: e.keyCode, modifiers: e.modifierFlags, c) else { return e }
         switch action {
         case .toggleRecord: toggleRecord()
-        case .toggleScroll: scrolling.toggle()
+        case .toggleScroll:
+            // A plugin on the stage (a reaction clip) takes Space.
+            if let hook = Plugins.recordStage(library.current?.url), preview == nil, board == nil,
+               isRecording || UserDefaults.standard.string(forKey: "rightTab") == SessionMode.record.rawValue {
+                hook.space(self)
+            } else {
+                scrolling.toggle()
+            }
         case .saveFrame: saveFrame()
         case .toggleComment: commentMode.toggle()
         case .endComment: commentMode = false

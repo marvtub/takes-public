@@ -5,6 +5,8 @@ import UniformTypeIdentifiers
 
 @main
 struct TakesApp: App {
+    /// The Plugins board can turn a plugin off: draw again without it.
+    @AppStorage(Plugins.removedKey) private var pluginsRemoved = ""
     @NSApplicationDelegateAdaptor private var delegate: AppDelegate
     @State private var app = AppModel()
 
@@ -22,7 +24,8 @@ struct TakesApp: App {
                 .overlay { ScreenFindLayer().ignoresSafeArea() }
                 .overlay { SearchPalette().environment(app) }
                 .overlay { OnboardingLayer().environment(app) }
-                .task { Onboarding.shared.startIfNew(app.library) }
+                .overlay { FirstTakeLayer().environment(app) }
+                .task { Onboarding.shared.startIfNew(app.library); FirstTake.shared.settle(app.library) }
                 .onOpenURL { app.handle(url: $0) }
         }
         .handlesExternalEvents(matching: ["*"])
@@ -44,6 +47,7 @@ struct TakesApp: App {
                     Button(p.title) { app.toggle(.plugin(p.id)) }.keyboardShortcut(KeyEquivalent(p.key), modifiers: [.command, .shift])
                 }
                 Button("Styles") { app.toggle(.styles) }.keyboardShortcut("y", modifiers: [.command, .shift])
+                Button("Plugins") { app.toggle(.plugins) }.keyboardShortcut("p", modifiers: [.command, .shift])
                 Button("Chat with Takes") {
                     // Record shows no docked chat: open it on Script.
                     if app.chats.docked, UserDefaults.standard.string(forKey: "rightTab") == "script", app.board == nil {
@@ -70,6 +74,8 @@ struct TakesApp: App {
             }
             CommandGroup(after: .help) {
                 Button("Show Welcome Again") { Onboarding.shared.show() }
+                Button("Show First Take Again") { if let doc = app.library.current { FirstTake.shared.show(doc) } }
+                    .disabled(app.library.current?.meta.takes.isEmpty ?? true || app.isRecording)
             }
             CommandGroup(replacing: .newItem) {
                 Button("New Session") { app.library.createSession() }.keyboardShortcut("n")
@@ -164,6 +170,8 @@ extension NSWindow {
 }
 
 struct ContentView: View {
+    /// The Plugins board can turn a plugin off: draw again without it.
+    @AppStorage(Plugins.removedKey) private var pluginsRemoved = ""
     @Environment(AppModel.self) var app
     var library: Library
     @AppStorage("sidebar") private var savedColumns = "all"
@@ -240,6 +248,8 @@ struct ContentView: View {
                 } else if app.board == .comments {
                     CommentsBoard(hub: app.chats, store: app.copilot, root: library.root)
                         .transition(.opacity)
+                } else if app.board == .plugins {
+                    PluginsBoard().transition(.opacity)
                 } else if case .plugin(let id)? = app.board, let board = Plugins.named(id)?.board {
                     board(app).transition(.opacity)
                 } else {
@@ -291,6 +301,8 @@ struct PersistentSplit<Left: View, Right: View>: View {
 
 /// The sidebar ways into the boards. It also keeps the post plan current for the session list.
 struct BoardRows: View {
+    /// The Plugins board can turn a plugin off: draw again without it.
+    @AppStorage(Plugins.removedKey) private var pluginsRemoved = ""
     @Environment(AppModel.self) var app
 
     var body: some View {
@@ -823,9 +835,36 @@ struct DetailView: View {
 
     private var writing: Bool { rightTab == "write" }
 
+    /// The Plugins board can turn a plugin off: draw again without it.
+    @AppStorage(Plugins.removedKey) private var pluginsRemoved = ""
+
+    /// How a plugin's stage starts ("React to a video"), in the camera's caption on Record.
+    private var stageButtons: AnyView? {
+        _ = pluginsRemoved
+        guard let doc = library.current, recordOnly, !Plugins.recordHooks.isEmpty else { return nil }
+        return AnyView(HStack(spacing: 12) {
+            ForEach(Array(Plugins.recordHooks.enumerated()), id: \.offset) { _, h in h.button(app, doc.url) }
+        })
+    }
+
+    /// A plugin that has the Record stage for this session (Reactions: the clip you react to).
+    private var stageHook: RecordHook? {
+        _ = pluginsRemoved
+        guard app.preview == nil, recordOnly || app.isRecording else { return nil }
+        return Plugins.recordStage(library.current?.url)
+    }
+
     /// Record: the docked chat does not take the script and takes column (2026-10-06). It shows
     /// on the Script tab instead.
     private var recordOnly: Bool { rightTab == "script" }
+
+    /// Record with one session open, a script in it, and no welcome card over it: the notch opens
+    /// by itself. No script, no notch (2026-10-08): an empty black panel over the camera only
+    /// got in the way. Write one and it opens; clear it and the notch it opened goes again.
+    private var notchRecord: Bool {
+        recordOnly && library.current != nil && !(library.selectedSessions.count > 1) && !Onboarding.shared.shown
+            && !app.promptText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
 
     var body: some View {
         let _ = Perf.body("DetailView")
@@ -839,6 +878,7 @@ struct DetailView: View {
         .onAppear { app.postView = postMode; app.stageCovered = stageCovered }
         .onChange(of: postMode) { _, on in app.postView = on }
         .onChange(of: stageCovered) { _, on in app.stageCovered = on }
+        .onChange(of: notchRecord, initial: true) { _, on in NotchPanel.shared.follow(record: on, app) }
     }
 
     /// Post always covers the stage. Assets and Sound cover it until you open a file:
@@ -940,9 +980,14 @@ struct DetailView: View {
             PersistentSplit(minLeft: 380, minRight: 320) {
                 VStack(spacing: 0) {
                     ZStack {
+                        // A plugin's stage (a clip to react to): under the camera, which moves to
+                        // its corner.
+                        if let doc = library.current, let hook = stageHook {
+                            hook.stage(app, doc.url).transition(.opacity)
+                        }
                         // The live preview stays mounted, even under the player or while paused.
                         // Removing its layer while the session stops or starts deadlocks AVFoundation.
-                        CameraCard(camera: camera, doc: library.current)
+                        CameraCard(camera: camera, doc: library.current, inCorner: stageHook != nil, accessory: stageButtons)
                         if app.preview != nil {
                             // Dark at once under a file: the player fades in on the stage, not
                             // over the daylight Record page and the camera (2026-10-04).
@@ -978,6 +1023,7 @@ struct DetailView: View {
                     // Their own views: a toast or a notice redraws only itself (2026-10-02).
                     .overlay(alignment: .bottom) { StageToast() }
                     .overlay(alignment: .top) { StageNotice(session: library.current?.url) }
+                    .animation(Theme.motion, value: stageHook != nil)
                     .overlay(alignment: .topTrailing) {
                         if let url = app.preview, Asset.kind(of: url) == .video { BedPill(bed: app.bed).padding(12) }
                     }
@@ -1063,6 +1109,10 @@ struct CameraCard: View {
     @Environment(AppModel.self) var app
     @ObservedObject var camera: CameraRecorder
     var doc: SessionDoc?
+    /// Small, in the top right corner of a plugin's stage (a reaction: the clip has the stage).
+    var inCorner = false
+    /// Plugin buttons in the caption ("React to a video").
+    var accessory: AnyView? = nil
     @AppStorage("rightTab") private var rightTab = "script"
 
     private static let corner: CGFloat = 18
@@ -1087,10 +1137,12 @@ struct CameraCard: View {
             .overlay(shape.strokeBorder(rolling ? Theme.danger.opacity(0.7) : Theme.border.opacity(app.lightsDown ? 0 : 1),
                                         lineWidth: rolling ? 2 : 1))
             // The caption rides on the card's top edge, so the two stay together at any size.
-            .overlay(alignment: .topLeading) { caption.offset(y: -36) }
+            .overlay(alignment: .topLeading) { if !inCorner { caption.offset(y: -36).transition(.opacity) } }
             .aspectRatio(ratio, contentMode: .fit)
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .padding(.horizontal, 28).padding(.top, 56).padding(.bottom, 96)  // the record pill sits below
+            .frame(width: inCorner ? (camera.orientation == .vertical ? 130 : 240) : nil)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: inCorner ? .topTrailing : .center)
+            .padding(.horizontal, inCorner ? 44 : 28).padding(.top, inCorner ? 72 : 56).padding(.bottom, 96)  // the record pill sits below
+            .animation(Theme.motion, value: inCorner)
         .animation(Theme.motion, value: camera.paused)
         .animation(Theme.motion, value: rolling)
     }
@@ -1103,6 +1155,7 @@ struct CameraCard: View {
                 .font(Theme.sans(13)).foregroundStyle(Theme.muted)
                 .contentTransition(.opacity)
             Spacer(minLength: 8)
+            if let accessory, !rolling, !app.lightsDown { accessory.transition(.opacity) }
             if app.mode == .cameraScreen {
                 Label("Screen too", systemImage: "display").font(Theme.sans(11.5, .medium)).foregroundStyle(Theme.muted)
             }
@@ -2464,7 +2517,7 @@ struct NotchStandIn: View {
             }
             .font(Theme.sans(12, .medium))
             Spacer(minLength: 12)
-            Button("Show the script here instead") { NotchPanel.shared.hide() }
+            Button("Show the script here instead") { NotchPanel.shared.close() }
                 .buttonStyle(.plain).font(Theme.sans(12)).foregroundStyle(Theme.accent)
                 .padding(.bottom, 16)
         }

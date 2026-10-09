@@ -2,7 +2,7 @@ import Foundation
 import Testing
 @testable import Takes
 
-// ElevenLabs in Takes (2026-10-06): what Settings › Voices reads from the takes MCP's voices tool.
+// ElevenLabs in Takes (2026-10-06): what Plugins › Voices reads from the takes MCP's voices tool.
 
 struct ElevenLabsTests {
     @Test func theAccountLineShowsPlanAndCharactersLeft() {
