@@ -608,7 +608,12 @@ struct SearchPalette: View {
                 .padding(.top, 90)
             }
             .onAppear {
+                // Ask again once the panel is in the window: a request made while it is still being
+                // inserted can fail, and the window then gives the keyboard to its first text field,
+                // the sidebar's "Find a session" (2026-10-09, like the comment card on 2026-09-30).
                 focused = true
+                DispatchQueue.main.async { focused = true }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { focused = true }
                 withAnimation(.smooth(duration: 0.22)) { appeared = true }
             }
             .onDisappear { appeared = false }

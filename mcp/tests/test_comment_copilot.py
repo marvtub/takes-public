@@ -30,6 +30,8 @@ class CommentCopilot(unittest.TestCase):
         with open(lint, "w") as f:
             f.write(LINT)
         os.environ["TAKES_LINT"] = lint
+        # Drafting starts with get_comment_context, which reads the lessons (the rules gate).
+        t.RULES_SEEN.add("comments")
         ref = os.path.join(self.life, "reference-docs", "communication", "linkedin")
         os.makedirs(ref)
         with open(os.path.join(ref, "commenting-targets.md"), "w") as f:
@@ -169,6 +171,7 @@ class CommentCopilot(unittest.TestCase):
         t.t_reply_comment({"library": "comments", "replies": [{"id": "c1", "text": "Removed", "resolve": True}]})
         self.assertEqual(t.t_get_comment_context({})["open_comments"], 0)
 
+    @unittest.skipUnless(t.SOCIAL, "the comment copilot is private: the public server lists none of its tools")
     def test_tools_registered(self):
         names = {n for n, *_ in t.TOOLS}
         for n in ("get_comment_context", "add_comment_suggestion", "redraft_comment",

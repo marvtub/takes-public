@@ -12,7 +12,7 @@ import UIKit
 @MainActor
 final class Outbox: ObservableObject {
     struct Op: Codable, Identifiable, Hashable {
-        enum Kind: String, Codable { case newSession, script, post, postDraft, comment, reply, resolve, keeper, cover, decide, say, take, archive, side }
+        enum Kind: String, Codable { case newSession, script, post, postDraft, scriptDraft, comment, reply, resolve, keeper, cover, decide, say, take, archive, side }
         var id = UUID()
         var kind: Kind
         /// The session id, or the suggestion id for a decision.
@@ -48,6 +48,7 @@ final class Outbox: ObservableObject {
             case .script: return "Script edit"
             case .post: return "Post edit"
             case .postDraft: return string("action") == "save" ? "Post version edit" : "Post version change"
+            case .scriptDraft: return string("action") == "save" ? "Script version edit" : "Script version change"
             case .comment: return "Comment: \(string("text") ?? "")"
             case .reply: return "Reply: \(string("text") ?? "")"
             case .resolve: return string("resolved") == "true" ? "Comment resolved" : "Comment reopened"

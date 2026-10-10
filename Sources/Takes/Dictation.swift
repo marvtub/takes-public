@@ -344,6 +344,40 @@ struct VoiceNote: View {
     }
 }
 
+/// The chat box's voice note: the mic button turns red and its ring follows your voice.
+/// A click finishes (the words stay in the box), Esc cancels. Same size as the mic, so the box
+/// keeps its width.
+struct MicListening: View {
+    @ObservedObject var dictation: Dictation
+    let done: () -> Void
+
+    var body: some View {
+        Button(action: done) {
+            ZStack {
+                VoiceRing(meter: dictation.meter)
+                Circle().fill(Theme.danger).frame(width: 22, height: 22)
+                RoundedRectangle(cornerRadius: 2).fill(.white).frame(width: 8, height: 8)
+            }
+            .frame(width: 28, height: 28)
+            .contentShape(Circle())
+        }
+        .buttonStyle(PressStyle())
+        .help("Listening. Click when done; Esc cancels")
+    }
+}
+
+private struct VoiceRing: View {
+    @ObservedObject var meter: VoiceMeter
+
+    var body: some View {
+        let level = meter.levels.suffix(3).max() ?? 0
+        Circle().fill(Theme.danger.opacity(0.25))
+            .frame(width: 22, height: 22)
+            .scaleEffect(1 + 0.32 * min(1, level))
+            .animation(.easeOut(duration: 0.09), value: level)
+    }
+}
+
 private struct VoiceBars: View {
     @ObservedObject var meter: VoiceMeter
 
@@ -418,6 +452,7 @@ struct AskBox: View {
             .textFieldStyle(.plain)
             .font(Theme.sans(13))
             .lineLimit(1...8)
+            .wrapsAtItsWidth(focus.wrappedValue)
             .focused(focus)
             .onSubmit(submit)
             .onKeyPress(.escape) {

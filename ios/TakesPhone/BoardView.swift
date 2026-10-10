@@ -83,7 +83,7 @@ struct BoardView: View {
                 ForEach(Array(shots.enumerated()), id: \.element.id) { i, shot in
                     ShotPage(sessionID: sessionID, shot: shot, number: i + 1, count: shots.count,
                              takes: takes[shot.id] ?? [], on: shot.id == current, show: show,
-                             record: { record(shot) }, reload: reload)
+                             record: { record(shot) }, reload: reload, toChat: toChat)
                         .tag(shot.id)
                 }
             }
@@ -262,17 +262,28 @@ private struct ShotPage: View {
     let show: (RemoteFile) -> Void
     let record: () -> Void
     let reload: () async -> Void
+    let toChat: () -> Void
     @AppStorage("storyboardSound") private var sound = false
     @State private var showHow = false
     @State private var showResolved = false
+    /// A variant tried in the frame, not the one in the video (2026-10-09, as the Mac's letters).
+    @State private var tried: String?
+    /// The take whose card is open, and what went wrong.
+    @State private var takeCard: RemoteFile?
+    @State private var failed: String?
 
     private var section: String { BoardView.sectionTitle(shot.section) }
-    private var clip: String? { shot.image.flatMap { Shot.isClip($0) ? $0 : nil } }
+    /// The picture or clip on show: the one tried, else the one in the video.
+    private var shown: String? { tried ?? shot.image }
+    private var clip: String? { shown.flatMap { Shot.isClip($0) ? $0 : nil } }
+    private var variants: [String] { shot.variants ?? [] }
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 frame
+                if variants.count > 1 { letters }
+                if let failed { Label(failed, systemImage: "exclamationmark.triangle").font(.inter(.footnote)).foregroundStyle(Palette.danger) }
                 top
                 if !shot.say.isEmpty {
                     Text(shot.say).font(.nunito(size: 23, relativeTo: .title2)).foregroundStyle(Palette.ink)
@@ -287,6 +298,80 @@ private struct ShotPage: View {
             .padding(.horizontal, 16).padding(.top, 14).padding(.bottom, 40)
         }
         .scrollDismissesKeyboard(.interactively)
+        .onChange(of: shot.video) { tried = nil }
+        .overlay {
+            if let t = takeCard {
+                TakeCard(sessionID: sessionID, take: t, play: { takeCard = nil; show(t) }, close: { takeCard = nil }, reload: reload)
+                    .id(t.id)
+            }
+        }
+        .animation(Brand.quick, value: takeCard?.id)
+    }
+
+    /// A B C… under the frame: tap one to try it, then use it or go back. A GPT Image draft also
+    /// gets Make Final, which asks Takes for the 4K Nano Banana 2.1 final (the Mac's tryingButtons).
+    private var letters: some View {
+        let inVideo = shot.video ?? shot.image
+        return VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 6) {
+                ForEach(Array(variants.enumerated()), id: \.element) { i, v in
+                    let on = v == shown
+                    let picked = v == inVideo
+                    Button { Brand.select(); withAnimation(Brand.quick) { tried = v == inVideo ? nil : v } } label: {
+                        HStack(spacing: 4) {
+                            if picked { Image(systemName: "checkmark").font(.system(size: 10, weight: .heavy)) }
+                            Text(Self.letter(i))
+                        }
+                        .font(.inter(.subheadline, on ? .semibold : .medium)).monospacedDigit()
+                        .foregroundStyle(on ? Palette.accentInk : picked ? Palette.accent : Palette.muted)
+                        .padding(.horizontal, 12).frame(height: 32)
+                        .background(on ? Palette.accentSoft : Palette.well, in: Capsule())
+                        .contentShape(Capsule())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(picked ? "\(Self.letter(i)): in the video" : "Try \(Self.letter(i))")
+                }
+                Spacer(minLength: 0)
+                if shot.generating == true {
+                    HStack(spacing: 6) { WorkingDots(color: Palette.muted); Text("Making").font(.inter(.footnote)) }.foregroundStyle(Palette.muted)
+                }
+            }
+            let draft = shown.flatMap { shot.finals?[$0] }
+            if tried != nil || draft != nil {
+                HStack(spacing: 10) {
+                    if let tried, let i = variants.firstIndex(of: tried) {
+                        Button("Use \(Self.letter(i)) in the video") { pick(tried) }.buttonStyle(.pill(.ink, small: true))
+                    }
+                    if let draft {
+                        Button("Make Final") { final(draft) }.buttonStyle(.pill(.soft, small: true))
+                    }
+                    if tried != nil, let v = inVideo, let i = variants.firstIndex(of: v) {
+                        Button("Back to \(Self.letter(i))") { withAnimation(Brand.quick) { tried = nil } }
+                            .buttonStyle(.plain).font(.inter(.subheadline)).foregroundStyle(Palette.muted)
+                    }
+                }
+                .transition(.opacity.combined(with: .offset(y: -4)))
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    static func letter(_ i: Int) -> String { i < 26 ? String(UnicodeScalar(65 + i)!) : "\(i + 1)" }
+
+    private func pick(_ path: String) {
+        Task {
+            if let e = await model.tryAct("/api/shot", ["id": sessionID], ["action": "pick", "shot": shot.id, "path": path]) { failed = e; return }
+            failed = nil
+            Brand.select()
+            await reload()
+        }
+    }
+
+    /// The Mac sends the ask in the chat and opens it; so does the phone.
+    private func final(_ ask: String) {
+        Task {
+            if await model.say(ask, in: sessionID) { toChat() } else { failed = "The chat did not take it. Try again." }
+        }
     }
 
     private var top: some View {
@@ -300,7 +385,6 @@ private struct ShotPage: View {
                 Circle().fill(.white).frame(width: 13, height: 13)
                     .frame(width: 40, height: 40)
                     .background(Palette.danger, in: Circle())
-                    .shadow(color: Palette.danger.opacity(0.35), radius: 8, y: 3)
                     .contentShape(Circle())
             }
             .buttonStyle(.press)
@@ -340,8 +424,8 @@ private struct ShotPage: View {
         // Small enough that the line to say shows under it without a scroll.
         return ZStack {
             shape.fill(Palette.paper)
-            if let image = shot.image {
-                RemoteImage(url: model.api.thumb(image, width: 900)) { $0.resizable().scaledToFill() } placeholder: { WorkingDots(color: Palette.faint) }
+            if let image = shown {
+                RemoteImage(url: model.api.thumb(image, width: 900)) { $0.resizable().scaledToFill() } placeholder: { Palette.paper }
             } else if let err = shot.error {
                 VStack(spacing: 8) {
                     Image(systemName: "exclamationmark.triangle").foregroundStyle(Palette.warn)
@@ -389,7 +473,7 @@ private struct ShotPage: View {
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 8) {
                     ForEach(takes) { t in
-                        Button { show(t) } label: {
+                        Button { Brand.select(); takeCard = t } label: {
                             ZStack(alignment: .bottomLeading) {
                                 RemoteImage(url: model.api.thumb(t.path, width: 200)) { $0.resizable().scaledToFill() } placeholder: { Color.black }
                                 HStack(spacing: 2) {
@@ -403,6 +487,7 @@ private struct ShotPage: View {
                             }
                             .frame(width: 64, height: 80)
                             .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                            .overlay(alignment: .topTrailing) { if let c = t.cut { CutBadge(cut: c).padding(4) } }
                         }
                         .buttonStyle(.press)
                         .accessibilityLabel("Take \(t.take ?? 0)")
@@ -565,5 +650,70 @@ struct ClipLoop: UIViewRepresentable {
     static func dismantleUIView(_ v: Box, coordinator: ()) {
         v.player.pause()
         v.looper = nil
+    }
+}
+
+/// The scissors on a take: grey for Gemini's first guess, green once Takes checked it, orange when
+/// it failed or not every word is clean. The Mac's TakeThumb badge.
+struct CutBadge: View {
+    let cut: Cut
+    var body: some View {
+        Image(systemName: cut.state == "running" ? "ellipsis" : cut.state == "failed" ? "exclamationmark" : "scissors")
+            .font(.system(size: 8, weight: .bold)).foregroundStyle(.white)
+            .frame(width: 16, height: 16)
+            .background(cut.state == "failed" || cut.clean == false ? Palette.warn : cut.by == "agent" ? Palette.live : Color.gray, in: Circle())
+            .accessibilityLabel(cut.by == "agent" ? "Best cut checked by Takes" : "Best cut")
+    }
+}
+
+/// A take's card on the Board: what its best cut is, and the Mac's take menu as rows.
+struct TakeCard: View {
+    @EnvironmentObject var model: Model
+    let sessionID: String
+    let take: RemoteFile
+    let play: () -> Void
+    let close: () -> Void
+    let reload: () async -> Void
+    @State private var failed: String?
+
+    private var n: Int { take.take ?? 0 }
+    private var cut: Cut? { take.cut }
+
+    var body: some View {
+        CardOverlay(close: close) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(take.name).font(.nunito(size: 20, relativeTo: .title3)).foregroundStyle(Palette.ink)
+                Text(line).font(.inter(.subheadline)).foregroundStyle(Palette.muted).fixedSize(horizontal: false, vertical: true)
+                    .padding(.bottom, 8)
+                if let failed { Text(failed).font(.inter(.footnote, .medium)).foregroundStyle(Palette.danger) }
+                PanelRow(icon: "play.fill", title: "Play", action: play)
+                PanelRow(icon: take.keeper == true ? "star.slash" : "star", title: take.keeper == true ? "Unstar" : "Star as the keeper") { run("star") }
+                PanelRow(icon: "scissors", title: cut == nil ? "Find the Best Cut" : "Find the Best Cut Again", enabled: cut?.state != "running") { run("cut") }
+                PanelDivider()
+                PanelRow(icon: "rectangle.badge.minus", title: "Take it off this shot") { run("unlink") }
+            }
+        }
+    }
+
+    private var line: String {
+        var s = take.duration.map { BoardView.clock($0) } ?? ""
+        switch cut?.state {
+        case "running": s += "\nGemini is finding the best cut…"
+        case "failed": s += "\nNo best cut: \(cut?.error ?? "it failed")"
+        case "done":
+            let who = cut?.by == "agent" ? "Best cut, checked by Takes" : "Gemini's first suggestion (Takes checks it before cutting)"
+            if let r = cut?.range { s += "\n\(who): \(r)\(cut?.clean == false ? " (not every word clean)" : "")" }
+            if let w = cut?.why { s += ": \(w)" }
+        default: break
+        }
+        return s.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func run(_ action: String) {
+        Task {
+            if let e = await model.tryAct("/api/shot", ["id": sessionID], ["action": action, "take": String(n)]) { failed = e; return }
+            close()
+            await reload()
+        }
     }
 }

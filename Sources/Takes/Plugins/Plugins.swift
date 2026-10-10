@@ -10,8 +10,8 @@ import SwiftUI
 ///
 /// The Plugins board (sidebar foot, 2026-10-08) turns them on and off and holds their settings.
 /// An off plugin keeps its code and files, but loses its sidebar row, tabs and buttons until it is
-/// on again. Higgsfield and Voices are public plugins (their files are Higgsfield.swift and
-/// ElevenLabs.swift); they were Settings pages before.
+/// on again. Feedback, Replicate, Higgsfield and Voices are public plugins (Plugins/Feedback.swift,
+/// Replicate.swift, Higgsfield.swift and ElevenLabs.swift); the last two were Settings pages before.
 struct TakesPlugin: Identifiable {
     let id: String
     let title: String
@@ -31,6 +31,22 @@ struct TakesPlugin: Identifiable {
     var settings: (@MainActor (AppModel) -> AnyView)? = nil
     /// Its part of the Record stage (2026-10-08, Reactions).
     var record: RecordHook? = nil
+    /// Its screen on the iPhone (2026-10-09): the routes the phone's screen calls. The phone lists
+    /// the plugins that have one (GET /api/plugins) and draws the screen itself.
+    var phone: PhoneHook? = nil
+}
+
+/// A plugin's part of the phone server. `route` answers the requests it knows (with the library
+/// root), nil for the rest.
+struct PhoneHook {
+    let route: @Sendable (_ request: PhoneRequest, _ root: URL) async -> PhoneResponse?
+}
+
+/// A plugin screen the phone can show, for its list's foot.
+struct PhonePluginInfo: Codable, Hashable {
+    var id: String
+    var title: String
+    var icon: String
 }
 
 /// A plugin on the Record stage. With `active`, its view takes the stage, the camera moves to a
@@ -79,7 +95,7 @@ struct PostSide: Identifiable {
 
 enum Plugins {
     /// Every plugin this build has, on or off: the public ones, then the user's.
-    static var available: [TakesPlugin] { [HiggsfieldPage.plugin, VoicesPage.plugin] + PrivatePlugins.list }
+    static var available: [TakesPlugin] { [Feedback.plugin, ReplicatePage.plugin, HiggsfieldPage.plugin, VoicesPage.plugin] + PrivatePlugins.list }
     /// The plugin the Plugins board shows.
     static let pickedKey = "pluginsPicked"
     /// The installed ones. Read from UserDefaults (not an observed model), so the phone server can
@@ -101,6 +117,7 @@ enum Plugins {
     static func named(_ id: String) -> TakesPlugin? { all.first { $0.id == id } }
     static var postSides: [PostSide] { all.flatMap(\.postSides) }
     static var recordHooks: [RecordHook] { all.compactMap(\.record) }
+    static var phoneHooks: [PhoneHook] { all.compactMap(\.phone) }
     /// The hook that has the stage for this session, if one has.
     @MainActor static func recordStage(_ session: URL?) -> RecordHook? {
         guard let session else { return nil }
@@ -262,8 +279,12 @@ struct PluginsBoard: View {
                 }
             }
             .padding(.horizontal, 36).padding(.vertical, 28)
-            .frame(maxWidth: 720, alignment: .leading)
+            // The page uses the room it has (2026-10-09). The scroll view spans the whole pane, so
+            // no scroll bar sits in the middle of it, and the bar stays hidden.
+            .frame(maxWidth: 1200, alignment: .leading)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
+        .scrollIndicators(.hidden)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(Theme.canvas)
     }

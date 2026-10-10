@@ -13,13 +13,19 @@ struct StylesView: View {
     @State private var asking = false
     @State private var opened: StyleTarget?
     /// A style whose Trash was tapped once: the second tap moves it.
-    @State private var trashing: String?
+    /// Trash asks first, on a Takes card (2026-10-09).
+    @State private var confirm: Confirm?
+    @State private var noName: NameAsk?
     @State private var problem: String?
 
     static let chatID = "board:styles"
     private let columns = [GridItem(.flexible(), spacing: 14, alignment: .top), GridItem(.flexible(), spacing: 14, alignment: .top)]
 
     var body: some View {
+        page.asks(confirm: $confirm, name: $noName)
+    }
+
+    private var page: some View {
         ScrollView {
             ScreenHeader(title: "Styles", subtitle: "Each video picks its style on its Files tab.") {
                 Button { chatOpen = true } label: { RoundIcon(icon: "bubble.left.and.text.bubble.right", label: "Styles chat") }
@@ -156,12 +162,9 @@ struct StylesView: View {
             if c.isNew {
                 HStack(spacing: 6) {
                     Button("Keep") { change(c.name, "keep") }.buttonStyle(.pill(.soft, small: true))
-                    Button(trashing == c.name ? "Tap again" : "Trash") {
-                        if trashing == c.name { change(c.name, "trash") } else {
-                            Brand.tap(.light)
-                            trashing = c.name
-                            Task { try? await Task.sleep(for: .seconds(3)); if trashing == c.name { trashing = nil } }
-                        }
+                    Button("Trash") {
+                        confirm = Confirm(title: "Move \(c.name) to the Trash?", message: "The style goes to the Trash on the Mac, so you can get it back.",
+                                          button: "Move to Trash") { change(c.name, "trash"); return nil }
                     }
                     .buttonStyle(.pill(.quiet, small: true))
                 }
@@ -192,7 +195,6 @@ struct StylesView: View {
     // MARK: Actions
 
     private func change(_ name: String, _ action: String) {
-        trashing = nil
         Brand.select()
         Task {
             do {
@@ -265,13 +267,38 @@ struct NewStyleSheet: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             Text("New style").font(.nunito(size: 24, relativeTo: .title2)).foregroundStyle(Palette.ink)
-            Text("Paste a link, or describe the look. Takes on your Mac makes the guide, the colours, the parts and a preview.")
+            Text("Show Takes a look you like. Takes turns it into a style that every video can use.")
                 .font(.inter(.footnote)).foregroundStyle(Palette.muted)
-            TextField("https://… or “big yellow captions, black cards”", text: $example, axis: .vertical)
+            TextField("https://… or describe the look", text: $example, axis: .vertical)
                 .font(.inter(.body)).lineLimit(2...5).focused($typing)
                 .padding(12)
                 .background(Palette.paper, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
                 .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(Palette.border))
+            // The Mac sheet's ideas and steps (StyleLibrary.swift).
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 6) {
+                    Text("Or try").font(.inter(.footnote)).foregroundStyle(Palette.faint)
+                    ForEach(["Yellow captions, black cards", "Magazine, serif titles", "Fast cuts, bold words"], id: \.self) { idea in
+                        ToggleChip(title: idea, on: example == idea) { example = idea }
+                    }
+                }
+            }
+            VStack(alignment: .leading, spacing: 8) {
+                Text("What happens next").font(.inter(.subheadline, .semibold)).foregroundStyle(Palette.ink)
+                ForEach(Array(["Takes studies the example", "Takes writes the style guide, the colours and the fonts",
+                               "Takes builds a title card and captions, then makes a preview on a sample clip"].enumerated()), id: \.offset) { i, step in
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Text("\(i + 1)").font(.inter(.caption, .bold)).foregroundStyle(Palette.accent)
+                            .frame(width: 20, height: 20).background(Palette.accentSoft, in: Circle())
+                        Text(step).font(.inter(.footnote)).foregroundStyle(Palette.muted)
+                    }
+                }
+                Text("This runs in the Styles chat. Then comment on the preview and Takes changes the style.")
+                    .font(.inter(.footnote)).foregroundStyle(Palette.faint).fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Palette.surface, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
             if failed { Text("The Mac didn't answer. Try again.").font(.inter(.footnote)).foregroundStyle(Palette.danger) }
             HStack {
                 Button("Cancel") { dismiss() }.buttonStyle(.pill(.quiet))

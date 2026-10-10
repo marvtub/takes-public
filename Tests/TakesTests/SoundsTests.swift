@@ -3,7 +3,8 @@ import Foundation
 import Testing
 @testable import Takes
 
-// 2026-09-28: music from the Epidemic Sound folder, in the Takes library, played under a video.
+// 2026-09-28: music from the Epidemic Sound folder, in the Takes library. Since 2026-10-09 the app
+// never plays it over a video: Use asks the chat to mix it into the file.
 
 struct SoundsTests {
     static let ffmpeg = ["/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg"].first { FileManager.default.fileExists(atPath: $0) }
@@ -28,11 +29,6 @@ struct SoundsTests {
         #expect(Sound.title("my song.mp3") == "my song")
     }
 
-    @Test func songStartLinesUpWithTheVideo() {
-        #expect(MusicBed.position(videoTime: 0, start: 12) == 12)
-        #expect(MusicBed.position(videoTime: 3.5, start: 12) == 15.5)
-    }
-
     @Test func syncCopiesNewAudioOnlyAndKeepsFolders() throws {
         let src = try Self.temp(), lib = try Self.temp()
         defer { try? FileManager.default.removeItem(at: src); try? FileManager.default.removeItem(at: lib) }
@@ -49,92 +45,29 @@ struct SoundsTests {
         #expect(found.map(\.group) == ["Music", "SFX"])
     }
 
-    @Test func mcpSongPickReads() throws {
-        let json = #"{"createdAt":"2026-09-01T10:00:00Z","named":true,"takes":[],"title":"T","music":{"file":"Music/1_A.mp3","start":12.5,"volume":0.35}}"#
-        let m = try Store.decoder.decode(SessionMeta.self, from: Data(json.utf8))
-        #expect(m.music == SongPick(file: "Music/1_A.mp3", start: 12.5, volume: 0.35))
-    }
-
-    /// The song follows the video: play, pause, and a seek move it. Both silent.
-    @MainActor @Test(.enabled(if: ffmpeg != nil)) func bedFollowsTheVideo() async throws {
-        let dir = try Self.temp()
-        defer { try? FileManager.default.removeItem(at: dir) }
-        let video = dir.appending(path: "v.mp4"), song = dir.appending(path: "s.mp3")
-        try Self.make(["-f", "lavfi", "-i", "color=c=black:s=64x64:d=20", "-f", "lavfi", "-i", "anullsrc", "-t", "20", video.path])
-        try Self.make(["-f", "lavfi", "-i", "sine=d=60", song.path])
-        let player = AVPlayer(url: video)
-        player.isMuted = true
-        let bed = MusicBed()
-        bed.load(song, start: 10, volume: 0)
-        bed.attach(player)
-        #expect(bed.withVideo && !bed.playing)
-
-        player.play()
-        for _ in 0..<30 where !bed.playing { try await Task.sleep(for: .milliseconds(100)) }
-        #expect(bed.playing)
-
-        player.pause()
-        for _ in 0..<30 where bed.playing { try await Task.sleep(for: .milliseconds(100)) }
-        #expect(!bed.playing)
-
-        await player.seek(to: CMTime(seconds: 5, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
-        player.play()
-        for _ in 0..<30 where !bed.playing { try await Task.sleep(for: .milliseconds(100)) }
-        try await Task.sleep(for: .milliseconds(300))
-        #expect(bed.playing)
-        #expect(abs(bed.songTime - (10 + player.currentTime().seconds)) < 0.3)
-
-        bed.on = false
-        #expect(!bed.playing)
-        player.pause()
-        bed.attach(nil)
-        #expect(!bed.withVideo)
-    }
-
     @Test func effectsAreNotSongs() {
         let u = URL(fileURLWithPath: "/x")
         #expect(!SoundsPane.isEffect(Sound(url: u, group: "Music", rel: "Music/a.mp3")))
         #expect(SoundsPane.isEffect(Sound(url: u, group: "SFX", rel: "SFX/whoosh.mp3")))
     }
 
-    @Test func mcpEffectCuesRead() throws {
-        let json = #"{"createdAt":"2026-09-01T10:00:00Z","named":true,"takes":[],"title":"T","sfx":[{"file":"SFX/1_W.mp3","video":"edits/a-v1.mp4","at":12.4,"volume":0.8}]}"#
+    /// A session.json from before 2026-10-09 still opens; its old song and effects are ignored.
+    @Test func oldSoundPicksStillDecode() throws {
+        let json = #"{"createdAt":"2026-09-01T10:00:00Z","named":true,"takes":[],"title":"T","music":{"file":"Music/1_A.mp3","start":12.5,"volume":0.35},"sfx":[{"file":"SFX/1_W.mp3","video":"edits/a-v1.mp4","at":12.4,"volume":0.8}]}"#
         let m = try Store.decoder.decode(SessionMeta.self, from: Data(json.utf8))
-        #expect(m.sfx == [EffectCue(file: "SFX/1_W.mp3", video: "edits/a-v1.mp4", at: 12.4, volume: 0.8)])
-        let s = URL(fileURLWithPath: "/L/P/s")
-        #expect(EffectCue.rel(URL(fileURLWithPath: "/L/P/s/edits/a-v1.mp4"), in: s) == "edits/a-v1.mp4")
-        #expect(EffectCue.rel(URL(fileURLWithPath: "/x/b.mp4"), in: s) == "/x/b.mp4")
+        #expect(m.title == "T")
     }
 
-    /// An effect placed at 0:01 plays when the video passes 0:01, and only on its own video.
-    @MainActor @Test(.enabled(if: ffmpeg != nil)) func effectPlaysAtItsSecond() async throws {
-        let d = try Self.temp()
-        defer { try? FileManager.default.removeItem(at: d) }
-        let video = d.appending(path: "take-01-camera.mov")
-        try Self.make(["-f", "lavfi", "-i", "color=c=black:s=64x64:d=3", "-f", "lavfi", "-i", "anullsrc=r=48000:cl=mono",
-                       "-t", "3", "-shortest", video.path])
-        try FileManager.default.createDirectory(at: d.appending(path: "SFX"), withIntermediateDirectories: true)
-        try Self.make(["-f", "lavfi", "-i", "anullsrc=r=48000:cl=mono", "-t", "0.5", d.appending(path: "SFX/1_W.wav").path])
-        let track = EffectTrack()
-        track.dir = d
-        track.session = d
-        track.cues = [EffectCue(file: "SFX/1_W.wav", video: "take-01-camera.mov", at: 1.0, volume: 0),
-                      EffectCue(file: "SFX/1_W.wav", video: "other.mov", at: 0.5, volume: 0)]
-        track.video = video
-        #expect(track.here.count == 1)
-        let player = AVPlayer(url: video)
-        player.isMuted = true
-        track.attach(player)
-        player.play()
-        // Wait for the playhead itself to pass 0:01, not for a set time: on a busy Mac playback starts
-        // late (a 5 s wait failed in the public release's test run, 2026-10-04). Then one more beat for
-        // the boundary callback on the main queue.
-        for _ in 0..<300 where track.fired == 0 && player.currentTime().seconds < 1.2 {
-            try await Task.sleep(for: .milliseconds(100))
-        }
-        for _ in 0..<10 where track.fired == 0 { try await Task.sleep(for: .milliseconds(100)) }
-        player.pause()
-        #expect(track.fired == 1)
-        track.attach(nil)
+    /// Use asks the chat for a new version with the sound in it: the file, and for an effect the
+    /// video and the second.
+    @MainActor @Test func useAsksTheChat() {
+        let session = URL(fileURLWithPath: "/L/P/s")
+        let song = Sound(url: URL(fileURLWithPath: "/L/_library/audio/Music/26428_Chasing.mp3"), group: "Music", rel: "Music/26428_Chasing.mp3")
+        let fx = Sound(url: URL(fileURLWithPath: "/L/_library/audio/SFX/1_Whoosh.mp3"), group: "SFX", rel: "SFX/1_Whoosh.mp3")
+        let a = SoundsPane.ask(song, video: nil, session: session)
+        #expect(a.contains("“Chasing”") && a.contains("_library/audio/Music/26428_Chasing.mp3") && a.contains("new version"))
+        let b = SoundsPane.ask(fx, video: .init(url: session.appending(path: "edits/a-v2.mp4"), at: 12.4), session: session)
+        #expect(b.contains("edits/a-v2.mp4 at 0:12") && b.contains("12.4 s") && b.contains("_library/audio/SFX/1_Whoosh.mp3"))
+        #expect(SoundsPane.ask(fx, video: nil, session: session).contains("where it fits"))
     }
 }

@@ -12,7 +12,9 @@ struct CopilotView: View {
     @State private var data: Copilot?
     @State private var failed: String?
     @State private var watching: String?
-    @State private var confirmPost = false
+    /// Posting asks first, on a Takes card (2026-10-09: was a system dialog).
+    @State private var confirm: Confirm?
+    @State private var noName: NameAsk?
     /// The draft on top of the Review deck and the variant he looks at: the message bar's context.
     @State private var focus: CopilotFocus?
 
@@ -66,6 +68,7 @@ struct CopilotView: View {
                          placeholder: "Tell Takes about the comments…", wrap: { CopilotFocus.message($0, focus: f, tab: tab) })
             }
             .refreshable { await load() }
+            .asks(confirm: $confirm, name: $noName)
             .withTabBar()
             .navigationDestination(item: $watching) { id in
                 BoardChatView(id: id, title: id == "board:comments-post" ? "Posting" : "Finding")
@@ -130,16 +133,16 @@ struct CopilotView: View {
 
     @ViewBuilder private func approved(_ d: Copilot) -> some View {
         if !d.approved.isEmpty {
-            Button { confirmPost = true } label: {
+            Button {
+                let n = d.approved.count
+                confirm = Confirm(title: "Post \(n) \(n == 1 ? "comment" : "comments")?",
+                                  message: "Takes posts each one from the Mac's Chrome, exactly as approved. You can watch it in the Posting chat.",
+                                  button: "Post on LinkedIn", danger: false) { await post(); return nil }
+            } label: {
                 Label(d.posting ? "Posting…" : "Post \(d.approved.count) on LinkedIn", systemImage: "paperplane.fill")
             }
             .buttonStyle(.pill(wide: true))
             .disabled(d.posting)
-            .confirmationDialog("Post \(d.approved.count) \(d.approved.count == 1 ? "comment" : "comments")?", isPresented: $confirmPost, titleVisibility: .visible) {
-                Button("Post on LinkedIn") { Task { await post() } }
-            } message: {
-                Text("Takes posts each one from the Mac's Chrome, exactly as approved. You can watch it in the Posting chat.")
-            }
         }
         list(d.approved, empty: "Nothing approved yet.") { ApprovedCard(s: $0, act: act) }
     }
@@ -464,6 +467,10 @@ struct ReviewDeck: View {
     /// declines as "other" (2026-10-05).
     @State private var declining: Bool?
     @State private var last: (s: Suggestion, undo: String, label: String)?
+    /// The More card for the draft on top (2026-10-09: Takes rows, not a system menu).
+    @State private var more: Suggestion?
+    @State private var wrongOpen = false
+    @State private var badOpen = false
 
     private var deck: [Suggestion] { items.filter { !gone.contains($0.id) } }
     private var top: Suggestion? { deck.first }
@@ -507,6 +514,30 @@ struct ReviewDeck: View {
                 MascotEmpty(title: "All reviewed", message: "Nice. The approved ones wait under Approved.")
             }
         }
+        .overlay {
+            if let s = more {
+                CardOverlay(close: { withAnimation(Brand.quick) { more = nil } }) {
+                    VStack(alignment: .leading, spacing: 1) {
+                        PanelRow(icon: "pencil", title: "Edit, then approve") { more = nil; editing = true }
+                        PanelRow(icon: "text.bubble", title: "Note for a redraft") { more = nil; noting = true }
+                        PanelDivider()
+                        PanelGroup(icon: "hand.thumbsdown", title: "Wrong post", open: $wrongOpen) {
+                            ForEach(Self.wrongPost.dropLast(), id: \.self) { r in
+                                PanelChoice(title: r) { more = nil; decide(s, "decline", ["wrongPost": true, "reason": r], undo: nil, label: "Declined") }
+                            }
+                            PanelChoice(title: "Other: say why") { more = nil; declining = true }
+                        }
+                        PanelGroup(icon: "hand.thumbsdown", title: "Bad comment", open: $badOpen) {
+                            ForEach(Self.badComment.dropLast(), id: \.self) { r in
+                                PanelChoice(title: r) { more = nil; decide(s, "decline", ["wrongPost": false, "reason": r], undo: nil, label: "Declined") }
+                            }
+                            PanelChoice(title: "Other: say why") { more = nil; declining = false }
+                        }
+                    }
+                }
+            }
+        }
+        .animation(Brand.quick, value: more?.id)
         .onChange(of: items.map(\.id)) { _, ids in gone.formIntersection(ids) }
         .onChange(of: current, initial: true) { _, f in focus = f }
         .onDisappear { focus = nil }
@@ -601,26 +632,10 @@ struct ReviewDeck: View {
 
     private func buttons(_ s: Suggestion) -> some View {
         HStack {
-            Menu {
-                Button { editing = true } label: { Label("Edit, then approve", systemImage: "pencil") }
-                Button { noting = true } label: { Label("Note for a redraft", systemImage: "text.bubble") }
-                Divider()
-                Menu {
-                    ForEach(Self.wrongPost.dropLast(), id: \.self) { r in
-                        Button(r) { decide(s, "decline", ["wrongPost": true, "reason": r], undo: nil, label: "Declined") }
-                    }
-                    Button { declining = true } label: { Label("Other: say why", systemImage: "text.bubble") }
-                } label: { Label("Wrong post", systemImage: "hand.thumbsdown") }
-                Menu {
-                    ForEach(Self.badComment.dropLast(), id: \.self) { r in
-                        Button(r) { decide(s, "decline", ["wrongPost": false, "reason": r], undo: nil, label: "Declined") }
-                    }
-                    Button { declining = false } label: { Label("Other: say why", systemImage: "text.bubble") }
-                } label: { Label("Bad comment", systemImage: "hand.thumbsdown") }
-            } label: {
+            Button { Brand.select(); wrongOpen = false; badOpen = false; withAnimation(Brand.quick) { more = s } } label: {
                 RoundIcon(icon: "ellipsis", tint: Palette.muted, size: 46, label: "More")
             }
-            .menuStyle(.button).buttonStyle(.press)
+            .buttonStyle(.press)
             .accessibilityLabel("More: edit, note, decline")
         }
         .frame(maxWidth: .infinity)
@@ -897,13 +912,14 @@ struct BoardChatView: View {
     @State private var voice = VoiceNote()
     @FocusState private var typing: Bool
     @State private var latestRequest = 0
+    @State private var memory = false
 
     private var chat: Chat? { live.id == id ? live.chat : nil }
     private var hasText: Bool { !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
 
     var body: some View {
         VStack(spacing: 0) {
-            TopBar(title: title, subtitle: "On your Mac") { ContextRing(sessionID: id) }
+            TopBar(title: title, subtitle: "On your Mac") { ContextRing(sessionID: id) { memory = true } }
             ChatTranscript(latestRequest: latestRequest) {
                 if let chat, chat.messages.isEmpty {
                     MascotEmpty(title: "Nothing here yet", message: empty)
@@ -915,6 +931,22 @@ struct BoardChatView: View {
                     HStack(spacing: 8) { WorkingDots(); Text(chat.workingLine) }
                         .font(.inter(.footnote, .medium)).foregroundStyle(Palette.accent)
                 }
+            }
+            if let queued = chat?.queued, !queued.isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    ForEach(Array(queued.enumerated()), id: \.offset) { _, text in
+                        HStack(spacing: 8) {
+                            Image(systemName: "clock").font(.system(size: 12)).foregroundStyle(Palette.faint)
+                            Text(text).font(.inter(.footnote)).foregroundStyle(Palette.muted).lineLimit(2)
+                            Spacer(minLength: 0)
+                        }
+                        .padding(.horizontal, 12).padding(.vertical, 8)
+                        .background(Palette.well, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    }
+                }
+                .padding(.horizontal, 12).padding(.top, 6)
+                .background(Palette.canvas)
+                .accessibilityLabel("Queued: sent when Takes is done")
             }
             HStack(alignment: .bottom, spacing: 8) {
                 Group {
@@ -929,7 +961,7 @@ struct BoardChatView: View {
                             Spacer(minLength: 0)
                         }
                     } else {
-                        TextField(chat?.running == true ? "Steer it" : "Message Takes", text: $draft, axis: .vertical)
+                        TextField(chat?.running == true ? (id.hasPrefix("board:") ? "Steer it" : "Queue a message") : "Message Takes", text: $draft, axis: .vertical)
                             .lineLimit(1...5)
                             .focused($typing)
                     }
@@ -971,6 +1003,8 @@ struct BoardChatView: View {
             .padding(.horizontal, 12).padding(.vertical, 8)
             .background(Palette.canvas)
         }
+        .overlay { if memory { MemoryCard(sessionID: id) { memory = false } } }
+        .animation(Brand.quick, value: memory)
         .background(Palette.canvas.ignoresSafeArea())
         .toolbar(.hidden, for: .navigationBar)
         .task {
@@ -997,7 +1031,8 @@ struct BoardChatView: View {
         spoke = true
     }
 
-    /// While Claude works, the message steers the run. The arrow while recording stops and sends.
+    /// While Takes works, a board chat's message steers the run and a session's waits in the queue.
+    /// The arrow while recording stops and sends.
     private func send() {
         Task {
             if voice.recording { await toggleVoice() }

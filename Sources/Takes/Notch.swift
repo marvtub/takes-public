@@ -43,34 +43,39 @@ struct NotchLayout: Equatable {
     }
 }
 
-/// The black shape: a band as wide as the notch on top, the wider text part under it, with round
-/// outer corners and soft inner ones, so it reads as the notch grown down.
+/// The panel's shape: flat along the top edge of the screen, the full width (2026-10-09: the
+/// band only as wide as the notch left gaps top left and right), round corners at the bottom.
 struct NotchShape: Shape {
-    var band: CGFloat
-    var notchWidth: CGFloat
-
     func path(in r: CGRect) -> Path {
-        let outer: CGFloat = 22, inner: CGFloat = 10
-        var p = Path()
-        guard band > 0, notchWidth > 0 else {
-            return Path(UnevenRoundedRectangle(cornerRadii: .init(bottomLeading: outer, bottomTrailing: outer)).path(in: r).cgPath)
+        UnevenRoundedRectangle(cornerRadii: .init(bottomLeading: 22, bottomTrailing: 22)).path(in: r)
+    }
+}
+
+/// The blue light round the panel, with the clear margin it spreads into. It shows only outside
+/// the panel: the panel is a little see-through, and blue under it lit the strip beside the
+/// camera, where the screen's notch cut it in two (2026-10-09).
+struct NotchGlow: View {
+    let size: CGSize
+
+    var body: some View {
+        let m = NotchView.margin
+        ZStack {
+            NotchShape().fill(Theme.accent).blur(radius: 22).opacity(0.7)
+            NotchShape().stroke(Theme.accent, lineWidth: 3).blur(radius: 6)
         }
-        let l = r.midX - notchWidth / 2, rt = r.midX + notchWidth / 2
-        p.move(to: CGPoint(x: l, y: r.minY))
-        p.addLine(to: CGPoint(x: rt, y: r.minY))
-        p.addLine(to: CGPoint(x: rt, y: r.minY + band - inner))
-        p.addQuadCurve(to: CGPoint(x: rt + inner, y: r.minY + band), control: CGPoint(x: rt, y: r.minY + band))
-        // Square top corners: the panel reads as one piece with the top edge of the screen.
-        p.addLine(to: CGPoint(x: r.maxX, y: r.minY + band))
-        p.addLine(to: CGPoint(x: r.maxX, y: r.maxY - outer))
-        p.addQuadCurve(to: CGPoint(x: r.maxX - outer, y: r.maxY), control: CGPoint(x: r.maxX, y: r.maxY))
-        p.addLine(to: CGPoint(x: r.minX + outer, y: r.maxY))
-        p.addQuadCurve(to: CGPoint(x: r.minX, y: r.maxY - outer), control: CGPoint(x: r.minX, y: r.maxY))
-        p.addLine(to: CGPoint(x: r.minX, y: r.minY + band))
-        p.addLine(to: CGPoint(x: l - inner, y: r.minY + band))
-        p.addQuadCurve(to: CGPoint(x: l, y: r.minY + band - inner), control: CGPoint(x: l, y: r.minY + band))
-        p.closeSubpath()
-        return p
+        .frame(width: size.width, height: size.height)
+        .padding(.horizontal, m).padding(.bottom, m)
+        .mask(Outside(margin: m).fill(style: FillStyle(eoFill: true)))
+    }
+
+    /// All of the area but the panel.
+    private struct Outside: Shape {
+        let margin: CGFloat
+        func path(in r: CGRect) -> Path {
+            var p = Path(r)
+            p.addPath(NotchShape().path(in: CGRect(x: margin, y: 0, width: r.width - 2 * margin, height: r.height - margin)))
+            return p
+        }
     }
 }
 
@@ -78,7 +83,13 @@ struct NotchShape: Shape {
 @MainActor
 final class NotchPanel {
     static let shared = NotchPanel()
-    static let fontSize: Double = 21
+    /// The text size, set with A− and A+ on the bar (2026-10-09: it was fixed at 21).
+    static let fontKey = "notchFontSize"
+    static let fontSizes: ClosedRange<Double> = 15...33
+    static var fontSize: Double {
+        let v = UserDefaults.standard.double(forKey: fontKey)
+        return v == 0 ? 21 : min(fontSizes.upperBound, max(fontSizes.lowerBound, v))
+    }
     private var panel: NSPanel?
     private weak var app: AppModel?
     private var screenWatch: NSObjectProtocol?
@@ -105,27 +116,33 @@ final class NotchPanel {
     }
 
     /// Record with a script shows (`on`) or goes away. Opens the notch if you have not turned that
-    /// off, and closes it on the way out only if it opened it, and never during a take. Not under tests:
-    /// the window pictures show Record with its own prompter.
+    /// off, and fades it out on the way out, never during a take. 2026-10-09: it went only if Record
+    /// had opened it, so one you opened yourself stayed over every other tab. It comes back on
+    /// Record, since opening it turned `auto` on. Not under tests: the window pictures show Record
+    /// with its own prompter.
     func follow(record on: Bool, _ app: AppModel) {
         if on {
-            guard Self.auto, !shown, !AppModel.testing else { return }
+            guard Self.auto, !shown || fading, !AppModel.testing else { return }
             show(app)
             autoOpened = true
-        } else if autoOpened, shown, !app.isRecording {
-            hide()
+        } else if shown, !fading, !app.isRecording {
+            hide(animated: true)
         }
     }
 
     func show(_ app: AppModel) {
         self.app = app
         autoOpened = false
+        let fresh = !shown || fading
+        fade += 1
+        fading = false
         // One prompter at a time: Record puts a small stand-in where the big script was.
         app.notchOpen = true
         let p = panel ?? make()
         panel = p
         place(glow: true)
         // Front without making Takes the active app: the app you show keeps the keyboard.
+        if fresh { slide(p, in: true, then: nil) }
         p.orderFrontRegardless()
         if screenWatch == nil {
             screenWatch = NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification,
@@ -135,14 +152,54 @@ final class NotchPanel {
         }
     }
 
-    func hide() {
+    /// `animated`: it fades and rises into the notch. Showing it again during the fade stops that.
+    func hide(animated: Bool = false) {
         autoOpened = false
-        panel?.orderOut(nil)
         app?.notchOpen = false
         app?.notchTour = false
+        fade += 1
+        guard animated, let p = panel, p.isVisible else { fading = false; panel?.orderOut(nil); return }
+        let n = fade
+        fading = true
+        slide(p, in: false) { [weak self] in
+            guard let self, self.fade == n else { return }
+            self.fading = false
+            p.orderOut(nil)
+            p.alphaValue = 1
+            self.place()
+        }
+    }
+
+    /// Counts shows and hides, so a fade that ends after the next show leaves the panel up.
+    private var fade = 0
+    /// Fading out: still on screen, but already on its way.
+    private var fading = false
+
+    /// The gentle way in and out: a fade with a short drop from the notch, or a rise back into it.
+    private func slide(_ p: NSPanel, in coming: Bool, then done: (() -> Void)?) {
+        let rest = p.frame
+        let up = rest.offsetBy(dx: 0, dy: 14)
+        if coming { p.alphaValue = 0; p.setFrame(up, display: false) }
+        NSAnimationContext.runAnimationGroup { c in
+            c.duration = coming ? 0.32 : 0.26
+            c.timingFunction = CAMediaTimingFunction(name: coming ? .easeOut : .easeIn)
+            p.animator().alphaValue = coming ? 1 : 0
+            p.animator().setFrame(coming ? rest : up, display: true)
+        } completionHandler: {
+            MainActor.assumeIsolated { done?() }
+        }
     }
 
     var contentForTest: NSView? { panel?.contentView }
+
+    /// How far the prompter reaches down into `rect` (screen points), 0 when it is not over it.
+    func reach(into rect: CGRect) -> CGFloat {
+        guard let p = panel, shown, !fading else { return 0 }
+        let m = NotchView.margin
+        let body = CGRect(x: p.frame.minX + m, y: p.frame.minY + m, width: p.frame.width - 2 * m, height: p.frame.height - m)
+        guard body.minX < rect.maxX, body.maxX > rect.minX else { return 0 }
+        return max(0, rect.maxY - body.minY)
+    }
 
     /// The built-in display (the one with the notch), else the main one.
     static var screen: NSScreen? {
@@ -192,6 +249,7 @@ final class NotchPanel {
 struct NotchView: View {
     @Environment(AppModel.self) private var app
     @AppStorage("notchLines") private var lines = 3
+    @AppStorage(NotchPanel.fontKey) private var fontSize = 21.0
     @AppStorage(NotchView.introKey) private var introStep = 0
     @State private var hover = false
     /// What the button under the pointer does. The panel never takes focus, so macOS does not
@@ -203,6 +261,11 @@ struct NotchView: View {
     /// How bright the glow is now: 0 is off. A test can start it lit.
     @State var lit: Double = 0
     static let barHeight: CGFloat = 34
+    /// Solid black, one colour from the top edge down, so the screen's notch melts into it.
+    /// 2026-10-09: 82% black showed the notch as a darker block; solid beside the camera over a
+    /// see-through page then showed as a black bar across the top, over a light window.
+    static let page = Color.black
+    static func fill(band: CGFloat, height: CGFloat) -> Color { page }
     /// The clear room round the panel that the glow spreads into.
     static let margin: CGFloat = 28
 
@@ -218,19 +281,11 @@ struct NotchView: View {
     private var introOn: Bool { introStep < Self.intro.count }
 
     var body: some View {
-        let shape = NotchShape(band: layout.band, notchWidth: layout.notchWidth)
         ZStack(alignment: .top) {
-            // The glow: two soft layers of the accent blue in the panel's shape, under it.
-            ZStack {
-                shape.fill(Theme.accent).blur(radius: 22).opacity(0.7)
-                shape.stroke(Theme.accent, lineWidth: 3).blur(radius: 6)
-            }
-            .frame(width: layout.frame.width, height: layout.frame.height)
-            .opacity(lit)
-            .allowsHitTesting(false)
+            NotchGlow(size: layout.frame.size).opacity(lit).allowsHitTesting(false)
             panel.frame(width: layout.frame.width, height: layout.frame.height)
+                .padding(.horizontal, Self.margin).padding(.bottom, Self.margin)
         }
-        .padding(.horizontal, Self.margin).padding(.bottom, Self.margin)
         .onAppear {
             guard glow else { return }
             // Calm: it swells, holds a moment, and fades.
@@ -249,8 +304,8 @@ struct NotchView: View {
                      scrolling: app.scrolling && !hover, speed: app.speed * size / max(app.fontSize, 1),
                      editable: false, resetToken: app.resetToken, dark: true,
                      voice: app.following ? app.voice : nil, readingLine: 0,
-                     inset: NSSize(width: 24, height: 2), darkPage: .black)
-                .padding(.top, 12)
+                     inset: NSSize(width: 24, height: 2), darkPage: .clear)
+                .padding(.top, 6)
                 // The last line fades into the bar instead of being cut.
                 .mask(LinearGradient(stops: [.init(color: .black, location: 0.8), .init(color: .clear, location: 1)],
                                      startPoint: .top, endPoint: .bottom))
@@ -267,12 +322,14 @@ struct NotchView: View {
                 }
             bar.frame(height: Self.barHeight)
         }
-        .background(NotchShape(band: layout.band, notchWidth: layout.notchWidth).fill(.black))
-        .clipShape(NotchShape(band: layout.band, notchWidth: layout.notchWidth))
+        .background(NotchShape().fill(Self.fill(band: layout.band, height: layout.frame.height)))
+        .clipShape(NotchShape())
         .environment(\.colorScheme, .dark)
         .onHover { hover = $0 }
         // The panel draws a new view for the new size: not in the middle of this one's update.
         .onChange(of: lines) { DispatchQueue.main.async { NotchPanel.shared.place() } }
+        // The panel grows or shrinks so the same number of lines still fits.
+        .onChange(of: fontSize) { DispatchQueue.main.async { NotchPanel.shared.place() } }
         .onChange(of: introOn) { _, on in DispatchQueue.main.async { NotchPanel.shared.place(glow: on) } }
         .onChange(of: introOn, initial: true) { _, on in
             let tour = on && app.notchOpen
@@ -345,6 +402,15 @@ struct NotchView: View {
             button("waveform", app.followVoice ? "Voice follow is on. Click to scroll at a set speed." : "Voice follow is off. Click to follow your voice.",
                    on: app.followVoice, id: "voice") { app.followVoice.toggle() }
             button("arrow.up.to.line", "Back to the top") { app.resetToken += 1 }
+            let sizes = NotchPanel.fontSizes
+            button("textformat.size.smaller", fontSize <= sizes.lowerBound ? "Smaller text (this is the smallest)" : "Smaller text") {
+                fontSize = max(sizes.lowerBound, fontSize - 2)
+            }
+            .disabled(fontSize <= sizes.lowerBound)
+            button("textformat.size.larger", fontSize >= sizes.upperBound ? "Bigger text (this is the biggest)" : "Bigger text") {
+                fontSize = min(sizes.upperBound, fontSize + 2)
+            }
+            .disabled(fontSize >= sizes.upperBound)
             button("rectangle.compress.vertical", lines <= 2 ? "Fewer lines (2 is the least)" : "Fewer lines") { lines = max(2, lines - 1) }
                 .disabled(lines <= 2)
             button("rectangle.expand.vertical", lines >= 6 ? "More lines (6 is the most)" : "More lines") { lines = min(6, lines + 1) }
@@ -477,6 +543,31 @@ struct PrompterWindowView: View {
             Label(title, systemImage: icon).labelStyle(.titleAndIcon)
                 .foregroundStyle(on.wrappedValue ? Theme.accent : .white.opacity(0.85))
                 .padding(.horizontal, 6).frame(height: 24)
+        }
+    }
+}
+
+/// How far the notch prompter reaches into the view it sits behind, so the view can keep clear
+/// of it. `open`: app.notchOpen, which measures again when the prompter comes or goes.
+struct NotchReach: NSViewRepresentable {
+    @Binding var reach: CGFloat
+    let open: Bool
+
+    func makeNSView(context: Context) -> Probe { Probe() }
+    func updateNSView(_ v: Probe, context: Context) {
+        v.report = { r in if abs(reach - r) > 1 { reach = r } }
+        // After the panel has its place for this change.
+        DispatchQueue.main.async { v.measure() }
+    }
+
+    final class Probe: NSView {
+        var report: ((CGFloat) -> Void)?
+        override func layout() { super.layout(); DispatchQueue.main.async { [weak self] in self?.measure() } }
+        override func viewDidMoveToWindow() { super.viewDidMoveToWindow(); measure() }
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+        func measure() {
+            guard let w = window else { return }
+            report?(NotchPanel.shared.reach(into: w.convertToScreen(convert(bounds, to: nil))))
         }
     }
 }

@@ -630,14 +630,11 @@ struct PerformanceView: View {
         let g = groups[min(audienceGroup, groups.count - 1)]
         return card {
             VStack(alignment: .leading, spacing: 12) {
-                HStack {
-                    Text("Audience").font(.nunito(.headline))
-                    Spacer()
-                    Menu {
-                        ForEach(groups.indices, id: \.self) { i in Button(groups[i].title) { audienceGroup = i } }
-                    } label: {
-                        HStack(spacing: 3) { Text(g.title); Image(systemName: "chevron.up.chevron.down").imageScale(.small) }
-                            .font(.inter(.subheadline))
+                Text("Audience").font(.nunito(.headline))
+                // The groups as chips (2026-10-09: no system menu).
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 6) {
+                        ForEach(groups.indices, id: \.self) { i in ToggleChip(title: groups[i].title, on: g.title == groups[i].title) { audienceGroup = i } }
                     }
                 }
                 let top = g.items.map(\.pct).max() ?? 1
@@ -888,7 +885,7 @@ struct FeedCard: View {
     private func picture(_ path: String) -> some View {
         ZStack {
             Color.black.opacity(0.05)
-            RemoteImage(url: model.api.thumb(path, width: 900)) { $0.resizable().scaledToFit() } placeholder: { ProgressView() }
+            RemoteImage(url: model.api.thumb(path, width: 900)) { $0.resizable().scaledToFit() } placeholder: { Palette.well }
             if entry.media_type == "video" {
                 Image(systemName: "play.fill").font(.system(size: 20)).foregroundStyle(.white)
                     .padding(16).background(.black.opacity(0.55), in: Circle())

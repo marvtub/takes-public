@@ -101,9 +101,10 @@ enum SessionView {
             v["file"] = p.hasPrefix(base) ? String(p.dropFirst(base.count)) : p
         }
         if let time { v["time"] = time }
-        all[session.standardizedFileURL.path] = v
-        // Past 200 sessions, drop one whose folder is gone.
-        if all.count > 200, let old = all.keys.first(where: { !FileManager.default.fileExists(atPath: $0) }) { all[old] = nil }
+        let here = session.standardizedFileURL.path
+        all[here] = v
+        // Past 200 sessions, drop one whose folder is gone, never the one just written.
+        if all.count > 200, let old = all.keys.first(where: { $0 != here && !FileManager.default.fileExists(atPath: $0) }) { all[old] = nil }
         UserDefaults.standard.set(all, forKey: key)
     }
 }

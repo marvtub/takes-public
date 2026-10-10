@@ -103,6 +103,14 @@ no process runs in it, and its branch is merged into `origin/main`.
    stages the build. The user starts it with the Update button in the sidebar, when the chats are
    done. The iPhone works the same way: `ios/install.sh` stages, and the phone shows Update.
 
+**Motion and controls.** Every page arrives the same way, so a new page must not do its own
+thing (2026-10-09). Boards come in through `.transition(.page)`, set once where the boards switch
+in `Views.swift`. A page's parts arrive in order with `.arrive(0)`, `.arrive(1)`… No spinner
+while a page reads its data: draw nothing, then let the parts arrive. The helpers are in
+`PageMotion.swift`. Draw controls and charts in Takes's own style (`Theme`, `AccentButtonStyle`,
+`ToggleChip`, the Feedback board's `RuleSwitch`), not stock macOS pickers, switches,
+bordered text fields or Swift Charts defaults.
+
 **Write.** Short, plain comments that say why, with the date for a decision
 (`// Stays private for now (2026-10-04)`). The app calls its assistant "Takes", and errors from
 the chat process say "the chat". Text in the app uses short sentences in the active voice.

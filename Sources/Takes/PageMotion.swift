@@ -2,6 +2,12 @@ import SwiftUI
 
 // Page motion (2026-10-04): pages come in from a soft blur, not a cut. Short and calm, never bouncy.
 // One-shot animations only: an endless SwiftUI animation redraws the window every frame (Motion.swift).
+//
+// The rule for every page (2026-10-09, AGENTS.md "Motion"):
+// - A board arrives through `.transition(.page)`, set once where the boards switch (Views.swift).
+// - A tab that stays mounted uses `.pageFade(shown)`.
+// - The page's parts arrive in order with `.arrive(0)`, `.arrive(1)`… when they first show.
+// - No spinner while a page reads its data: draw nothing, then let the parts arrive.
 
 extension Animation {
     /// A page or section coming into view.
@@ -42,6 +48,24 @@ struct Arrive: ViewModifier {
                     .offset(y: on || reduceMotion ? 0 : 12)
             }
     }
+}
+
+/// A board coming in or going: the page's blur, rise and fade, as a transition.
+struct PageIn: ViewModifier {
+    let on: Bool
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    func body(content: Content) -> some View {
+        content
+            .opacity(on ? 1 : 0)
+            .blur(radius: on || reduceMotion ? 0 : 10)
+            .offset(y: on || reduceMotion ? 0 : 8)
+    }
+}
+
+extension AnyTransition {
+    /// Every board comes in and goes this way.
+    static var page: AnyTransition { .modifier(active: PageIn(on: false), identity: PageIn(on: true)) }
 }
 
 extension View {
@@ -94,4 +118,28 @@ extension View {
     func reveal<Key: Equatable>(on key: Key, ready: Bool = true, settle: Double = 0) -> some View {
         modifier(Reveal(key: key, ready: ready, settle: settle))
     }
+}
+
+/// A part of a page arriving when it first shows: blur, rise and fade, after the parts before it.
+/// `index` sets the order. Onboarding slows it with its pace.
+struct ArriveOnShow: ViewModifier {
+    @Environment(\.accessibilityReduceMotion) var still
+    let index: Int
+    @State private var on = false
+
+    func body(content: Content) -> some View {
+        // One run loop first: the hidden state must draw before it animates.
+        let shown = on || revealAtOnce
+        content
+            .animation(.smooth(duration: 0.6 * Onboarding.pace).delay(Double(index) * 0.06 * Onboarding.pace)) {
+                $0.opacity(shown ? 1 : 0)
+                    .blur(radius: shown || still ? 0 : 8)
+                    .offset(y: shown || still ? 0 : 12)
+            }
+            .onAppear { DispatchQueue.main.async { on = true } }
+    }
+}
+
+extension View {
+    func arrive(_ index: Int) -> some View { modifier(ArriveOnShow(index: index)) }
 }

@@ -25,7 +25,12 @@ struct TakesApp: App {
                 .overlay { SearchPalette().environment(app) }
                 .overlay { OnboardingLayer().environment(app) }
                 .overlay { FirstTakeLayer().environment(app) }
-                .task { Onboarding.shared.startIfNew(app.library); FirstTake.shared.settle(app.library) }
+                .task {
+                    Onboarding.shared.startIfNew(app.library)
+                    FirstTake.shared.settle(app.library)
+                    // ✦ and Assets pick Replicate once its token is in (VideoMaker).
+                    if Plugins.isInstalled(ReplicatePage.plugin.id) { await Replicate.shared.refresh() }
+                }
                 .onOpenURL { app.handle(url: $0) }
         }
         .handlesExternalEvents(matching: ["*"])
@@ -49,9 +54,10 @@ struct TakesApp: App {
                 Button("Styles") { app.toggle(.styles) }.keyboardShortcut("y", modifiers: [.command, .shift])
                 Button("Plugins") { app.toggle(.plugins) }.keyboardShortcut("p", modifiers: [.command, .shift])
                 Button("Chat with Takes") {
-                    // Record shows no docked chat: open it on Script.
+                    // Record: the chat takes the script's column, and goes again.
                     if app.chats.docked, UserDefaults.standard.string(forKey: "rightTab") == "script", app.board == nil {
-                        SessionMode.set(.write); app.chats.open = true
+                        if app.chats.onRecord && app.chats.open { app.chats.onRecord = false }
+                        else { app.chats.onRecord = true; app.chats.open = true }
                     } else { app.chats.open.toggle() }
                 }.keyboardShortcut("l", modifiers: [.command, .shift])
             }
@@ -236,7 +242,7 @@ struct ContentView: View {
                     .overlay(alignment: .bottomTrailing) {
                         BoardChatCorner(hub: app.chats).padding(18)
                     }
-                    .transition(.opacity)
+                    .transition(.page)
                 } else if app.board == .styles {
                     ChatSlot(hub: app.chats, target: ChatTarget(chat: app.chats.styles, title: "Styles", session: nil)) {
                         StylesBoard(root: library.root)
@@ -244,19 +250,20 @@ struct ContentView: View {
                     .overlay(alignment: .bottomTrailing) {
                         BoardChatCorner(hub: app.chats, styles: true).padding(18)
                     }
-                    .transition(.opacity)
+                    .transition(.page)
                 } else if app.board == .comments {
                     CommentsBoard(hub: app.chats, store: app.copilot, root: library.root)
-                        .transition(.opacity)
+                        .transition(.page)
                 } else if app.board == .plugins {
-                    PluginsBoard().transition(.opacity)
+                    PluginsBoard().transition(.page)
                 } else if case .plugin(let id)? = app.board, let board = Plugins.named(id)?.board {
-                    board(app).transition(.opacity)
+                    board(app).transition(.page)
                 } else {
                     DetailView(library: library, camera: app.camera, screen: app.screen)
+                        .transition(.page)
                 }
             }
-            .animation(Theme.motion, value: app.board)
+            .animation(.page, value: app.board)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(Theme.paper)
     }
@@ -820,6 +827,9 @@ struct DetailView: View {
     @Environment(\.colorScheme) private var scheme
     /// The full-window tabs opened in this session so far. They stay mounted.
     @State private var opened = KeptTabs()
+    @State private var stageSize = CGSize.zero
+    /// How far the notch prompter reaches down into the stage.
+    @State private var notchReach: CGFloat = 0
 
     /// The post tab takes the whole window. The camera and takes only distract while you write.
     private var postMode: Bool {
@@ -879,6 +889,10 @@ struct DetailView: View {
         .onChange(of: postMode) { _, on in app.postView = on }
         .onChange(of: stageCovered) { _, on in app.stageCovered = on }
         .onChange(of: notchRecord, initial: true) { _, on in NotchPanel.shared.follow(record: on, app) }
+        // A take that ran on while you left Record: the notch goes once it ends.
+        .onChange(of: app.isRecording) { _, _ in NotchPanel.shared.follow(record: notchRecord, app) }
+        // Another board (Plugins, Performance…) replaces this view: the notch goes too.
+        .onDisappear { NotchPanel.shared.follow(record: false, app) }
     }
 
     /// Post always covers the stage. Assets and Sound cover it until you open a file:
@@ -949,6 +963,7 @@ struct DetailView: View {
         // A file opened in Assets or Sound must not cover the camera in Record.
         .onChange(of: rightTab) { _, tab in
             if tab == "script" && !app.isRecording { app.preview = nil }
+            if tab != "script" { app.chats.onRecord = false }
             // A hidden tab keeps its views: typing must not go on in its text field.
             NSApp.keyWindow?.makeFirstResponder(nil)
         }
@@ -956,6 +971,12 @@ struct DetailView: View {
         .onChange(of: library.current?.url) { opened = KeptTabs(session: library.current?.url, tabs: cover.map { [$0] } ?? []) }
         // Nothing extra stays mounted while a take records.
         .onChange(of: app.isRecording) { _, on in if on { opened = KeptTabs() } }
+    }
+
+    /// A plugin's clip and the camera beside it, as one group under the notch prompter.
+    private var plugged: StageLayout? {
+        guard stageHook != nil else { return nil }
+        return StageLayout(size: stageSize, top: notchReach, clip: app.stageAspect, vertical: camera.orientation == .vertical)
     }
 
     private func pane(_ k: String, _ doc: SessionDoc) -> some View {
@@ -966,7 +987,7 @@ struct DetailView: View {
             case "write": ScriptPage(doc: doc)
             case "assets": AssetsPane(doc: doc, wide: true)
             case "broll": BrollPane(doc: doc)
-            default: SoundsPane(doc: doc, bed: app.bed, wide: true)
+            default: SoundsPane(doc: doc, wide: true)
             }
         }
         .background(Theme.canvas)
@@ -982,12 +1003,15 @@ struct DetailView: View {
                     ZStack {
                         // A plugin's stage (a clip to react to): under the camera, which moves to
                         // its corner.
-                        if let doc = library.current, let hook = stageHook {
-                            hook.stage(app, doc.url).transition(.opacity)
+                        if let doc = library.current, let hook = stageHook, let f = plugged {
+                            hook.stage(app, doc.url)
+                                .frame(width: f.clip.width, height: f.clip.height)
+                                .position(x: f.clip.midX, y: f.clip.midY)
+                                .transition(.opacity)
                         }
                         // The live preview stays mounted, even under the player or while paused.
                         // Removing its layer while the session stops or starts deadlocks AVFoundation.
-                        CameraCard(camera: camera, doc: library.current, inCorner: stageHook != nil, accessory: stageButtons)
+                        CameraCard(camera: camera, doc: library.current, corner: plugged?.camera, accessory: stageButtons)
                         if app.preview != nil {
                             // Dark at once under a file: the player fades in on the stage, not
                             // over the daylight Record page and the camera (2026-10-04).
@@ -1016,6 +1040,9 @@ struct DetailView: View {
                         }
                     }
                     .frame(minWidth: 380, maxWidth: .infinity, minHeight: 240, maxHeight: .infinity)
+                    .onGeometryChange(for: CGSize.self) { $0.size } action: { stageSize = $0 }
+                    .background(NotchReach(reach: $notchReach, open: app.notchOpen))
+                    .animation(Theme.motion, value: plugged)
                     // Daylight while you prepare, dark from the countdown on (AppModel.lightsDown).
                     .background(app.lightsDown ? Theme.stage : Theme.canvas)
                     .animation(.easeInOut(duration: 0.45), value: app.lightsDown)
@@ -1024,9 +1051,6 @@ struct DetailView: View {
                     .overlay(alignment: .bottom) { StageToast() }
                     .overlay(alignment: .top) { StageNotice(session: library.current?.url) }
                     .animation(Theme.motion, value: stageHook != nil)
-                    .overlay(alignment: .topTrailing) {
-                        if let url = app.preview, Asset.kind(of: url) == .video { BedPill(bed: app.bed).padding(12) }
-                    }
                     .overlay(alignment: .topLeading) {
                         // Assets and Sound: back to the whole list.
                         if app.preview != nil, !app.isRecording, rightTab == "assets" || rightTab == "sounds" {
@@ -1054,7 +1078,8 @@ struct DetailView: View {
             } right: {
                 // Not under a full-window tab: that tab shows the chat, and a second copy out of
                 // sight drew every streamed word twice.
-                ChatSlot(hub: app.chats, doc: library.current, replace: true, active: !app.isRecording && cover == nil && !recordOnly) {
+                ChatSlot(hub: app.chats, doc: library.current, replace: true,
+                         active: !app.isRecording && cover == nil && (!recordOnly || app.chats.onRecord)) {
                     if let doc = library.current {
                         // The column lists files only while one plays on the stage. Under a full-window
                         // tab it keeps the script and takes: before, it built a second copy of the
@@ -1063,7 +1088,7 @@ struct DetailView: View {
                             if rightTab == "assets" && cover == nil && !app.isRecording {
                                 AssetsPane(doc: doc)
                             } else if rightTab == "sounds" && cover == nil && !app.isRecording {
-                                SoundsPane(doc: doc, bed: app.bed)
+                                SoundsPane(doc: doc)
                             } else {
                                 ScriptPane(doc: doc)
                                 Rule()
@@ -1109,8 +1134,9 @@ struct CameraCard: View {
     @Environment(AppModel.self) var app
     @ObservedObject var camera: CameraRecorder
     var doc: SessionDoc?
-    /// Small, in the top right corner of a plugin's stage (a reaction: the clip has the stage).
-    var inCorner = false
+    /// Small, beside a plugin's clip (a reaction: the clip has the stage). Where, on the stage.
+    var corner: CGRect?
+    private var inCorner: Bool { corner != nil }
     /// Plugin buttons in the caption ("React to a video").
     var accessory: AnyView? = nil
     @AppStorage("rightTab") private var rightTab = "script"
@@ -1139,10 +1165,8 @@ struct CameraCard: View {
             // The caption rides on the card's top edge, so the two stay together at any size.
             .overlay(alignment: .topLeading) { if !inCorner { caption.offset(y: -36).transition(.opacity) } }
             .aspectRatio(ratio, contentMode: .fit)
-            .frame(width: inCorner ? (camera.orientation == .vertical ? 130 : 240) : nil)
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: inCorner ? .topTrailing : .center)
-            .padding(.horizontal, inCorner ? 44 : 28).padding(.top, inCorner ? 72 : 56).padding(.bottom, 96)  // the record pill sits below
-            .animation(Theme.motion, value: inCorner)
+            .modifier(Placed(rect: corner))
+            .animation(Theme.motion, value: corner)
         .animation(Theme.motion, value: camera.paused)
         .animation(Theme.motion, value: rolling)
     }
@@ -1177,11 +1201,20 @@ struct CameraCard: View {
                     Color.clear.frame(height: 0)
                 }
                 Text("Camera off").font(Theme.sans(15, .semibold)).foregroundStyle(Theme.ink)
-                Button { camera.setPaused(false) } label: { Label("Turn on", systemImage: "video") }
-                    .buttonStyle(AccentButtonStyle(kind: .quiet))
+                    .lineLimit(1).minimumScaleFactor(0.8)
+                // A narrow card drops the icon before the words wrap.
+                ViewThatFits(in: .horizontal) {
+                    turnOn(Label("Turn on", systemImage: "video"))
+                    turnOn(Text("Turn on"))
+                }
             }
-            .padding(20)
+            .padding(.vertical, 20).padding(.horizontal, 12)
         }
+    }
+
+    private func turnOn(_ label: some View) -> some View {
+        Button { camera.setPaused(false) } label: { label.lineLimit(1).fixedSize() }
+            .buttonStyle(AccentButtonStyle(kind: .quiet))
     }
 }
 
@@ -2427,7 +2460,7 @@ struct ScriptPane: View {
         } else if let id = focused, let i = scriptComments.firstIndex(where: { $0.id == id }) {
             let c = scriptComments[i]
             CommentCard(comment: c, number: i + 1,
-                        onReply: { comments.reply(id, $0) },
+                        onEdit: { comments.setText(id, $0) },
                         onResolve: { comments.setResolved(id, c.open) },
                         onDelete: { comments.delete(id); focused = nil },
                         onClose: { withAnimation(Theme.motion) { focused = nil } },
@@ -2469,7 +2502,7 @@ struct NotchStandIn: View {
             Spacer(minLength: 12)
             // A small picture of the notch with lines of text under it.
             ZStack(alignment: .top) {
-                NotchShape(band: 14, notchWidth: 56).fill(.black)
+                NotchShape().fill(.black)
                 VStack(spacing: 5) {
                     ForEach([0.8, 0.95, 0.6], id: \.self) { w in
                         Capsule().fill(.white.opacity(0.75)).frame(width: 150 * w, height: 4)
@@ -3241,6 +3274,44 @@ struct Prompter: NSViewRepresentable {
             offset = min(maxY, offset + CGFloat(speed / 60))
             clip.scroll(to: NSPoint(x: 0, y: offset))
             scroll.reflectScrolledClipView(clip)
+        }
+    }
+}
+
+/// A plugin's clip on the Record stage with the camera beside it: one group, centred, under the
+/// notch prompter and above the record pill. 2026-10-09: the camera sat in the top corner under
+/// the prompter, then in a column of its own that left a wide clip small and low.
+struct StageLayout: Equatable {
+    var clip: CGRect
+    var camera: CGRect
+
+    /// `top`: how far the notch prompter reaches into the stage. `clip`: its width over height.
+    init(size: CGSize, top: CGFloat, clip a: CGFloat, vertical: Bool) {
+        let side: CGFloat = 28, gap: CGFloat = 20, caption: CGFloat = 40
+        let top = max(56, top + caption), bottom: CGFloat = 96
+        let w = max(1, size.width - 2 * side), h = max(1, size.height - top - bottom)
+        let camW: CGFloat = vertical ? 130 : 220
+        let camH = camW / (vertical ? 9.0 / 16.0 : 16.0 / 9.0)
+        let a = max(0.2, a)
+        let clipW = max(1, min(w - camW - gap, h * a))
+        let clipH = clipW / a
+        let x = side + (w - clipW - gap - camW) / 2
+        // Centred on the whole stage, and lower only as far as the prompter needs.
+        let y = max(top, 56 + max(0, size.height - 56 - bottom - clipH) / 2)
+        self.clip = CGRect(x: x, y: y, width: clipW, height: clipH)
+        self.camera = CGRect(x: x + clipW + gap, y: y, width: camW, height: camH)
+    }
+}
+
+/// The camera card: full stage, or at a place a plugin's layout gave it.
+private struct Placed: ViewModifier {
+    let rect: CGRect?
+    func body(content: Content) -> some View {
+        if let r = rect {
+            content.frame(width: r.width, height: r.height).position(x: r.midX, y: r.midY)
+        } else {
+            content.frame(maxWidth: .infinity, maxHeight: .infinity)
+                .padding(.horizontal, 28).padding(.top, 56).padding(.bottom, 96)  // the record pill sits below
         }
     }
 }

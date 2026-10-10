@@ -15,20 +15,44 @@ struct SessionView: View {
     @State private var shooting: Shot?
     /// Something was said in the chat (the live chat streams outside this view).
     @State private var talked = false
+    /// The More panel, and the cards it opens (2026-10-09).
+    @State private var more = false
+    @State private var confirm: Confirm?
+    @State private var ask: NameAsk?
+    /// The chat's memory card, tools panel and past conversations (2026-10-09).
+    @State private var memory = false
+    @State private var chatTools = false
+    @State private var pastChats = false
+    @Environment(\.dismiss) private var dismiss
 
     enum Tab: String, CaseIterable { case chat = "Chat", files = "Files", script = "Script", board = "Board", post = "Post" }
     enum RecordMode: String, Identifiable { case prompter, camera; var id: String { rawValue } }
 
     /// The Mac's meta line: project · takes.
     private var meta: String {
-        let n = detail?.files.filter { $0.folder == "takes" }.count ?? session.takes
-        return "\(session.project) · \(n) take\(n == 1 ? "" : "s")"
+        let n = detail.map { Set($0.files.compactMap(\.take)).count } ?? session.takes
+        return "\(detail?.session.project ?? session.project) · \(n) take\(n == 1 ? "" : "s")"
     }
 
     var body: some View {
         VStack(spacing: 0) {
-            TopBar(title: session.title, subtitle: meta) {
-                if tab == .chat { ContextRing(sessionID: session.id) }
+            TopBar(title: detail?.session.title ?? session.title, subtitle: meta) {
+                if tab == .chat {
+                    ContextRing(sessionID: session.id) { memory = true }
+                    // The Mac chat's tools: new, past conversations, compact.
+                    Button { Brand.select(); withAnimation(Brand.quick) { chatTools.toggle() } } label: {
+                        Image(systemName: "slider.horizontal.3").font(.system(size: 15, weight: .medium)).foregroundStyle(Palette.muted)
+                            .frame(width: 36, height: 40).contentShape(Rectangle())
+                    }
+                    .buttonStyle(.press)
+                    .accessibilityLabel("Conversations")
+                }
+                // The Mac header's More: our own panel, not a system menu.
+                Button { Brand.select(); withAnimation(Brand.quick) { more.toggle() }; Task { await model.loadProjects() } } label: {
+                    RoundIcon(icon: "ellipsis", size: 40, label: "More")
+                }
+                .buttonStyle(.press)
+                .disabled(detail == nil)
                 // The Mac's red record dot. A tap records with the script; a long press uses the
                 // Camera app (no system menu, 2026-10-04).
                 Button { recording = .prompter } label: {
@@ -49,7 +73,7 @@ struct SessionView: View {
                     switch tab {
                     case .chat: ChatView(session: session, detail: detail, show: { showing = $0 }, record: { recording = .prompter })
                     case .files: FilesView(detail: detail, show: { showing = $0 }, reload: { await reload() })
-                    case .script: ScriptView(sessionID: session.id, text: detail.script, reload: { await reload() })
+                    case .script: ScriptView(sessionID: session.id, detail: detail, reload: { await reload() })
                     case .board: BoardView(sessionID: session.id, detail: detail, show: { showing = $0 },
                                            record: { shooting = $0 }, reload: { await reload() }, toChat: { tab = .chat })
                     case .post: PostView(sessionID: session.id, post: detail.post, posts: detail.posts ?? [], sides: detail.sides ?? [], profile: detail.profile,
@@ -70,6 +94,27 @@ struct SessionView: View {
             }
         }
         .background(Palette.canvas.ignoresSafeArea())
+        .overlay {
+            if more {
+                FloatingPanel(open: $more) {
+                    SessionMore(session: session, detail: detail, open: $more, confirm: $confirm, ask: $ask,
+                                left: { dismiss() }, reload: { await reload() })
+                }
+            }
+        }
+        .overlay {
+            if chatTools {
+                FloatingPanel(open: $chatTools) {
+                    ChatTools(sessionID: model.resolve(session.id), open: $chatTools) { pastChats = true }
+                }
+            }
+        }
+        .overlay { if memory { MemoryCard(sessionID: session.id) { memory = false } } }
+        .animation(Brand.quick, value: memory)
+        .sheet(isPresented: $pastChats) { PastChatsSheet(sessionID: model.resolve(session.id)) { pastChats = false } }
+        .asks(confirm: $confirm, name: $ask)
+        .overlay(alignment: .bottom) { Toast(text: $model.toast) }
+        .animation(Brand.quick, value: model.toast)
         .toolbar(.hidden, for: .navigationBar)
         .animation(Brand.spring, value: blank)
         .task {
@@ -106,7 +151,8 @@ struct SessionView: View {
                              close: { shooting = nil }, toChat: { shooting = nil; tab = .chat })
         }
         .fullScreenCover(item: $showing) { f in
-            Viewer(file: f, sessionID: session.id, onDone: { showing = nil; Task { await reload() } })
+            Viewer(file: f, sessionID: session.id, onDone: { showing = nil; Task { await reload() } },
+                   toChat: { showing = nil; tab = .chat })
         }
         .safeAreaInset(edge: .bottom) { UploadsBar(uploads: model.uploads, outbox: model.outbox, sessionID: model.resolve(session.id)) }
         // A change reached the Mac, or a new one waits: show the session as it is now.
@@ -253,8 +299,14 @@ struct ChatView: View {
     @State private var waiting: Set<Int> = []
     @State private var picks: [PhotosPickerItem] = []
     @State private var importing = false
+    @State private var choosingPhotos = false
     @FocusState private var typing: Bool
     @State private var latestRequest = 0
+    /// The + panel (2026-10-09: Takes's own, not a system menu), and the session's files named with
+    /// @ or picked there: each goes as its path on a line of its own, which Takes reads (ChatRefs).
+    @State private var adding = false
+    @State private var browsing = false
+    @State private var refs: [String] = []
 
     private var chat: Chat { live.id == session.id ? (live.chat ?? detail.chat) : detail.chat }
 
@@ -294,6 +346,7 @@ struct ChatView: View {
             picks = []
             for item in items { Task { await upload(item) } }
         }
+        .photosPicker(isPresented: $choosingPhotos, selection: $picks, matching: .any(of: [.images, .videos]))
         .fileImporter(isPresented: $importing, allowedContentTypes: [.item], allowsMultipleSelection: true) { r in
             guard case .success(let urls) = r else { return }
             for u in urls {
@@ -329,17 +382,101 @@ struct ChatView: View {
         }
     }
 
+    /// "@" and what follows it at the end of the box, while typing a reference.
+    private var atQuery: String? {
+        guard let r = draft.range(of: #"(?:^|\s)@([\w.-]*)$"#, options: .regularExpression) else { return nil }
+        return String(draft[r]).trimmingCharacters(in: .whitespaces).dropFirst().description
+    }
+
+    /// What an @ can name: the open comments, the storyboard's shots, the session's files.
+    private var suggestions: [(id: String, icon: String, title: String, pick: () -> Void)] {
+        guard let q = atQuery else { return [] }
+        var out: [(String, String, String, () -> Void)] = []
+        if detail.openComments > 0, q.isEmpty || "comments".hasPrefix(q.lowercased()) {
+            out.append(("comments", "text.bubble", "comments · \(detail.openComments) open", { replaceAt(Self.commentsToken + " ") }))
+        }
+        for (i, shot) in (detail.storyboard ?? []).enumerated() where q.isEmpty || "shot\(i + 1)".hasPrefix(q.lowercased()) || shot.say.localizedCaseInsensitiveContains(q) {
+            let say = shot.say.split(separator: "\n").first.map(String.init) ?? ""
+            out.append(("shot-\(shot.id)", "rectangle.split.3x1", "Shot \(i + 1)\(say.isEmpty ? "" : ": \(say)")", {
+                replaceAt("storyboard shot \(shot.id)\(say.isEmpty ? "" : " (“\(say)”)") ")
+            }))
+        }
+        for f in detail.files where q.isEmpty || f.name.localizedCaseInsensitiveContains(q) {
+            out.append((f.path, f.isVideo ? "film" : f.isImage ? "photo" : f.isAudio ? "waveform" : "doc", f.name, {
+                replaceAt("")
+                if !refs.contains(f.path) { refs.append(f.path) }
+            }))
+        }
+        return Array(out.prefix(6)).map { (id: $0.0, icon: $0.1, title: $0.2, pick: $0.3) }
+    }
+
+    private func replaceAt(_ with: String) {
+        Brand.select()
+        if let r = draft.range(of: #"@[\w.-]*$"#, options: .regularExpression) { draft.replaceSubrange(r, with: with) }
+    }
+
+    private var addPanel: some View {
+        VStack(alignment: .leading, spacing: 1) {
+            PanelRow(icon: "photo.on.rectangle", title: "Photos and videos") { adding = false; choosingPhotos = true }
+                .accessibilityIdentifier("add-photos")
+            PanelRow(icon: "folder", title: "Files") { adding = false; importing = true }
+                .accessibilityIdentifier("add-files")
+            if !detail.files.isEmpty {
+                PanelGroup(icon: "at", title: "A file of this video", open: $browsing) {
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 1) {
+                            ForEach(detail.files.prefix(40)) { f in
+                                PanelChoice(title: f.name, checked: refs.contains(f.path)) {
+                                    if let i = refs.firstIndex(of: f.path) { refs.remove(at: i) } else { refs.append(f.path) }
+                                }
+                            }
+                        }
+                    }
+                    .frame(maxHeight: 220)
+                }
+            }
+        }
+        .padding(6)
+        .background(Palette.paper, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(Palette.border, lineWidth: 0.5))
+        .transition(.opacity.combined(with: .offset(y: 6)))
+    }
+
+    private var suggestionList: some View {
+        VStack(alignment: .leading, spacing: 1) {
+            ForEach(suggestions, id: \.id) { s in PanelRow(icon: s.icon, title: s.title, action: s.pick) }
+        }
+        .padding(6)
+        .background(Palette.paper, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(Palette.border, lineWidth: 0.5))
+        .transition(.opacity.combined(with: .offset(y: 6)))
+    }
+
     private var composer: some View {
         VStack(alignment: .leading, spacing: 8) {
+            if adding { addPanel }
+            if !suggestions.isEmpty && typing { suggestionList }
             if detail.openComments > 0 && !voice.recording {
                 OpenCommentsChip(sessionID: session.id, count: detail.openComments) { ask in
                     Task { _ = await model.say(ask, in: session.id, from: "Chat", tokens: true) }
                 }
                 .transition(.opacity.combined(with: .offset(y: 4)))
             }
-            if !attached.isEmpty || !waiting.isEmpty {
+            if !attached.isEmpty || !waiting.isEmpty || !refs.isEmpty {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 6) {
+                        ForEach(refs, id: \.self) { p in
+                            HStack(spacing: 5) {
+                                Image(systemName: "at")
+                                Text((p as NSString).lastPathComponent).lineLimit(1)
+                                Button { withAnimation(Brand.quick) { refs.removeAll { $0 == p } } } label: { Image(systemName: "xmark.circle.fill") }
+                                    .buttonStyle(.press).accessibilityLabel("Leave out \((p as NSString).lastPathComponent)")
+                            }
+                            .font(.inter(.caption, .medium)).foregroundStyle(Palette.accentInk)
+                            .padding(.horizontal, 10).padding(.vertical, 6)
+                            .background(Palette.accentSoft, in: Capsule())
+                            .transition(.scale.combined(with: .opacity))
+                        }
                         ForEach(attached, id: \.self) { p in
                             HStack(spacing: 5) {
                                 Image(systemName: "paperclip")
@@ -360,17 +497,14 @@ struct ChatView: View {
                 }
             }
             HStack(alignment: .bottom, spacing: 8) {
-                Menu {
-                    PhotosPicker(selection: $picks, matching: .any(of: [.images, .videos])) {
-                        Label("Photos and videos", systemImage: "photo.on.rectangle")
-                    }
-                    Button { importing = true } label: { Label("Files", systemImage: "folder") }
-                } label: {
+                // The + opens Takes's own panel above the box; the pickers open from the view.
+                Button { Brand.select(); withAnimation(Brand.quick) { adding.toggle(); browsing = false } } label: {
                     Image(systemName: "plus").font(.system(size: 17, weight: .semibold)).foregroundStyle(Palette.ink)
+                        .rotationEffect(.degrees(adding ? 45 : 0))
                         .frame(width: 38, height: 38)
                         .background(Palette.well, in: Circle())
                 }
-                .menuStyle(.button).buttonStyle(.press)
+                .buttonStyle(.press)
                 .accessibilityLabel("Add files")
                 // One button on the right, as in QuickSay (2026-10-03: "too messy"): the mic while
                 // the box is empty, the arrow once there is something to send (it also stops a
@@ -380,7 +514,7 @@ struct ChatView: View {
                     if voice.recording {
                         recordingRow
                     } else {
-                        TextField("Message Takes", text: $draft, axis: .vertical)
+                        TextField(chat.compacting ? "Queue a message: it goes after compacting" : "Message Takes", text: $draft, axis: .vertical)
                             .lineLimit(1...6)
                             .focused($typing)
                             .accessibilityIdentifier("chat-input")
@@ -417,6 +551,8 @@ struct ChatView: View {
         .padding(.horizontal, 12).padding(.top, 8).padding(.bottom, 8)
         .background(Palette.canvas)
         .animation(Brand.quick, value: attached)
+        .animation(Brand.quick, value: refs)
+        .animation(Brand.quick, value: atQuery)
         .onDisappear { voice.cancel() }
         .onChange(of: draft) {
             if draft.isEmpty && attached.isEmpty { spoke = false }
@@ -460,7 +596,7 @@ struct ChatView: View {
     }
 
     private var canSend: Bool {
-        voice.recording || (waiting.isEmpty && (!Self.withoutToken(draft).isEmpty || !attached.isEmpty))
+        voice.recording || (waiting.isEmpty && (!Self.withoutToken(draft).isEmpty || !attached.isEmpty || !refs.isEmpty))
     }
 
     /// The arrow while recording stops, adds the words and sends in one tap.
@@ -473,16 +609,21 @@ struct ChatView: View {
             return
         }
         var text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Each named file on a line of its own: Takes reads the path, the chat shows a card.
+        if !refs.isEmpty { text += (text.isEmpty ? "" : "\n\n") + refs.joined(separator: "\n") }
         if !attached.isEmpty {
             text += (text.isEmpty ? "I sent you these from my phone:" : "\n\nFrom my phone:") + "\n" + attached.joined(separator: "\n")
         }
         let before = (draft, attached, spoke)
+        let named = refs
         latestRequest += 1
         draft = ""
         attached = []
+        refs = []
+        adding = false
         offerComments()
         Task {
-            if !(await model.say(text, in: session.id, from: "Chat", voice: before.2, tokens: true)) { draft = before.0; attached = before.1; spoke = before.2 }
+            if !(await model.say(text, in: session.id, from: "Chat", voice: before.2, tokens: true)) { draft = before.0; attached = before.1; spoke = before.2; refs = named }
         }
     }
 
@@ -679,6 +820,8 @@ struct FilesView: View {
     /// Sections folded into a pile of small thumbnails, as on the Mac. One list for every session.
     @AppStorage("files.folded") private var foldedStore = ""
     private static let order = ["edits", "thumbnails", "takes", "stills", "generated", "uploads", "assets"]
+    /// Files, B-roll or Sound: the Mac's Assets switch (2026-10-09).
+    @AppStorage("filesPage") private var page = "files"
     static let firstFew = 4
     private let columns = [GridItem(.adaptive(minimum: 150), spacing: 10)]
 
@@ -697,6 +840,18 @@ struct FilesView: View {
     }
 
     var body: some View {
+        VStack(spacing: 0) {
+            Segments(items: ["files", "broll", "sound"], selection: $page, title: { ["files": "Files", "broll": "B-roll", "sound": "Sound"][$0] ?? $0 })
+                .padding(.horizontal, 16).padding(.top, 10)
+            switch page {
+            case "broll": BrollPage(sessionID: detail.session.id).transition(.opacity)
+            case "sound": SoundPage(sessionID: detail.session.id, detail: detail).transition(.opacity)
+            default: files
+            }
+        }
+    }
+
+    private var files: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
                 // The style Takes edits this video in, as on the Mac's Assets tab.
@@ -855,47 +1010,150 @@ struct Tile: View {
             }
         }
         .buttonStyle(Pressable(scale: 0.97))
-        .contextMenu {
-            if let n = file.take {
-                Button { Task { await model.keeper(sessionID, take: n); await reload() } } label: {
-                    Label(file.keeper == true ? "Remove the star" : "Star as keeper", systemImage: "star")
-                }
-            }
-        }
     }
 }
 
 struct ScriptView: View {
     @EnvironmentObject var model: Model
     let sessionID: String
-    let text: String
+    let detail: SessionDetail
     let reload: () async -> Void
     @State private var editing = false
+    /// "main" or the variant on show, as the Mac's draft bar.
+    @AppStorage private var draft: String
+    @State private var history = false
+    @State private var confirm: Confirm?
+    @State private var ask: NameAsk?
+    @State private var failed: String?
+    @State private var busy = false
+    /// A + was tapped: the new variant shows once it arrives, as on the Mac.
+    @State private var made = false
+
+    init(sessionID: String, detail: SessionDetail, reload: @escaping () async -> Void) {
+        self.sessionID = sessionID
+        self.detail = detail
+        self.reload = reload
+        _draft = AppStorage(wrappedValue: "main", "scriptDraft." + sessionID)
+    }
+
+    private var variants: [PostVariant] { detail.scriptVariants ?? [] }
+    private var variant: PostVariant? { variants.first { $0.slug == draft } }
+    private var text: String { variant?.text ?? detail.script }
+    private var file: String { variant.map { "variants/\($0.slug).md" } ?? "script.md" }
+    private var hooks: [PostHook] { detail.scriptHooks ?? [] }
 
     var body: some View {
         ScrollView {
-            if text.isEmpty {
-                MascotEmpty(title: "No script yet", message: "Ask Takes to write one, or write it here.")
-                    .padding(.top, 40)
-            } else {
-                CommentedText(sessionID: sessionID, file: "script.md", text: text, font: Self.font, what: "script")
-                    .padding(20)
+            VStack(alignment: .leading, spacing: 12) {
+                if detail.scriptVariants != nil { draftBar.arrive(0) }
+                if let failed { Label(failed, systemImage: "exclamationmark.triangle").font(.inter(.footnote)).foregroundStyle(Palette.danger) }
+                if text.isEmpty {
+                    MascotEmpty(title: "No script yet", message: "Ask Takes to write one, or write it here.")
+                        .padding(.top, 30)
+                } else {
+                    CommentedText(sessionID: sessionID, file: file, text: text, font: Self.font, what: "script")
+                        .id(draft)
+                        .arrive(1)
+                }
+                if !hooks.isEmpty && !text.isEmpty { hookList.arrive(2) }
             }
+            .padding(.horizontal, 20).padding(.vertical, 12)
         }
         .refreshable { await reload() }
-        .safeAreaInset(edge: .top, spacing: 0) {
-            HStack {
-                Spacer()
-                Button { editing = true } label: { Label(text.isEmpty ? "Write" : "Edit", systemImage: "pencil") }
-                    .buttonStyle(.pill(.soft, small: true))
-            }
-            .padding(.horizontal, 16).padding(.bottom, 6)
+        .onChange(of: variants.map(\.slug), initial: true) { old, slugs in
+            if made, let new = slugs.first(where: { !old.contains($0) }) { draft = new; made = false }
+            if draft != "main" && !slugs.contains(draft) { draft = "main" }
         }
+        .asks(confirm: $confirm, name: $ask)
         .sheet(isPresented: $editing) {
-            TextEditSheet(title: "Script", text: text, font: Font(Self.font), limit: nil) { new in
-                try await model.save("script", sessionID, text: new, base: text)
+            TextEditSheet(title: variant?.name ?? "Script", text: text, font: Font(Self.font), limit: nil) { new in
+                if let variant {
+                    try await model.scriptDraft(sessionID, ["action": "save", "slug": variant.slug, "text": new, "base": variant.text])
+                } else {
+                    try await model.save("script", sessionID, text: new, base: detail.script)
+                }
                 // The sheet closes once the Mac has the text, not after a full reload too (2026-10-08).
                 Task { await reload() }
+            }
+        }
+        .sheet(isPresented: $history) {
+            HistorySheet(title: "Script history", subtitle: detail.session.title,
+                         empty: "Takes saves a version while you edit, before each take, and whenever the chat changes the script.",
+                         load: {
+                             let data = try await model.act("/api/script/history", ["id": sessionID], nil, method: "GET")
+                             return try API.decoder.decode([Version].self, from: data)
+                         },
+                         restore: { v in
+                             if let e = await model.tryAct("/api/script/draft", ["id": sessionID], ["action": "restore", "path": v.path]) { return e }
+                             draft = v.draft == "main" || variants.contains { $0.slug == v.draft } ? v.draft : "main"
+                             await reload()
+                             return nil
+                         }, close: { history = false })
+        }
+    }
+
+    /// The Mac's DraftBar (Actions.swift), with the favorite and the Edit button.
+    private var draftBar: some View {
+        DraftBar(variants: variants, draft: $draft, favorite: detail.scriptFavorite ?? "", history: detail.scriptHistory ?? 0,
+                 busy: busy, canNew: !text.isEmpty, new: { act(["action": "new", "from": draft]) }, showHistory: { history = true },
+                 edit: (text.isEmpty ? "Write" : "Edit", { editing = true }),
+                 rename: { v in
+                     ask = NameAsk(title: "Rename the variant", name: v.name) { n in
+                         if let e = await model.tryAct("/api/script/draft", ["id": sessionID], ["action": "rename", "slug": v.slug, "name": n]) { return e }
+                         await reload()
+                         return nil
+                     }
+                 },
+                 delete: { v in
+                     confirm = Confirm(title: "Delete “\(v.name)”?", message: "Takes keeps its text in the script history.", button: "Delete") {
+                         if let e = await model.tryAct("/api/script/draft", ["id": sessionID], ["action": "delete", "slug": v.slug]) { return e }
+                         draft = "main"
+                         await reload()
+                         return nil
+                     }
+                 },
+                 promote: { v in act(["action": "promote", "slug": v.slug]) },
+                 toggleFavorite: { slug in act(["action": "favorite", "slug": slug]) })
+    }
+
+    /// The script's opening options (hooks.json), as the Mac's hook picker on the Script tab.
+    private var hookList: some View {
+        let current = PostHook.opening(text)
+        return VStack(alignment: .leading, spacing: 8) {
+            Text("HOOKS").font(.inter(.caption, .semibold)).tracking(0.8).foregroundStyle(Palette.muted).padding(.top, 6)
+            ForEach(hooks) { h in
+                let on = h.text.trimmingCharacters(in: .whitespacesAndNewlines) == current
+                Button { if !on { act(["action": "hook", "hook": h.id, "draft": draft]) } } label: {
+                    HStack(alignment: .top, spacing: 10) {
+                        Image(systemName: on ? "checkmark.circle.fill" : "circle").foregroundStyle(on ? Palette.accent : Palette.faint).padding(.top, 2)
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(h.text).font(.inter(.callout)).foregroundStyle(Palette.ink).multilineTextAlignment(.leading)
+                            if let n = h.note, !n.isEmpty { Text(n).font(.inter(.footnote)).foregroundStyle(Palette.muted).multilineTextAlignment(.leading) }
+                        }
+                        Spacer(minLength: 0)
+                    }
+                    .padding(12)
+                    .background(Palette.paper, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(on ? Palette.accent : Palette.border))
+                }
+                .buttonStyle(.plain).disabled(busy)
+                .accessibilityLabel(on ? "Hook in use: \(h.text)" : "Use hook: \(h.text)")
+            }
+        }
+    }
+
+    private func act(_ body: [String: String]) {
+        busy = true
+        Task {
+            defer { busy = false }
+            do {
+                try await model.scriptDraft(sessionID, body)
+                failed = nil
+                if body["action"] == "promote" { draft = "main" }
+                if body["action"] == "new" { made = true }
+                await reload()
+            } catch {
+                failed = error.localizedDescription
             }
         }
     }
@@ -1099,14 +1357,25 @@ struct PostView: View {
     @State private var busy = false
     /// The hook just tapped, until the reload shows it.
     @State private var picked: String?
+    /// The post's saved versions (2026-10-09), as the Mac's Post history sheet.
+    @State private var history = false
+    /// The schedule panel, and the cards the draft bar opens (2026-10-09).
+    @State private var scheduling = false
+    @State private var confirm: Confirm?
+    @State private var ask: NameAsk?
+    /// A + was tapped: the new variant shows once it arrives.
+    @State private var made = false
     @State private var failed: String?
 
     private var name: String { profile?.name ?? "You" }
-    private var variants: [PostVariant] { post?.variants ?? [] }
-    private var hooks: [PostHook] { post?.hooks ?? [] }
+    /// Every platform has variants and hooks, as on the Mac (2026-10-09).
+    private var variants: [PostVariant] { other.map { $0.variants ?? [] } ?? post?.variants ?? [] }
+    private var hooks: [PostHook] { other.map { $0.hooks ?? [] } ?? post?.hooks ?? [] }
     private var variant: PostVariant? { variants.first { $0.slug == draft } }
     /// The text of the draft on show.
-    private var text: String { variant?.text ?? post?.text ?? "" }
+    private var text: String { variant?.text ?? other?.text ?? post?.text ?? "" }
+    /// The platform's own post with its plan; nil from a Mac before 2026-10-05.
+    private var planned: PlatformPost? { other ?? posts.first { $0.platform == "linkedin" } }
     private var file: String { variant.map { "posts/variants/\($0.slug).md" } ?? "posts/linkedin.md" }
     /// The other platforms' posts. LinkedIn shows even with no post: it is where a post starts.
     private var others: [PlatformPost] { posts.filter { $0.platform != "linkedin" } }
@@ -1127,8 +1396,11 @@ struct PostView: View {
                 if !sideOn.isEmpty {
                     LaunchPhone.pane(sessionID: sessionID, posts: sideOn, reload: reload)
                 } else {
-                    if let other { platformPost(other) } else { linkedIn }
-                    if post != nil || other != nil { covers }
+                    if let other, other.platform == "article", Features.blog {
+                        // The blog's own page, as the Mac's Article side (admin, Features.blog).
+                        ArticlePhone.pane(sessionID: sessionID, post: other, reload: reload)
+                    } else if let other { platformPost(other) } else { linkedIn }
+                    if (post != nil || other != nil) && other?.platform != "article" { covers }
                 }
             }
             .padding(16)
@@ -1137,12 +1409,25 @@ struct PostView: View {
         // Cover) on beige in dark mode (2026-10-08). The LinkedIn card stays white, as in the feed.
         .background(Palette.canvas)
         .refreshable { await reload() }
-        .onChange(of: variants.map(\.slug)) { _, slugs in if draft != "main" && !slugs.contains(draft) { draft = "main" } }
+        .onChange(of: variants.map(\.slug)) { old, slugs in
+            if made, let new = slugs.first(where: { !old.contains($0) }) { draft = new; made = false }
+            if draft != "main" && !slugs.contains(draft) { draft = "main" }
+        }
+        .onChange(of: platform) { draft = "main"; made = false }
+        .asks(confirm: $confirm, name: $ask)
+        .sheet(isPresented: $scheduling) {
+            if let planned { ScheduleSheet(sessionID: sessionID, post: planned) { scheduling = false; Task { await reload() } } }
+        }
         .onChange(of: others.map(\.platform) + sideIDs.map(\.id), initial: true) { _, have in if platform != "linkedin" && !have.contains(platform) { platform = "linkedin" } }
+        .sheet(isPresented: $history) { historySheet }
         .sheet(isPresented: $editing) {
             if let other {
-                TextEditSheet(title: "\(other.name) post", text: other.text, font: .system(size: 16), limit: other.limit) { new in
-                    try await model.save("post", sessionID, text: new, base: other.text, platform: other.platform)
+                TextEditSheet(title: variant?.name ?? "\(other.name) post", text: text, font: .system(size: 16), limit: other.limit) { new in
+                    if let variant {
+                        try await model.postDraft(sessionID, platform: other.platform, ["action": "save", "slug": variant.slug, "text": new, "base": variant.text])
+                    } else {
+                        try await model.save("post", sessionID, text: new, base: other.text, platform: other.platform)
+                    }
                     Task { await reload() }
                 }
             } else {
@@ -1182,13 +1467,18 @@ struct PostView: View {
         .accessibilityAddTraits(on ? .isSelected : [])
     }
 
+    /// The Mac header's Schedule (StatusControl), the length, and Edit.
     private func statusRow(_ status: String?, count: Int?, limit: Int, write: Bool) -> some View {
         HStack {
-            let posted = status == "posted"
-            Text((status ?? "No post").capitalized).font(.inter(.caption, .semibold))
-                .foregroundStyle(posted ? Palette.live : Palette.ink)
-                .padding(.horizontal, 10).padding(.vertical, 5)
-                .background(posted ? Palette.liveSoft : Palette.well, in: Capsule())
+            if let planned, status != nil {
+                SchedulePill(post: planned) { scheduling = true }
+            } else {
+                let posted = status == "posted"
+                Text((status ?? "No post").capitalized).font(.inter(.caption, .semibold))
+                    .foregroundStyle(posted ? Palette.live : Palette.ink)
+                    .padding(.horizontal, 10).padding(.vertical, 5)
+                    .background(posted ? Palette.liveSoft : Palette.well, in: Capsule())
+            }
             if let count { Text("\(count) / \(limit)").font(.inter(.caption, .medium)).monospacedDigit().foregroundStyle(Palette.faint) }
             Spacer()
             Button { editing = true } label: { Label(write ? "Write" : "Edit", systemImage: "pencil") }
@@ -1196,13 +1486,34 @@ struct PostView: View {
         }
     }
 
-    /// X, YouTube or Vertical: the cover (or the video), the title and the text. Comments and
-    /// variants for these stay on the Mac.
+    private var historyCount: Int { other?.history ?? posts.first { $0.platform == "linkedin" }?.history ?? post?.history ?? 0 }
+
+    private var historySheet: some View {
+        let p = platform
+        let name = other?.name ?? "LinkedIn"
+        return HistorySheet(title: "Post history", subtitle: name,
+                            empty: "Takes saves a version whenever the chat changes the post, and while you edit it.",
+                            load: {
+                                let data = try await model.act("/api/post/history", ["id": sessionID, "platform": p], nil, method: "GET")
+                                return try API.decoder.decode([Version].self, from: data)
+                            },
+                            restore: { v in
+                                var q = ["id": sessionID]
+                                if p != "linkedin" { q["platform"] = p }
+                                if let e = await model.tryAct("/api/post/draft", q, ["action": "restore", "path": v.path]) { return e }
+                                await reload()
+                                return nil
+                            }, close: { history = false })
+    }
+
+    /// X, YouTube or Vertical: the cover (or the video), the title and the text, with variants,
+    /// hooks and history as on the Mac (2026-10-09).
     private func platformPost(_ p: PlatformPost) -> some View {
         let vertical = p.platform == "vertical"
         let picture = p.cover ?? p.media
         return VStack(alignment: .leading, spacing: 14) {
-            statusRow(p.status, count: p.text.count, limit: p.limit, write: false)
+            statusRow(p.status, count: text.count, limit: p.limit, write: false)
+            drafts
             VStack(alignment: .leading, spacing: 10) {
                 if let picture {
                     let f = files.first { $0.path == picture } ?? Bubble.guess(picture)
@@ -1219,12 +1530,25 @@ struct PostView: View {
                     Text(p.title).font(.system(size: 17, weight: .semibold)).foregroundStyle(Palette.ink)
                         .fixedSize(horizontal: false, vertical: true)
                 }
-                Text(p.text).font(.system(size: 15)).foregroundStyle(Palette.ink)
+                Text(text).font(.system(size: 15)).foregroundStyle(Palette.ink)
                     .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
+                    .id(draft)
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
             .padding(14)
             .background(Palette.paper, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
             .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(Palette.border))
+            if vertical, let places = p.places, !places.isEmpty {
+                HStack(spacing: 6) {
+                    Text("Goes to").font(.inter(.footnote)).foregroundStyle(Palette.muted)
+                    ForEach(places, id: \.self) { pl in
+                        Text(["tiktok": "TikTok", "reels": "Reels", "shorts": "Shorts"][pl] ?? pl)
+                            .font(.inter(.footnote, .medium)).foregroundStyle(Palette.ink)
+                            .padding(.horizontal, 10).frame(height: 26).background(Palette.well, in: Capsule())
+                    }
+                }
+            }
+            if !hooks.isEmpty { hookList }
         }
     }
 
@@ -1288,7 +1612,7 @@ struct PostView: View {
 
     @ViewBuilder private var linkedIn: some View {
                 statusRow(post?.status, count: post == nil ? nil : text.count, limit: 3000, write: post == nil)
-                if !variants.isEmpty { drafts }
+                if post != nil { drafts }
                 if let post {
                     CommentedText(sessionID: sessionID, file: file, text: text, font: LinkedIn.body,
                                   what: "post", color: LinkedIn.uiInk) { shown in
@@ -1302,43 +1626,27 @@ struct PostView: View {
                 }
     }
 
-    /// Main and the variants as tabs, as on the Mac. A variant can become the post that goes out.
+    /// The Mac's PostDraftBar: Main and the variants, +, history, Use as Main.
     private var drafts: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 6) {
-                    chip("main", "Main", claude: false)
-                    ForEach(variants) { chip($0.slug, $0.name, claude: $0.author == "claude") }
-                }
-            }
-            if let variant {
-                HStack(alignment: .firstTextBaseline) {
-                    if !variant.note.isEmpty {
-                        Text(variant.note).font(.footnote).foregroundStyle(Palette.muted).lineLimit(3)
-                    }
-                    Spacer()
-                    Button("Use as main") { act(["action": "promote", "slug": variant.slug]) }
-                        .buttonStyle(.pill(small: true)).disabled(busy)
-                }
-            }
-        }
-    }
-
-    private func chip(_ slug: String, _ label: String, claude: Bool) -> some View {
-        let on = draft == slug
-        return Button { withAnimation(.snappy) { draft = slug } } label: {
-            HStack(spacing: 4) {
-                if claude { Image(systemName: "sparkles").font(.inter(.caption2)) }
-                Text(label).lineLimit(1)
-            }
-            .font(.subheadline.weight(on ? .semibold : .regular))
-            .padding(.horizontal, 12).padding(.vertical, 7)
-            // The page's own colours, as the platform chips: LinkedIn black was lost on the dark page.
-            .background(on ? Palette.ink : Palette.paper, in: Capsule())
-            .overlay(Capsule().strokeBorder(on ? .clear : Palette.border))
-            .foregroundStyle(on ? Palette.paper : Palette.ink)
-        }
-        .buttonStyle(.plain)
+        let path = ["id": sessionID].merging(platform == "linkedin" ? [:] : ["platform": platform]) { a, _ in a }
+        return DraftBar(variants: variants, draft: $draft, history: historyCount, busy: busy,
+                        new: { act(["action": "new", "from": draft]) }, showHistory: { history = true },
+                        rename: { v in
+                            ask = NameAsk(title: "Rename the variant", name: v.name) { n in
+                                if let e = await model.tryAct("/api/post/draft", path, ["action": "rename", "slug": v.slug, "name": n]) { return e }
+                                await reload()
+                                return nil
+                            }
+                        },
+                        delete: { v in
+                            confirm = Confirm(title: "Delete “\(v.name)”?", message: "Takes keeps its text in the post history.", button: "Delete") {
+                                if let e = await model.tryAct("/api/post/draft", path, ["action": "delete", "slug": v.slug]) { return e }
+                                draft = "main"
+                                await reload()
+                                return nil
+                            }
+                        },
+                        promote: { v in act(["action": "promote", "slug": v.slug]) })
     }
 
     /// Claude's opening options. Tap one and it opens the draft on show.
@@ -1383,9 +1691,10 @@ struct PostView: View {
         Task {
             defer { busy = false; picked = nil }
             do {
-                try await model.postDraft(sessionID, body)
+                try await model.postDraft(sessionID, platform: platform, body)
                 failed = nil
                 if body["action"] == "promote" { draft = "main" }
+                if body["action"] == "new" { made = true }
                 await reload()
             } catch {
                 failed = error.localizedDescription
@@ -1417,7 +1726,7 @@ struct PostView: View {
             } else {
                 Button { show(f) } label: {
                     RemoteImage(url: model.api.thumb(f.path, width: 900)) { $0.resizable().scaledToFit() } placeholder: {
-                        Color.black.opacity(0.05).frame(height: 260).overlay { ProgressView() }
+                        Color.black.opacity(0.05).frame(height: 260)
                     }
                     .frame(maxWidth: .infinity)
                 }
@@ -1458,7 +1767,7 @@ struct InlineVideo: View {
     var body: some View {
         ZStack {
             Color.black
-            RemoteImage(url: model.api.thumb(file.path, width: 900)) { $0.resizable().scaledToFill() } placeholder: { ProgressView().tint(.white) }
+            RemoteImage(url: model.api.thumb(file.path, width: 900)) { $0.resizable().scaledToFill() } placeholder: { Color.black }
                 .opacity(p.playing ? 0 : 1)
             PlayerLayer(player: p.player).opacity(p.playing ? 1 : 0)
         }
@@ -1603,9 +1912,16 @@ struct Viewer: View {
     let file: RemoteFile
     let sessionID: String
     let onDone: () -> Void
+    /// Change Image… and Make Final go on in the session's chat (2026-10-09).
+    var toChat: (() -> Void)? = nil
     @State private var player: AVPlayer?
     /// The star as tapped here: it turns at once, and the viewer stays open (2026-10-08).
     @State private var starred: Bool?
+    /// The file's panel and what it opens (2026-10-09).
+    @State private var more = false
+    @State private var confirm: Confirm?
+    @State private var ask: NameAsk?
+    @State private var voice = false
 
     /// A video or picture of this session opens in the review player, with comments as on the Mac.
     private var reviewPath: String? {
@@ -1630,9 +1946,9 @@ struct Viewer: View {
                         dark(on ? "star.fill" : "star", on ? "Remove the star" : "Star as keeper", tint: on ? .yellow : .white)
                     }
                     .buttonStyle(.press)
-                } else {
-                    Color.clear.frame(width: 40, height: 40)
                 }
+                Button { Brand.select(); withAnimation(Brand.quick) { more.toggle() } } label: { dark("ellipsis", "More") }
+                    .buttonStyle(.press)
             }
             .padding(.horizontal, 16).padding(.vertical, 8)
             ZStack {
@@ -1649,7 +1965,17 @@ struct Viewer: View {
             }
         }
         .background(Color.black.ignoresSafeArea())
+        .overlay {
+            if more {
+                FloatingPanel(open: $more) {
+                    FileMore(file: file, sessionID: sessionID, open: $more, confirm: $confirm, ask: $ask, voice: $voice, done: onDone, toChat: toChat)
+                }
+            }
+        }
+        .asks(confirm: $confirm, name: $ask)
         .environment(\.colorScheme, .dark)
+        // After the dark: the Voice panel is paper, as on the Mac.
+        .sheet(isPresented: $voice) { VoiceSheet(file: file, sessionID: sessionID) { voice = false } }
         .onAppear {
             guard file.isVideo || file.isAudio, reviewPath == nil else { return }
             let p = AVPlayer(url: model.api.media(file.path))
@@ -1701,7 +2027,7 @@ struct UploadsBar: View {
                         VStack(alignment: .leading, spacing: 3) {
                             Text(u.failed ?? (u.done ? (u.asTake ? "Take sent to the Mac" : "Sent") : u.asTake ? "Sending the take…" : "Sending \(u.name)…"))
                                 .font(.inter(.footnote)).lineLimit(2)
-                            if !u.done { ProgressView(value: u.fraction).tint(Palette.accent) }
+                            if !u.done { Bar(value: u.fraction) }
                         }
                         Spacer()
                         if u.done {

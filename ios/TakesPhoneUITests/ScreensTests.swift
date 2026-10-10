@@ -53,7 +53,7 @@ final class ScreensTests: XCTestCase {
         shot(app, "8-comments")
         app.buttons["Back"].tap()
         sleep(1)
-        app.buttons["Performance"].tap()
+        app.page("Performance")
         sleep(3)
         shot(app, "9-performance")
         app.swipeUp()
@@ -155,8 +155,7 @@ final class ScreensTests: XCTestCase {
         app.launchEnvironment["TAKES_SERVER"] = env["TAKES_SERVER"] ?? "http://127.0.0.1:8797"
         app.launch()
         app.buttons["Connect"].tap()
-        XCTAssertTrue(app.buttons["Performance"].waitForExistence(timeout: 15))
-        app.buttons["Performance"].tap()
+        app.page("Performance")
         sleep(3)
         for i in 1...5 {
             shot(app, "40-performance-\(i)")
@@ -251,8 +250,7 @@ final class ScreensTests: XCTestCase {
         app.launchEnvironment["TAKES_SERVER"] = env["TAKES_SERVER"] ?? "http://127.0.0.1:8797"
         app.launch()
         if app.buttons["Connect"].waitForExistence(timeout: 5) { app.buttons["Connect"].tap() }
-        XCTAssertTrue(app.buttons["Comments"].waitForExistence(timeout: 15))
-        app.buttons["Comments"].tap()
+        app.page("Comments")
         app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Review'")).firstMatch.tap()
         XCTAssertTrue(app.buttons["Approve"].waitForExistence(timeout: 10))
         shot(app, "20-deck")
@@ -279,8 +277,7 @@ final class ScreensTests: XCTestCase {
         app.launchEnvironment["TAKES_SERVER"] = env["TAKES_SERVER"] ?? "http://127.0.0.1:8797"
         app.launch()
         if app.buttons["Connect"].waitForExistence(timeout: 5) { app.buttons["Connect"].tap() }
-        XCTAssertTrue(app.buttons["Comments"].waitForExistence(timeout: 15))
-        app.buttons["Comments"].tap()
+        app.page("Comments")
         app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Review'")).firstMatch.tap()
         XCTAssertTrue(app.buttons["Approve"].waitForExistence(timeout: 10))
         shot(app, "30-review")
@@ -303,6 +300,34 @@ final class ScreensTests: XCTestCase {
         shot(app, "33-post-video")
         sleep(3)
         shot(app, "34-post-video-later")
+    }
+
+    /// The chat's + opens the photo picker and the file picker (2026-10-09: it did nothing).
+    func testAddFiles() throws {
+        let server = ProcessInfo.processInfo.environment["TAKES_SERVER"] ?? "http://127.0.0.1:8797"
+        let app = XCUIApplication()
+        app.launchEnvironment["TAKES_SERVER"] = server
+        app.launch()
+        if app.buttons["Connect"].waitForExistence(timeout: 5) { app.buttons["Connect"].tap() }
+        if app.buttons["Videos"].waitForExistence(timeout: 15) { app.buttons["Videos"].tap() }
+        let row = app.buttons.matching(NSPredicate(format: "label CONTAINS 'Offline video'")).firstMatch
+        XCTAssertTrue(row.waitForExistence(timeout: 15))
+        row.tap()
+        for (item, picker) in [("add-photos", "Photos"), ("add-files", "Browse")] {
+            let add = app.buttons["Add files"]
+            XCTAssertTrue(add.waitForExistence(timeout: 10))
+            add.tap()
+            let choice = app.buttons[item]
+            XCTAssertTrue(choice.waitForExistence(timeout: 5), "no \(item) in the menu")
+            choice.tap()
+            sleep(3)
+            shot(app, "add-\(picker)")
+            let shown = app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS[c] %@", picker)).firstMatch
+            XCTAssertTrue(shown.waitForExistence(timeout: 8), "the \(item) picker did not open")
+            let cancel = app.buttons["Cancel"].firstMatch
+            if cancel.waitForExistence(timeout: 3) { cancel.tap() }
+            sleep(2)
+        }
     }
 
     /// Regression for the blank/jumping chat: tall streamed replies, keyboard and multiline
@@ -415,5 +440,19 @@ final class ScreensTests: XCTestCase {
         a.name = name
         a.lifetime = .keepAlways
         add(a)
+    }
+}
+
+extension XCUIApplication {
+    /// Opens a page from the Takes menu (Performance, Comments, Search, plugins, Styles), where
+    /// the home screen keeps them since 2026-10-09.
+    func page(_ name: String) {
+        let row = buttons[name]
+        if !row.exists {
+            XCTAssertTrue(buttons["Takes menu"].waitForExistence(timeout: 15))
+            buttons["Takes menu"].tap()
+        }
+        XCTAssertTrue(row.waitForExistence(timeout: 5), "\(name) in the Takes menu")
+        row.tap()
     }
 }

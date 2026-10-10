@@ -18,7 +18,7 @@ run() {
 # Tests that time real playback, web views or streamed output. Beside 250 parallel tests the Mac is
 # too busy for their timing, and they failed the public release (2026-10-06) though each passes
 # alone. A full run leaves them out, then runs them by themselves, one at a time.
-TIMED='theNextArticleUsesALoadedPage|theHiddenDockedChatSkipsStreamedWords|effectPlaysAtItsSecond|resetWhileRunningKeepsTheNewAsk|watcherSeesAWrite'
+TIMED='aSteerShowsNoErrorAndGoesOn|theNextArticleUsesALoadedPage|theHiddenDockedChatSkipsStreamedWords|effectPlaysAtItsSecond|resetWhileRunningKeepsTheNewAsk|watcherSeesAWrite'
 # Only a --filter or --skip picks the tests; other flags (build.sh passes --quiet) keep the split.
 if [[ " $* " == *" --filter "* || " $* " == *" --skip "* ]]; then
   run "$@"
@@ -26,4 +26,10 @@ else
   run --skip "$TIMED" "$@"
   echo "Timed tests, one at a time..."
   run --filter "$TIMED" --no-parallel "$@"
+  # A full run also builds and tests the public copy (2026-10-08): code that uses a private
+  # plugin passes here and fails there. Only the private repo has the script.
+  if [[ -f scripts/public/check-public-build.sh && "${TAKES_SKIP_PUBLIC:-}" != 1 ]]; then
+    echo "The public copy..."
+    scripts/public/check-public-build.sh
+  fi
 fi

@@ -18,6 +18,22 @@ import Testing
         #expect(Storyboard.clock(b.total) == "0:11")
     }
 
+    // 2026-10-09: with no image key the MCP draws nothing and marks the storyboard; each shot without
+    // a sketch says so instead of "Drawing…" forever.
+    @Test func noImageKeyMarksTheShotsWithoutASketch() throws {
+        let dir = FileManager.default.temporaryDirectory.appending(path: "sb-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: Storyboard.folder(dir), withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let json = #"{"nokey": true, "shots": [{"id": "s1", "sketch": "A man."}, {"id": "s2", "sketch": "B", "image": "b.png"}]}"#
+        try Data(json.utf8).write(to: Storyboard.file(dir))
+        let b = try #require(Storyboard.read(dir))
+        #expect(b.nokey == true)
+        #expect(b.shots[0].error == "No sketch: Takes has no image key.")
+        #expect(b.shots[1].error == nil)
+        let old = try JSONDecoder().decode(Storyboard.self, from: Data(#"{"shots": []}"#.utf8))
+        #expect(old.nokey == nil)
+    }
+
     /// The cards take the video's shape. A storyboard from before formats is 4:5, as its sketches are.
     @Test func theFormatGivesTheCardsTheirShape() throws {
         let wide = try JSONDecoder().decode(Storyboard.self, from: Data(#"{"shots": [], "format": "16:9"}"#.utf8))
@@ -26,6 +42,36 @@ import Testing
         #expect(old.format == nil && old.ratio == 0.8)
         #expect(Storyboard.ratio("9:16") == 0.5625 && Storyboard.ratio("nonsense") == 0.8)
         #expect(abs(Storyboard.ratio("21:9") - 21.0 / 9.0) < 0.001)
+    }
+
+    // 2026-10-09: a shot with variants keeps them in a fixed order; the user picks the one in the video.
+    @Test func variantsKeepTheirOrderAndAPickChangesOnlyTheVideo() throws {
+        let dir = FileManager.default.temporaryDirectory.appending(path: "sb-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: Storyboard.folder(dir), withIntermediateDirectories: true)
+        let json = """
+        {"shots": [{"id": "s5", "kind": "SCREEN", "sketch": "x", "video": "generated/c.png",
+                    "variants": ["generated/a.png", "generated/b.mp4", "generated/c.png"], "extra": 1},
+                   {"id": "s6", "sketch": "y", "video": "generated/d.mp4", "variants": ["generated/e.mp4"]},
+                   {"id": "s7", "sketch": "z", "variants": ["generated/f.mp4", "generated/g.mp4"]}],
+         "format": "16:9"}
+        """
+        try Data(json.utf8).write(to: Storyboard.file(dir))
+        var b = try #require(Storyboard.read(dir))
+        #expect(b.shots[0].options == ["generated/a.png", "generated/b.mp4", "generated/c.png"])
+        #expect(b.shots[1].options == ["generated/d.mp4", "generated/e.mp4"])  // the video goes first when missing
+        #expect(b.shots[2].options.isEmpty)                                    // nothing in the video yet
+        #expect(StoryShot.letter(0) == "A" && StoryShot.letter(2) == "C")
+        #expect(StoryShot.isStill("generated/a.png") && !StoryShot.isStill("generated/b.mp4"))
+
+        #expect(Storyboard.pick(dir, shot: "s5", "generated/a.png"))
+        b = try #require(Storyboard.read(dir))
+        #expect(b.shots[0].video == "generated/a.png")
+        #expect(b.shots[0].options == ["generated/a.png", "generated/b.mp4", "generated/c.png"])
+        #expect(b.format == "16:9")
+        let raw = try JSONSerialization.jsonObject(with: Data(contentsOf: Storyboard.file(dir))) as? [String: Any]
+        let first = (raw?["shots"] as? [[String: Any]])?.first
+        #expect(first?["extra"] as? Int == 1)                                  // keys the app does not know stay
+        #expect(!Storyboard.pick(dir, shot: "gone", "generated/a.png"))
     }
 
     @Test func aMotionGraphicIsNotFilmed() {

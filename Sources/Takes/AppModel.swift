@@ -20,8 +20,6 @@ final class AppModel {
     let library = Library()
     let camera = CameraRecorder()
     let screen = ScreenRecorder()
-    /// The song under the video (Sounds.swift).
-    let bed = MusicBed()
     /// Claude chats, one per session (Chat.swift).
     let chats = ChatHub()
     /// Posts marked ready, scheduled or posted, with their times.
@@ -74,6 +72,8 @@ final class AppModel {
     /// The script shows in the notch panel. Record then shows a small stand-in, not a second
     /// prompter that scrolls along with it.
     var notchOpen = false
+    /// A plugin's clip on the Record stage: its width over its height, so the stage can frame it.
+    var stageAspect: CGFloat = 16.0 / 9.0
     /// The notch's quick tour runs: the main window goes dark, so the eye goes to the notch.
     var notchTour = false
     var phase: Phase = .idle { didSet { if phase != oldValue { holdCamera() } } }
@@ -96,7 +96,6 @@ final class AppModel {
     var preview: URL? {
         didSet {
             guard preview != oldValue else { return }
-            effects.video = preview
             holdCamera()
             if preview.map({ Asset.kind(of: $0) != .video }) ?? true { player = nil }
         }
@@ -147,9 +146,7 @@ final class AppModel {
     /// The LinkedIn comment drafts and their reviews (Copilot.swift).
     let copilot = CopilotStore()
     /// The player of the file in `preview`, when it is a video. Set by PlayerView.
-    @ObservationIgnored weak var player: AVPlayer? { didSet { if player !== oldValue { bed.attach(player); effects.attach(player) } } }
-    /// The sound effects placed on the video on screen (Sounds.swift).
-    let effects = EffectTrack()
+    @ObservationIgnored weak var player: AVPlayer?
     /// Bumped after a frame is saved, so the Assets tab rescans at once.
     var stillsSaved = 0
     /// Short message over the video ("Saved stills/…"). Clears itself.
@@ -270,7 +267,6 @@ final class AppModel {
             _ = self.chats.chat(doc.url)
             self.wire(doc)
             self.showView(of: doc)
-            self.loadSong(doc)
         }
         // A new session opens with the chat in the half screen beside the recorder: on his first
         // launch Jeremy did not find the chat (2026-10-06).
@@ -279,7 +275,7 @@ final class AppModel {
             self.chats.docked = true
             self.chats.open = true
         }
-        if let doc = library.current { _ = chats.chat(doc.url); wire(doc); loadSong(doc); shown = doc.url }
+        if let doc = library.current { _ = chats.chat(doc.url); wire(doc); shown = doc.url }
         screen.refreshDisplays()
         Task { await camera.boot() }
         if !Self.testing {
@@ -571,7 +567,6 @@ final class AppModel {
         doc.flushScript()
         doc.snapshotDirty()
         preview = nil
-        bed.pause()  // the mic would hear it
         await camera.resume()
         resetToken += 1
         scrolling = false
@@ -695,19 +690,6 @@ final class AppModel {
         }
     }
 
-    /// The session's song, ready under its videos (not playing).
-    func loadSong(_ doc: SessionDoc) {
-        effects.dir = SoundLib.dir(root: library.root)
-        effects.session = doc.url
-        effects.cues = doc.meta.sfx ?? []
-        doc.onMeta = { [weak self, weak doc] m in
-            guard let self, let doc, self.library.current === doc else { return }
-            self.effects.cues = m.sfx ?? []
-        }
-        guard let m = doc.meta.music else { bed.stop(); return }
-        bed.load(SoundLib.dir(root: library.root).appending(path: m.file), start: m.start, volume: m.volume)
-    }
-
     func show(toast text: String) {
         toast = text
         Task {
@@ -764,12 +746,21 @@ final class AppModel {
         case .saveFrame: saveFrame()
         case .toggleComment: commentMode.toggle()
         case .endComment: commentMode = false
-        case .playPause:
-            if player?.timeControlStatus == .paused { player?.play() } else { player?.pause() }
+        case .playPause: if let player { Self.togglePlay(player) }
         case .nudge(let dir, let frame): nudge(dir, frame: frame)
         case .speed(let d): speed = min(300, max(5, speed + Double(d)))
         }
         return nil
+    }
+
+    /// Space: like a click on the picture. At the end it starts over; play() there did nothing.
+    static func togglePlay(_ player: AVPlayer) {
+        guard player.timeControlStatus == .paused else { player.pause(); return }
+        if let item = player.currentItem, item.duration.isNumeric,
+           player.currentTime().seconds >= item.duration.seconds - 0.05 {
+            player.seek(to: .zero, toleranceBefore: .zero, toleranceAfter: .zero)
+        }
+        player.play()
     }
 
     /// Moves the video in the player by one second, or by one frame.

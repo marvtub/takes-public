@@ -36,6 +36,16 @@ let snapDir = ProcessInfo.processInfo.environment["TAKES_SNAP"]
         .environment(app)
     }
 
+    /// The Sound page: the library only, Use asks the chat (2026-10-09).
+    @Test(.enabled(if: snapDir != nil)) func sounds() {
+        let app = AppModel()
+        app.library.setRoot(FileManager.default.homeDirectoryForCurrentUser.appending(path: "Movies/Takes"))
+        guard let s = app.library.sessions.first else { return }
+        let doc = SessionDoc(url: s.url)
+        shoot("sounds-wide-dark", SoundsPane(doc: doc, wide: true).environment(app), size: CGSize(width: 1000, height: 700), dark: true)
+        shoot("sounds-column", SoundsPane(doc: doc).environment(app), size: CGSize(width: 420, height: 700))
+    }
+
     @Test(.enabled(if: snapDir != nil)) func sidebar() {
         let app = AppModel()
         app.library.setRoot(FileManager.default.homeDirectoryForCurrentUser.appending(path: "Movies/Takes"))
@@ -213,5 +223,33 @@ let snapDir = ProcessInfo.processInfo.environment["TAKES_SNAP"]
         shoot("chat-dark", window, size: CGSize(width: 1440, height: 860), dark: true)
         shoot("chat-light", window, size: CGSize(width: 1440, height: 860))
         app.chats.open = false
+    }
+
+    /// The Mac controls the iPhone copies (2026-10-09, PhoneParity.swift): the More panel, the
+    /// script's draft bar, the history sheet, the voice panel and the schedule panel, on the real
+    /// library's newest session with takes. Look at these before changing the phone's version.
+    @Test(.enabled(if: snapDir != nil)) func phoneRefs() {
+        let app = AppModel()
+        app.library.setRoot(FileManager.default.homeDirectoryForCurrentUser.appending(path: "Movies/Takes"))
+        guard let s = app.library.sessions.first(where: { $0.takeCount > 0 }) else { return }
+        app.library.select(s.url)
+        guard let doc = app.library.current else { return }
+        func paper(_ v: some View) -> some View { v.background(Theme.paper).environment(app).font(Theme.body).tint(Theme.accent) }
+        shoot("ref-more", paper(MorePanel(doc: doc, open: .constant(true), expanded: .move)), size: CGSize(width: 260, height: 420))
+        shoot("ref-draftbar", paper(DraftBar(doc: doc, showHistory: .constant(false))), size: CGSize(width: 700, height: 90))
+        shoot("ref-history", paper(HistorySheet(doc: doc)), size: CGSize(width: 860, height: 560))
+        if let t = doc.meta.takes.first {
+            let mix = VoiceMix(take: t, session: doc.url)
+            mix.reload()
+            shoot("ref-voice", paper(VoicePanel(voice: mix)), size: CGSize(width: 320, height: 380))
+        }
+        let post = PostStore(.linkedin)
+        post.load(doc.url)
+        if let c = post.content {
+            shoot("ref-schedule", paper(SchedulePanel(content: c, post: post, close: {})), size: CGSize(width: 320, height: 560))
+        }
+        for dark in [false, true] {
+            shoot("ref-more\(dark ? "-dark" : "")", paper(MorePanel(doc: doc, open: .constant(true))), size: CGSize(width: 260, height: 380), dark: dark)
+        }
     }
 }

@@ -566,6 +566,13 @@ struct ChatRunTests {
         try? FileManager.default.removeItem(at: dir)
     }
 
+    /// Takes chats compact at 30% of the window; the variable lives only in their process.
+    @Test func chatsCompactEarly() {
+        let env = ClaudeChat.environment()
+        #expect(env["CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"] == "30")
+        #expect(!env.keys.contains { $0.hasPrefix("CLAUDE_CODE_") || $0.hasPrefix("CLAUDECODE") })
+    }
+
     @Test func aKillFromOutsideEndsTheRunAndSendsWhatWaited() async throws {
         defer { cleanup() }
         try fake(#"if [ $n = 1 ]; then sleep 0.8; kill -TERM $$; fi"#)
@@ -574,7 +581,8 @@ struct ChatRunTests {
         #expect(chat.running)
         chat.send("Still on it?!", title: "T", onStage: nil)
         #expect(chat.queued == ["Still on it?!"])
-        await until { runs == 2 && !chat.running }
+        // 30 s: under a busy build (load 20) the second run took longer than 10 s.
+        await until(30) { runs == 2 && !chat.running }
         #expect(!chat.running)
         #expect(chat.queued.isEmpty)
         #expect(chat.messages.contains { $0.role == .error && $0.text.contains("signal 15") })

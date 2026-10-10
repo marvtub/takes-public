@@ -20,9 +20,12 @@ struct StoryShot: Decodable, Equatable, Identifiable {
     /// A real clip instead of the sketch, a path in the session (2026-10-03). Plays muted while shown.
     var video: String?
     var error: String?
-    /// A Higgsfield clip on its way (the file it lands in), and why the last one failed (2026-10-06).
+    /// A Replicate or Higgsfield clip on its way (the file it lands in), and why the last one failed (2026-10-06).
     var generating: String?
     var clipError: String?
+    /// Every clip or still tried for the shot, A B C… in a fixed order (2026-10-09). `video` is the one
+    /// in the video; the user flips through the others and picks one.
+    var variants: [String] = []
 
     /// The rows of the tab, top to bottom (2026-10-03).
     enum Section: String, Decodable, CaseIterable {
@@ -36,7 +39,7 @@ struct StoryShot: Decodable, Equatable, Identifiable {
         }
     }
 
-    enum CodingKeys: String, CodingKey { case id, section, kind, say, how = "do", sketch, seconds, image, video, error, generating, clipError = "clip_error" }
+    enum CodingKeys: String, CodingKey { case id, section, kind, say, how = "do", sketch, seconds, image, video, error, generating, clipError = "clip_error", variants }
 
     init(id: String = "", section: Section = .main, kind: String = "SHOT", say: String = "", seconds: Double? = nil) {
         self.id = id; self.section = section; self.kind = kind; self.say = say; self.seconds = seconds
@@ -57,6 +60,36 @@ struct StoryShot: Decodable, Equatable, Identifiable {
         error = try c.decodeIfPresent(String.self, forKey: .error)
         generating = try c.decodeIfPresent(String.self, forKey: .generating)
         clipError = try c.decodeIfPresent(String.self, forKey: .clipError)
+        variants = (try? c.decodeIfPresent([String].self, forKey: .variants)) ?? []
+    }
+
+    /// The variants to choose from, the one in the video among them: empty for a shot with one.
+    var options: [String] {
+        guard let video, !variants.isEmpty else { return [] }
+        let all = variants.contains(video) ? variants : [video] + variants
+        return all.count > 1 ? all : []
+    }
+
+    /// A variant's letter: A for the first.
+    static func letter(_ i: Int) -> String {
+        i >= 0 && i < 26 ? String(UnicodeScalar(UInt8(65 + i))) : "\(i + 1)"
+    }
+
+    /// A still on a shot (a new angle before it is animated) shows as a picture, not a clip.
+    static func isStill(_ path: String) -> Bool {
+        ["png", "jpg", "jpeg", "webp", "heic"].contains((path as NSString).pathExtension.lowercased())
+    }
+
+    /// The picture already decoded, if any: flipping back to a variant shows it at once.
+    @MainActor static func cachedPoster(_ url: URL) -> NSImage? {
+        isStill(url.path) ? StoryboardPane.cachedSketch(url) : BrollLib.cachedPoster(url)
+    }
+
+    /// A clip's first frame, or the still itself, decoded off the main thread.
+    @MainActor static func poster(_ url: URL) async -> NSImage? {
+        if isStill(url.path) { return await Task.detached { StoryboardPane.sketch(url) }.value }
+        if let hit = BrollLib.cachedPoster(url) { return hit }
+        return await BrollLib.poster(url)
     }
 
     /// The given length, else the time it takes to say the lines (2.6 words a second, 2 s at least).
@@ -72,6 +105,8 @@ struct Storyboard: Decodable, Equatable {
     /// The video's shape, "16:9", "9:16", "4:5" or "1:1" (2026-10-05). The sketches are drawn in it.
     /// Nil in a storyboard from before: 4:5, the shape those sketches have.
     var format: String?
+    /// The MCP found no image key (Gemini, OpenAI or Replicate) and drew nothing (2026-10-09).
+    var nokey: Bool?
 
     /// Width over height.
     var ratio: CGFloat { Self.ratio(format) }
@@ -84,6 +119,21 @@ struct Storyboard: Decodable, Equatable {
 
     static func folder(_ session: URL) -> URL { session.appending(path: "storyboard") }
     static func file(_ session: URL) -> URL { folder(session).appending(path: "storyboard.json") }
+
+    /// Draws the missing sketches again, failed ones too, in the background (the MCP's sketch runner).
+    /// With still no image key it only marks the storyboard nokey again.
+    static func draw(_ session: URL) {
+        guard let script = Bundle.main.url(forResource: "takes_mcp", withExtension: "py") else { return }
+        let p = Process()
+        p.executableURL = URL(filePath: "/usr/bin/python3")
+        p.arguments = [script.path, "--sketch-run", session.path, "--retry"]
+        var env = ProcessInfo.processInfo.environment
+        env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:\(Setup.localBin):" + (env["PATH"] ?? "/usr/bin:/bin")
+        p.environment = env
+        p.standardOutput = FileHandle.nullDevice
+        p.standardError = FileHandle.nullDevice
+        try? p.run()
+    }
 
     /// Comments on a shot name this file and the shot's id.
     static let commentFile = "storyboard/storyboard.json"
@@ -104,6 +154,12 @@ struct Storyboard: Decodable, Equatable {
               var b = try? JSONDecoder().decode(Storyboard.self, from: data) else { return nil }
         // A storyboard from before ids (2026-10-03): the MCP numbers them the same way.
         for i in b.shots.indices where b.shots[i].id.isEmpty { b.shots[i].id = "s\(i + 1)" }
+        // No image key: a shot with no sketch says so, instead of "Drawing…" forever.
+        if b.nokey == true {
+            for i in b.shots.indices where b.shots[i].image == nil && b.shots[i].video == nil && b.shots[i].error == nil {
+                b.shots[i].error = "No sketch: Takes has no image key."
+            }
+        }
         // Hook, main, end, each in the order written.
         let rank = Dictionary(uniqueKeysWithValues: StoryShot.Section.allCases.enumerated().map { ($1, $0) })
         b.shots = b.shots.enumerated().sorted { (rank[$0.1.section]!, $0.0) < (rank[$1.1.section]!, $1.0) }.map(\.1)
@@ -118,9 +174,81 @@ struct Storyboard: Decodable, Equatable {
 
     var total: Double { shots.reduce(0) { $0 + $1.length } }
 
+    /// The user picks a variant (2026-10-09): it becomes the shot's video. Under the lock the MCP's
+    /// edit_shot holds, so a clip landing at the same moment is not lost. Other keys stay as they are.
+    @discardableResult
+    static func pick(_ session: URL, shot id: String, _ path: String) -> Bool {
+        let fd = Darwin.open(folder(session).appending(path: ".edit").path, O_CREAT | O_WRONLY, 0o644)
+        guard fd >= 0 else { return false }
+        defer { Darwin.close(fd) }
+        flock(fd, LOCK_EX)
+        defer { flock(fd, LOCK_UN) }
+        guard let data = try? Data(contentsOf: file(session)),
+              var d = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              var shots = d["shots"] as? [[String: Any]] else { return false }
+        // A shot from before ids is numbered by its place in the file, as read() does.
+        guard let i = shots.indices.first(where: { (shots[$0]["id"] as? String ?? "s\($0 + 1)") == id }) else { return false }
+        shots[i]["video"] = path
+        d["shots"] = shots
+        d["updated"] = ISO8601DateFormatter().string(from: Date())
+        guard let out = try? JSONSerialization.data(withJSONObject: d, options: [.prettyPrinted, .withoutEscapingSlashes])
+        else { return false }
+        return (try? out.write(to: file(session), options: .atomic)) != nil
+    }
+
     static func clock(_ s: Double) -> String {
         let n = Int(s.rounded())
         return String(format: "%d:%02d", n / 60, n % 60)
+    }
+}
+
+/// Shown over the strip when the MCP had no image key (2026-10-09: not every user has a Gemini key).
+/// It links to Settings › Gemini and draws the sketches once a key is there.
+struct NoSketchKeyCard: View {
+    var session: URL
+    @Environment(\.openSettings) private var openSettings
+    @State private var asked = false
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: "key").font(.system(size: 14)).foregroundStyle(Theme.warn).padding(.top, 2)
+            VStack(alignment: .leading, spacing: 4) {
+                Text("No sketches yet").font(Theme.sans(13, .semibold)).foregroundStyle(Theme.ink)
+                Text("Takes needs an image key to draw them: Gemini, OpenAI or Replicate. Add a key, then click Draw. Or ask the chat to draw them itself.")
+                    .font(Theme.sans(12)).foregroundStyle(Theme.muted).fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 12)
+            HStack(spacing: 8) {
+                Button {
+                    UserDefaults.standard.set(SettingsView.SettingsPage.gemini.rawValue, forKey: "settingsPage")
+                    openSettings()
+                } label: {
+                    Text("Add a Key").font(Theme.sans(12, .medium)).foregroundStyle(Theme.ink)
+                        .padding(.horizontal, 12).padding(.vertical, 6)
+                        .background(Capsule().strokeBorder(Theme.border))
+                }
+                Button {
+                    asked = true
+                    Storyboard.draw(session)
+                } label: {
+                    Text(asked ? "Drawing…" : "Draw").font(Theme.sans(12, .medium)).foregroundStyle(Theme.paper)
+                        .padding(.horizontal, 12).padding(.vertical, 6)
+                        .background(Capsule().fill(Theme.ink))
+                }
+                .disabled(asked)
+            }
+            .buttonStyle(PressScale())
+        }
+        .padding(14)
+        .background(RoundedRectangle(cornerRadius: 10).fill(Theme.paper))
+        .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Theme.border))
+        .padding(.horizontal, 28).padding(.bottom, 12)
+        // The runner answers in a second or two; a nokey storyboard after that brings Draw back.
+        .task(id: asked) {
+            guard asked else { return }
+            try? await Task.sleep(for: .seconds(4))
+            asked = false
+        }
     }
 }
 
@@ -135,6 +263,8 @@ struct StoryboardPane: View {
     @State private var stamp: Date?
     @State private var images: [String: NSImage] = [:]
     @State private var picked: String?
+    /// The variant shown per shot while the user tries it, by shot id. The video keeps its own until he picks.
+    @State private var trying: [String: String] = [:]
     @StateObject private var comments = CommentStore()
     @FocusState private var stripFocus: Bool
     @Namespace private var ns
@@ -162,6 +292,9 @@ struct StoryboardPane: View {
                 let shot = current(board)
                 VStack(alignment: .leading, spacing: 0) {
                     header(board)
+                    if board.nokey == true {
+                        NoSketchKeyCard(session: doc.url).transition(.blurReplace)
+                    }
                     strip(board, shot: shot)
                     if let shot {
                         let i = board.shots.firstIndex(of: shot) ?? 0
@@ -169,6 +302,9 @@ struct StoryboardPane: View {
                                    start: board.starts[i], ratio: board.ratio, image: shot.image.flatMap { images[$0] },
                                    takes: takes[shot.id] ?? [],
                                    comments: comments.all.filter { $0.shot == shot.id }, store: comments,
+                                   trying: trying[shot.id],
+                                   onTry: { p in withAnimation(Theme.motion) { trying[shot.id] = p }; stripFocus = true },
+                                   onPick: { Task { await reload() } },
                                    step: { step(board, $0) })
                             .id(shot.id)
                             // A new shot blurs in, the old one blurs out (a picked shot animates).
@@ -182,7 +318,7 @@ struct StoryboardPane: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .task(id: doc.url) {
             guard !still else { return }
-            stamp = nil; board = nil; images = [:]; picked = nil
+            stamp = nil; board = nil; images = [:]; picked = nil; trying = [:]
             // Sketches land one by one while the tab is open: a stat every 1.5 s costs nothing.
             while !Task.isCancelled {
                 if shown { await reload(); comments.load(doc.url) }
@@ -209,6 +345,15 @@ struct StoryboardPane: View {
         let j = i + by
         guard b.shots.indices.contains(j) else { return }
         withAnimation(Theme.spring) { picked = b.shots[j].id }
+    }
+
+    /// ↑ and ↓ flip through the chosen shot's variants.
+    private func flip(_ b: Storyboard, _ by: Int) {
+        guard let s = current(b) else { return }
+        let o = s.options
+        guard o.count > 1 else { return }
+        let now = o.firstIndex(of: trying[s.id] ?? s.video ?? "") ?? 0
+        withAnimation(Theme.motion) { trying[s.id] = o[(now + by + o.count) % o.count] }
     }
 
     private func header(_ b: Storyboard) -> some View {
@@ -279,6 +424,8 @@ struct StoryboardPane: View {
             .focusable().focusEffectDisabled().focused($stripFocus)
             .onKeyPress(.leftArrow) { step(b, -1); return .handled }
             .onKeyPress(.rightArrow) { step(b, 1); return .handled }
+            .onKeyPress(.upArrow) { flip(b, -1); return .handled }
+            .onKeyPress(.downArrow) { flip(b, 1); return .handled }
             .onChange(of: shot?.id) { _, id in
                 guard let id else { return }
                 withAnimation(.page) { proxy.scrollTo(id, anchor: .center) }
@@ -334,8 +481,7 @@ struct StoryboardPane: View {
     /// decoded the full 928×1152 PNG on the main thread at first draw: 10 ms a sketch, every time
     /// the tab opened (2026-10-03). Kept per file and date, so a session switch costs nothing.
     nonisolated static func sketch(_ url: URL) -> NSImage? {
-        let date = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
-        let key = "\(url.path)|\(date?.timeIntervalSince1970 ?? 0)" as NSString
+        let key = sketchKey(url)
         if let hit = sketches.object(forKey: key) { return hit }
         guard let src = CGImageSourceCreateWithURL(url as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary),
               let cg = CGImageSourceCreateThumbnailAtIndex(src, 0, [
@@ -348,6 +494,13 @@ struct StoryboardPane: View {
         let img = NSImage(cgImage: cg, size: NSSize(width: cg.width, height: cg.height))
         sketches.setObject(img, forKey: key)
         return img
+    }
+
+    nonisolated static func cachedSketch(_ url: URL) -> NSImage? { sketches.object(forKey: sketchKey(url)) }
+
+    nonisolated private static func sketchKey(_ url: URL) -> NSString {
+        let date = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
+        return "\(url.path)|\(date?.timeIntervalSince1970 ?? 0)" as NSString
     }
 
     /// The fold's title: a motion graphic is made, not filmed.
@@ -380,6 +533,7 @@ struct KindChip: View {
         Text(kind).font(Theme.mono(10.5, .semibold)).foregroundStyle(c)
             .padding(.horizontal, 7).padding(.vertical, 3)
             .background(c.opacity(0.14), in: Capsule())
+            .fixedSize()
     }
 }
 
@@ -427,11 +581,13 @@ private struct ShotThumb: View {
     @State private var hover = false
     @State private var poster: NSImage?
 
+    private var stack: Int { shot.options.count }
+
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: 8)
         ZStack {
             shape.fill(Theme.paper)
-            if let img = image ?? poster {
+            if let img = image ?? poster ?? shot.video.flatMap({ StoryShot.cachedPoster(doc.url.appending(path: $0)) }) {
                 Image(nsImage: img).resizable().scaledToFill()
             } else if shot.error != nil {
                 Image(systemName: "exclamationmark.triangle").font(.system(size: 11)).foregroundStyle(Theme.warn)
@@ -444,6 +600,26 @@ private struct ShotThumb: View {
         .clipShape(shape)
         .contentShape(shape)
         .overlay(shape.strokeBorder(Theme.border))
+        // A shot with variants is a small stack of cards with their count (2026-10-09).
+        .background {
+            if stack > 1 {
+                ZStack {
+                    shape.fill(Theme.faint.opacity(0.35)).overlay(shape.strokeBorder(Theme.border))
+                        .scaleEffect(x: 0.8, y: 1).offset(y: -10)
+                    shape.fill(Theme.faint.opacity(0.6)).overlay(shape.strokeBorder(Theme.border))
+                        .scaleEffect(x: 0.9, y: 1).offset(y: -5)
+                }
+            }
+        }
+        .overlay(alignment: .bottomLeading) {
+            if stack > 1 {
+                Text("\(stack)").font(Theme.mono(9, .bold)).foregroundStyle(Theme.canvas)
+                    .padding(.horizontal, 4).frame(minWidth: 15, minHeight: 15)
+                    .background(Theme.ink, in: Capsule())
+                    .overlay(Capsule().strokeBorder(Theme.canvas, lineWidth: 1.5))
+                    .padding(3)
+            }
+        }
         .overlay(alignment: .bottomTrailing) {
             if recorded {
                 Image(systemName: "checkmark").font(.system(size: 8, weight: .heavy)).foregroundStyle(.white)
@@ -468,12 +644,10 @@ private struct ShotThumb: View {
         .animation(Theme.spring, value: on)
         .animation(Theme.motion, value: hover)
         .onHover { hover = $0 }
-        .help(shot.say.isEmpty ? shot.kind : "“\(shot.say)”")
+        .help((shot.say.isEmpty ? shot.kind : "“\(shot.say)”") + (stack > 1 ? "\n\(stack) variants" : ""))
         .task(id: shot.video) {
-            guard let v = shot.video else { return }
-            let clip = doc.url.appending(path: v)
-            poster = BrollLib.cachedPoster(clip)
-            if poster == nil { poster = await BrollLib.poster(clip) }
+            guard let v = shot.video else { poster = nil; return }
+            poster = await StoryShot.poster(doc.url.appending(path: v))
         }
     }
 }
@@ -487,6 +661,8 @@ private struct ShotSplit: Layout {
     var ratio: CGFloat = 4.0 / 5.0
     var gap: CGFloat = 40
     var column: CGFloat = 560
+    /// Under the frame: the row of variants, when the shot has some.
+    var below: CGFloat = 0
 
     func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
         proposal.replacingUnspecifiedDimensions(by: CGSize(width: 900, height: 600))
@@ -496,8 +672,8 @@ private struct ShotSplit: Layout {
         guard subviews.count == 2 else { return }
         // As big as the height allows, but never more than about half the width: a wide frame
         // takes a little more, so the line still has room.
-        let w = max(220, min(b.height * ratio, (b.width - gap) * (ratio > 1 ? 0.62 : 0.55)))
-        subviews[0].place(at: b.origin, proposal: ProposedViewSize(width: w, height: w / ratio))
+        let w = max(220, min((b.height - below) * ratio, (b.width - gap) * (ratio > 1 ? 0.62 : 0.55)))
+        subviews[0].place(at: b.origin, proposal: ProposedViewSize(width: w, height: w / ratio + below))
         let x = b.minX + w + gap
         subviews[1].place(at: CGPoint(x: x, y: b.minY),
                           proposal: ProposedViewSize(width: max(0, min(column, b.maxX - x)), height: b.height))
@@ -506,7 +682,7 @@ private struct ShotSplit: Layout {
 
 private struct ShotDetail: View {
     @Environment(AppModel.self) var app
-    /// Plugins › Higgsfield off: no ✦.
+    /// Plugins › Replicate and Higgsfield both off: no ✦.
     @AppStorage(Plugins.removedKey) private var pluginsRemoved = ""
     @Environment(\.paneShown) private var shown
     var doc: SessionDoc
@@ -520,6 +696,10 @@ private struct ShotDetail: View {
     var takes: [Take]
     var comments: [Comment]
     var store: CommentStore
+    /// The variant the user is trying, if any; onTry shows another, onPick reloads after he picks one.
+    var trying: String?
+    var onTry: (String?) -> Void
+    var onPick: () -> Void
     var step: (Int) -> Void
     @State private var draft = ""
     @State private var showResolved = false
@@ -529,17 +709,33 @@ private struct ShotDetail: View {
     @AppStorage("storyboardSound") private var sound = false
     @FocusState private var typing: Bool
 
-    private var clip: URL? { shot.video.map { doc.url.appending(path: $0) } }
+    /// What the frame shows: the variant being tried, else the one in the video.
+    private var shownPath: String? {
+        if let trying, shot.options.contains(trying) { return trying }
+        return shot.video
+    }
+    private var isTrying: Bool { shownPath != nil && shownPath != shot.video }
+    /// The frame shows a GPT Image still: a draft, with Make Final under the line.
+    private var isDraft: Bool { media.map { StoryShot.isStill($0.path) && Higgsfield.isDraft($0) } ?? false }
+    private var media: URL? { shownPath.map { doc.url.appending(path: $0) } }
+    /// A clip plays; a still only shows.
+    private var clip: URL? { media.flatMap { StoryShot.isStill($0.path) ? nil : $0 } }
+
+    static let rowHeight: CGFloat = 72
+
+    private func letter(_ path: String?) -> String {
+        StoryShot.letter(shot.options.firstIndex(of: path ?? "") ?? 0)
+    }
 
     /// The model that made what the frame shows: the clip, else the sketch (2026-10-06).
     private var madeWith: String? {
-        if let clip { return MadeWith.label(for: clip) }
+        if let media { return MadeWith.label(for: media) }
         return shot.image.flatMap { MadeWith.label(for: Storyboard.folder(doc.url).appending(path: $0)) }
     }
 
     /// A clip's own shape, from its first frame, so a 16:9 clip is not cut to a 9:16 card.
     private var frameRatio: CGFloat {
-        if clip != nil, let p = poster, p.size.width > 0, p.size.height > 0 { return p.size.width / p.size.height }
+        if let media, let p = StoryShot.cachedPoster(media) ?? poster, p.size.width > 0, p.size.height > 0 { return p.size.width / p.size.height }
         return ratio
     }
 
@@ -548,8 +744,11 @@ private struct ShotDetail: View {
     // GeometryReader (inside one the blur-in never started) and not a measured @State size: that
     // fed the sketch's width back into the size it was measured from and froze the app (2026-10-04).
     var body: some View {
-        ShotSplit(ratio: frameRatio) {
-            frame
+        ShotSplit(ratio: frameRatio, below: shot.options.isEmpty ? 0 : Self.rowHeight + 12) {
+            VStack(alignment: .leading, spacing: 12) {
+                frame
+                if !shot.options.isEmpty { variantRow }
+            }
             ScrollView(.vertical) {
                 VStack(alignment: .leading, spacing: 18) {
                     top
@@ -558,9 +757,10 @@ private struct ShotDetail: View {
                             .lineSpacing(3).fixedSize(horizontal: false, vertical: true)
                             .textSelection(.enabled)
                     }
+                    if isTrying || isDraft { tryingButtons }
                     if !shot.how.isEmpty { how }
                     if let e = shot.clipError, shot.generating == nil {
-                        Label("Higgsfield: \(e)", systemImage: "exclamationmark.triangle")
+                        Label("The clip failed: \(e)", systemImage: "exclamationmark.triangle")
                             .font(Theme.sans(12)).foregroundStyle(Theme.warn)
                             .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
                     }
@@ -577,25 +777,44 @@ private struct ShotDetail: View {
         .contextMenu { menu }
     }
 
+    // One row when it fits; in a narrow column the buttons go to a second row (2026-10-09):
+    // squeezed into one, the labels broke a letter at a time ("SC RE EN").
     private var top: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 8) { meta; Spacer(minLength: 8); controls }
+            VStack(alignment: .leading, spacing: 10) {
+                meta
+                HStack(spacing: 8) { Spacer(minLength: 0); controls }
+            }
+        }
+    }
+
+    private var meta: some View {
         HStack(spacing: 8) {
             Text("\(shot.section.title) · \(number) of \(count)")
                 .font(Theme.sans(12, .medium)).foregroundStyle(Theme.muted)
-            KindChip(kind: shot.kind)
+                .lineLimit(1).fixedSize()
+            KindChip(kind: shot.kind).fixedSize()
             Text("\(Storyboard.clock(start)) · \(Int(shot.length.rounded())) s")
                 .font(Theme.mono(11)).foregroundStyle(Theme.faint)
+                .lineLimit(1).fixedSize()
             if let m = madeWith {
                 Text(m).font(Theme.sans(11)).foregroundStyle(Theme.faint).lineLimit(1)
                     .help(clip != nil ? "This clip was made with \(m)" : "This sketch was drawn with \(m)")
             }
-            Spacer()
-            if Plugins.isInstalled("higgsfield") { generate }
+        }
+    }
+
+    private var controls: some View {
+        HStack(spacing: 8) {
+            if VideoMaker.current != nil { generate }
             record
             HStack(spacing: 2) {
                 arrow("chevron.left", -1, off: number == 1)
                 arrow("chevron.right", 1, off: number == count)
             }
         }
+        .fixedSize()
     }
 
     private func arrow(_ icon: String, _ by: Int, off: Bool) -> some View {
@@ -635,17 +854,17 @@ private struct ShotDetail: View {
             .overlay {
                 ZStack {
                     shape.fill(Theme.paper)
-                    if let clip {
+                    if let media {
                         // The clip plays on its own, muted and looping, while the tab shows (2026-10-04).
+                        // A still (a new angle not animated yet) just shows (2026-10-09).
                         Theme.stage
-                            .overlay { if let poster { Image(nsImage: poster).resizable().scaledToFill() } }
-                            .overlay { if shown && !app.isRecording { LoopingVideo(url: clip, sound: sound) } }
-                            .onTapGesture(count: 2) { NSWorkspace.shared.openSoon(clip) }
-                            .help("Double-click to open")
-                            .task(id: clip) {
-                                poster = BrollLib.cachedPoster(clip)
-                                if poster == nil { poster = await BrollLib.poster(clip) }
+                            .overlay {
+                                if let p = StoryShot.cachedPoster(media) ?? poster { Image(nsImage: p).resizable().scaledToFill() }
                             }
+                            .overlay { if let clip, shown && !app.isRecording { LoopingVideo(url: clip, sound: sound) } }
+                            .onTapGesture(count: 2) { NSWorkspace.shared.openSoon(media) }
+                            .help("Double-click to open")
+                            .task(id: media) { poster = await StoryShot.poster(media) }
                     } else if let image {
                         Image(nsImage: image).resizable().scaledToFill()
                             .onTapGesture(count: 2) { if let n = shot.image { NSWorkspace.shared.openSoon(Storyboard.folder(doc.url).appending(path: n)) } }
@@ -669,6 +888,16 @@ private struct ShotDetail: View {
             }
             .overlay(shape.strokeBorder(Theme.border))
             .cardShadow(shape, fill: Theme.paper, radius: 18, y: 8)
+            .overlay(alignment: .topLeading) {
+                if isTrying {
+                    Text("Trying \(letter(shownPath)). The video uses \(letter(shot.video)).")
+                        .font(Theme.sans(11.5, .medium)).foregroundStyle(.white)
+                        .padding(.horizontal, 11).padding(.vertical, 7)
+                        .background(.black.opacity(0.6), in: Capsule())
+                        .padding(12)
+                        .transition(.opacity)
+                }
+            }
             .overlay(alignment: .topTrailing) {
                 if takes.contains(where: \.keeper) {
                     Image(systemName: "star.fill").font(.system(size: 12)).foregroundStyle(.yellow)
@@ -680,7 +909,7 @@ private struct ShotDetail: View {
                 if shot.generating != nil {
                     HStack(spacing: 7) {
                         ProgressView().controlSize(.mini).tint(.white)
-                        Text("Generating with Higgsfield…").font(Theme.sans(11.5, .medium)).foregroundStyle(.white)
+                        Text("Making the clip…").font(Theme.sans(11.5, .medium)).foregroundStyle(.white)
                     }
                     .padding(.horizontal, 11).padding(.vertical, 7)
                     .background(.black.opacity(0.6), in: Capsule())
@@ -705,8 +934,72 @@ private struct ShotDetail: View {
             }
     }
 
-    /// ✦ next to the record dot (2026-10-06): Takes makes this shot's clip with Higgsfield. Not set up
-    /// yet: it opens Plugins › Higgsfield.
+    /// The shot's variants under the frame (2026-10-09): A B C…, a check on the one in the video. A click
+    /// shows one in the frame; the video keeps its own until the user clicks Use. + asks Takes for another.
+    private var variantRow: some View {
+        let o = shot.options
+        let h: CGFloat = 54
+        let w = min(110, max(40, h * frameRatio))
+        return ScrollView(.horizontal) {
+            HStack(alignment: .top, spacing: 10) {
+                ForEach(Array(o.enumerated()), id: \.element) { i, p in
+                    VariantThumb(url: doc.url.appending(path: p), letter: StoryShot.letter(i),
+                                 picked: p == shot.video, on: p == shownPath, width: w, height: h) {
+                        onTry(p == shot.video ? nil : p)
+                    }
+                }
+                Button { askVariant() } label: {
+                    Image(systemName: "plus").font(.system(size: 13, weight: .semibold))
+                        .frame(width: w, height: h)
+                        .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(Theme.border, style: StrokeStyle(lineWidth: 1.5, dash: [4, 3])))
+                        .contentShape(RoundedRectangle(cornerRadius: 7))
+                }
+                .buttonStyle(PressStyle()).foregroundStyle(Theme.muted)
+                .help("Ask Takes for another variant of this shot")
+            }
+            .padding(.horizontal, 2).padding(.top, 2)
+        }
+        .scrollIndicators(.never)
+        .frame(height: Self.rowHeight, alignment: .top)
+    }
+
+    /// Under the line while a variant is tried: use it, or go back to the one in the video. A GPT
+    /// draft still also gets Make Final (2026-10-09): Takes redraws it with Nano Banana 2.1 at 4K.
+    private var tryingButtons: some View {
+        HStack(spacing: 10) {
+            if isTrying {
+                Button("Use \(letter(shownPath)) in the video") {
+                    guard let p = shownPath else { return }
+                    if Storyboard.pick(doc.url, shot: shot.id, p) { onPick() }
+                }
+                .buttonStyle(.borderedProminent).controlSize(.large)
+            }
+            if isDraft, let p = shownPath {
+                Button("Make Final") {
+                    app.chats.chat(doc.url).send(Higgsfield.finalAsk(p, shot: shot.id), title: doc.meta.title, onStage: nil)
+                    app.chats.open = true
+                }
+                .buttonStyle(.bordered).controlSize(.large)
+                .help("A GPT Image draft. Takes redraws it sharp with Nano Banana 2.1 at 4K.")
+            }
+            if isTrying {
+                Button("Back to \(letter(shot.video))") { onTry(nil) }
+                    .buttonStyle(.plain).font(Theme.sans(13)).foregroundStyle(Theme.muted)
+            }
+        }
+    }
+
+    private func askVariant() {
+        let line = shot.say.isEmpty ? shot.sketch : shot.say
+        app.chats.chat(doc.url).send(
+            "Make one more variant of storyboard shot \(shot.id) (“\(line)”): another angle or take on the same line. "
+            + "Add it to the shot's variants with set_storyboard; keep the others and the one in the video.",
+            title: doc.meta.title, onStage: nil)
+        app.chats.open = true
+    }
+
+    /// ✦ next to the record dot (2026-10-06): Takes makes this shot's clip with Replicate or Higgsfield
+    /// (VideoMaker). Not set up yet: it opens that plugin.
     private var generate: some View {
         Button { makeClip() } label: {
             Image(systemName: "sparkles").font(.system(size: 12, weight: .semibold))
@@ -717,18 +1010,18 @@ private struct ShotDetail: View {
         .background(Theme.accentSoft, in: Circle())
         .disabled(shot.generating != nil)
         .opacity(shot.generating != nil ? 0.45 : 1)
-        .help(shot.generating != nil ? "Higgsfield is making this clip" : clip == nil ? "Make this shot's clip with Higgsfield" : "Make a new clip with Higgsfield")
+        .help(shot.generating != nil ? "Takes is making this clip"
+              : "\(clip == nil ? "Make this shot's clip" : "Make a new clip") with \(VideoMaker.current?.name ?? "AI video")")
     }
 
     private func makeClip() {
         Task {
-            let hf = Higgsfield.shared
-            if !hf.ready { await hf.check() }
-            guard hf.ready else {
-                app.openPlugin("higgsfield")
+            guard let maker = VideoMaker.current else { return }
+            guard await maker.ready() else {
+                app.openPlugin(maker.plugin)
                 return
             }
-            app.chats.chat(doc.url).send(Higgsfield.shotPrompt(shot), title: doc.meta.title, onStage: nil)
+            app.chats.chat(doc.url).send(maker.shotPrompt(shot), title: doc.meta.title, onStage: nil)
             app.chats.open = true
         }
     }
@@ -816,7 +1109,9 @@ private struct ShotDetail: View {
 
     @ViewBuilder private var menu: some View {
         Button("Record this shot") { app.record(shot: shot) }.disabled(app.isRecording)
-        Button("Make the clip with Higgsfield") { makeClip() }.disabled(shot.generating != nil)
+        if let maker = VideoMaker.current {
+            Button("Make the clip with \(maker.name)") { makeClip() }.disabled(shot.generating != nil)
+        }
         let others = doc.meta.takes.filter { $0.kind == .camera && $0.shot != shot.id }.sorted { $0.number > $1.number }
         if !others.isEmpty {
             Menu("File a take under this shot") {
@@ -827,12 +1122,56 @@ private struct ShotDetail: View {
                 }
             }
         }
-        if let clip {
-            Button("Open the clip") { NSWorkspace.shared.openSoon(clip) }
-            Button("Show in Finder") { NSWorkspace.shared.revealSoon([clip]) }
+        Button("Ask Takes for a variant") { askVariant() }
+        if let media {
+            Button(clip != nil ? "Open the clip" : "Open the still") { NSWorkspace.shared.openSoon(media) }
+            Button("Show in Finder") { NSWorkspace.shared.revealSoon([media]) }
         } else if let n = shot.image {
             Button("Open the sketch") { NSWorkspace.shared.openSoon(Storyboard.folder(doc.url).appending(path: n)) }
         }
+    }
+}
+
+/// One variant under the frame: its picture, its letter, a check when it is in the video.
+private struct VariantThumb: View {
+    var url: URL
+    var letter: String
+    var picked: Bool
+    var on: Bool
+    var width: CGFloat
+    var height: CGFloat
+    var tap: () -> Void
+    @State private var image: NSImage?
+    @State private var hover = false
+
+    var body: some View {
+        let shape = RoundedRectangle(cornerRadius: 7)
+        VStack(spacing: 5) {
+            Button(action: tap) {
+                ZStack {
+                    Theme.stage
+                    if let p = image ?? StoryShot.cachedPoster(url) { Image(nsImage: p).resizable().scaledToFill() }
+                }
+                .frame(width: width, height: height)
+                .clipShape(shape).contentShape(shape)
+                .overlay(shape.strokeBorder(on ? Theme.ink : Theme.border, lineWidth: on ? 2 : 1))
+                .overlay(alignment: .topTrailing) {
+                    if picked {
+                        Image(systemName: "checkmark").font(.system(size: 8, weight: .heavy)).foregroundStyle(.white)
+                            .frame(width: 16, height: 16).background(Theme.accent, in: Circle())
+                            .padding(4)
+                    }
+                }
+                .opacity(on || hover ? 1 : 0.7)
+            }
+            .buttonStyle(PressStyle())
+            .onHover { hover = $0 }
+            .help(picked ? "\(letter): in the video" : "Try \(letter) in the frame")
+            Text(letter).font(Theme.mono(10.5, picked || on ? .semibold : .regular))
+                .foregroundStyle(picked ? Theme.accent : on ? Theme.ink : Theme.faint)
+        }
+        .animation(Theme.motion, value: on)
+        .task(id: url) { image = await StoryShot.poster(url) }
     }
 }
 

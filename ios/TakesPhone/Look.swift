@@ -326,4 +326,6 @@ private struct MiniPhone: View {
 /// Private for now (2026-10-04), like Features on the Mac: the public export turns it off.
 enum Features {
     static let socialBoards = false
+    /// The blog's Article side of the Post tab (2026-10-09), as the Mac's Features.blog.
+    static let blog = false
 }

@@ -699,17 +699,15 @@ private struct ReviewCard: View {
                 }
             }
             AskBox(placeholder: "Or say why and press Return to decline", text: $note, focus: $noteFocused,
-                   send: { decline(s, .other) }, cancel: { mode = .none; note = "" }, autofocus: false)
+                   send: { if !note.trimmingCharacters(in: .whitespaces).isEmpty { decline(s, .other) } }, cancel: { mode = .none; note = "" }, autofocus: false)
             Text(typed ? "Return declines with this note. A reason button adds the reason to it." : "Pick a reason, or type why. Esc closes.")
                 .font(Theme.sans(11.5)).foregroundStyle(Theme.faint)
         }
     }
 
+    // "other" declines at once too, a note is optional (2026-10-09): it used to only focus the
+    // note box, so the click looked like it did nothing.
     private func decline(_ s: Suggestion, _ r: DeclineReason) {
-        if r == .other && note.trimmingCharacters(in: .whitespaces).isEmpty {
-            noteFocused = true
-            return
-        }
         store.decline(s, wrongPost: wrongPost, reason: r, note: note)
         mode = .none
         note = ""
@@ -1378,7 +1376,7 @@ private struct CopilotDocView: View {
         } else if let id = focused, let i = comments.firstIndex(where: { $0.id == id }) {
             let c = comments[i]
             CommentCard(comment: c, number: i + 1,
-                        onReply: { store.reply(id, $0) },
+                        onEdit: { store.setText(id, $0) },
                         onResolve: { store.setResolved(id, c.open) },
                         onDelete: { store.delete(id); focused = nil },
                         onClose: { withAnimation(Theme.motion) { focused = nil } },

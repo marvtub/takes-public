@@ -29,6 +29,35 @@ final class Higgsfield {
     nonisolated static var cli: String? { Setup.tool("higgsfield") }
     static let pricing = URL(string: "https://higgsfield.ai/pricing")!
 
+    // MARK: Models (2026-10-09)
+
+    /// Hand-picked, with the same model's preview from Replicate; then the rest, without pictures.
+    var featured: [VideoModel] = []
+    var more: [VideoModel] = []
+    /// The job type ✦ and the chat use.
+    var defaultModel = "seedance_2_5"
+
+    nonisolated static func call(_ what: String, _ args: [String: Any] = [:]) async -> [String: Any] {
+        await ElevenLabs.call(what, args, flag: "--higgsfield")
+    }
+
+    func loadCatalog() async {
+        let r = await Self.call("catalog")
+        featured = VideoModel.list(r, "featured")
+        more = VideoModel.list(r, "more")
+        if let d = r["default"] as? String { defaultModel = d }
+    }
+
+    func makeDefault(_ model: String) async {
+        let r = await Self.call("set_default", ["model": model])
+        if let d = r["default"] as? String { defaultModel = d }
+    }
+
+    /// "Seedance 2.5" for the default, from the lists.
+    var defaultLabel: String {
+        (featured + more).first { $0.model == defaultModel }?.label ?? defaultModel
+    }
+
     func check() async {
         if case .working = state { return }
         guard let cli = Self.cli else { state = .missing; return }
@@ -130,11 +159,20 @@ final class Higgsfield {
     nonisolated static func changeDraft(_ rel: String) -> String { "Change \(rel) with Higgsfield: " }
     /// Images go to GPT Image directly, not Higgsfield: much cheaper.
     nonisolated static func imageDraft(_ rel: String) -> String { "Change \(rel) with make_image: " }
+
+    /// Images are GPT Image drafts until the user likes one (2026-10-09); then Make Final redraws it with
+    /// Nano Banana 2.1 at 4K. A GPT label in .models.json marks a draft.
+    nonisolated static func isDraft(_ url: URL) -> Bool { MadeWith.label(for: url)?.hasPrefix("GPT Image") == true }
+    nonisolated static func finalAsk(_ rel: String, shot: String? = nil) -> String {
+        "Make the final of \(rel) with make_image (from=\(rel)): Nano Banana 2.1 at 4K, the same picture, sharp."
+            + (shot.map { " Then add it to storyboard shot \($0)'s variants right after \(rel) with set_storyboard, and put it in the video if \(rel) is." } ?? "")
+    }
 }
 
 /// Plugins › Higgsfield (Settings › Higgsfield until 2026-10-08). The board draws the title.
 struct HiggsfieldPage: View {
     private var hf = Higgsfield.shared
+    @State private var open: VideoModel?
 
     static let plugin = TakesPlugin(
         id: "higgsfield", title: "Higgsfield", icon: "sparkles", key: " ",
@@ -148,6 +186,7 @@ struct HiggsfieldPage: View {
                     .padding(16)
                     .background(RoundedRectangle(cornerRadius: 12).fill(Theme.paper))
                     .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Theme.border))
+                if hf.ready { models }
                 VStack(alignment: .leading, spacing: 12) {
                     Text("Where to use it").font(Theme.sans(13, .semibold)).foregroundStyle(Theme.ink)
                     use("sparkles", "Storyboard", "Press ✦ on a shot. Takes writes the prompt from the shot and its sketch, and the clip plays on the shot.")
@@ -157,7 +196,37 @@ struct HiggsfieldPage: View {
                         .font(Theme.sans(12)).foregroundStyle(Theme.faint)
                 }
             }
-        .task { await hf.check() }
+        .task {
+            await hf.check()
+            if hf.ready { await hf.loadCatalog() }
+        }
+        .sheet(item: $open) { m in
+            ModelSheet(card: m, provider: "Higgsfield", load: { await Higgsfield.call("details", ["model": m.model]) },
+                       action: { action(m) })
+        }
+    }
+
+    /// The video model Takes uses, and the browser to pick another. Nothing shows until the lists are in.
+    @ViewBuilder private var models: some View {
+        if !hf.featured.isEmpty || !hf.more.isEmpty {
+            VStack(alignment: .leading, spacing: 18) {
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    Text("Video model:").font(Theme.sans(13, .semibold)).foregroundStyle(Theme.ink)
+                    Text(hf.defaultLabel).font(Theme.sans(13, .semibold)).foregroundStyle(Theme.accentInk)
+                    Text("for ✦ and the chat, unless you name another.").font(Theme.sans(12)).foregroundStyle(Theme.muted)
+                }
+                .arrive(0)
+                ModelShelf(title: "Featured", detail: "Previews from the same models on Replicate.", models: hf.featured, from: 1,
+                           caption: { $0.model }, action: action, open: { open = $0 })
+                ModelChips(title: "More video models", detail: "Click one for its price and settings.", models: hf.more,
+                           from: hf.featured.count + 2, open: { open = $0 })
+            }
+        }
+    }
+
+    private func action(_ m: VideoModel) -> ModelAction {
+        ModelAction(title: "Use", done: hf.defaultModel == m.model ? "In use" : nil,
+                    help: "Use this model for ✦ and the chat") { Task { await hf.makeDefault(m.model) } }
     }
 
     @ViewBuilder private var account: some View {

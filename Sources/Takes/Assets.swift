@@ -457,13 +457,21 @@ struct AssetsPane: View {
         }
         if a.kind == .video || a.kind == .image {
             // Puts the ask in the chat box; the user types what to change (2026-10-06).
-            // Images go to GPT Image directly, videos to Higgsfield (when its plugin is on).
-            if a.kind == .image || Plugins.isInstalled("higgsfield") {
-                Button(a.kind == .video ? "Change with Higgsfield…" : "Change Image…") {
+            // Images go to GPT Image directly, videos to Replicate or Higgsfield (VideoMaker).
+            let maker = VideoMaker.current
+            if a.kind == .image || maker != nil {
+                Button(a.kind == .video ? "Change with \(maker?.name ?? "")…" : "Change Image…") {
                     let chat = app.chats.chat(doc.url)
-                    chat.draft = a.kind == .video ? Higgsfield.changeDraft(a.rel) : Higgsfield.imageDraft(a.rel)
+                    chat.draft = a.kind == .video ? (maker?.changeDraft(a.rel) ?? "") : Higgsfield.imageDraft(a.rel)
                     app.chats.open = true
                 }
+            }
+        }
+        if a.kind == .image, Higgsfield.isDraft(a.url) {
+            // A GPT Image draft (2026-10-09): the final is Nano Banana 2.1 at 4K, asked in the chat.
+            Button("Make Final") {
+                app.chats.chat(doc.url).send(Higgsfield.finalAsk(a.rel), title: doc.meta.title, onStage: nil)
+                app.chats.open = true
             }
         }
         if a.kind == .video || a.kind == .audio, Plugins.isInstalled("voices") {

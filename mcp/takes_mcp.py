@@ -7,6 +7,8 @@ The app rescans every 2 seconds, so changes show up without a click.
 
 Register:  claude mcp add takes --scope user -- python3 <path>/takes_mcp.py
 """
+import concurrent.futures
+import glob
 import hashlib
 import json
 import math
@@ -114,10 +116,6 @@ def write_meta(session, meta):
         lines.append("Published: " + ", ".join(
             "%s (%s)" % (p.get("platform") or "Published", p["at"][:10]) + (" " + p["url"] if p.get("url") else "")
             for p in meta["published"]))
-    if meta.get("music"):
-        m = meta["music"]
-        lines.append("Music: `_library/audio/%s` from %s at %d%%" % (
-            m["file"], clock(m.get("start", 0)), round(m.get("volume", 0.35) * 100)))
     lines += ["", "## Takes\n"]
     takes = meta.get("takes", [])
     if not takes:
@@ -323,9 +321,7 @@ def t_get_session(a):
             "created": meta["createdAt"], "script": script, "variants": variants(s),
             "favorite_script": meta.get("favorite"),
             "published": meta.get("published") or False,
-            "music": music_view(meta.get("music")),
             "style": dict(zip(("name", "picked_by"), style_pick(os.path.dirname(s), s))),
-            "sfx": sfx_view(s, meta.get("sfx")),
             "history_versions": len(history(s)), "takes": takes,
             "assets": assets(s, {t["file"] for t in meta.get("takes", [])}),
             "post": post_overview(s),
@@ -351,7 +347,7 @@ FOLDERS = {
                    "Get the path from next_path kind=thumbnail.",
     "stills/": "Frames the user saved from a paused video. Read them; never write here.",
     "storyboard/": "The storyboard and its sketches. Write it only with set_storyboard.",
-    "generated/": "AI videos (higgsfield) and images (make_image), as <name>-vN.<ext>. Write here only with those tools.",
+    "generated/": "AI videos (replicate, higgsfield) and images (make_image), as <name>-vN.<ext>. Write here only with those tools.",
     "assets/": "Files the user dropped on the Assets tab. Read them; never write here.",
     "(library)": "Reusable style (logos, icons, images, motion graphics, fonts, colours, type) goes in the "
                  "style or project library, never in a session. See get_library.",
@@ -408,6 +404,10 @@ def t_next_path(a):
     """The next free versioned path, so every export lands in the right folder with the right name."""
     kind = a["kind"]
     base = slug(split_version(a["name"])[0]) or "untitled"
+    if kind == "edit":
+        need_rules(*EDIT_AREAS)
+    elif kind == "thumbnail":
+        need_rules("thumbnail")
     if kind in ("edit", "thumbnail"):
         s = resolve_session(a["session"])
         d = os.path.join(s, "edits" if kind == "edit" else "thumbnails")
@@ -978,7 +978,8 @@ def t_get_comments(a):
                     "README.md or tokens.json edit the file. Storyboard comments carry 'shot' (its id) and "
                     "'shot_now': change the shot with set_storyboard (keep every id; the storyboard skill), "
                     "and the script with update_session if the lines change. "
-                    "Then reply_comment with resolve=true."}
+                    "Then reply_comment with resolve=true and a lesson for each (get_rules for that step first: a rule "
+                    "that covers it, 'new' with rule={area, text}, or 'one-off')."}
 
 
 def t_reply_comment(a):
@@ -990,9 +991,20 @@ def t_reply_comment(a):
     missing = [r.get("id") for r in items if r.get("id") not in by_id]
     if missing:
         raise ValueError("No comment %s. Use get_comments." % ", ".join(map(str, missing)))
+    # A session comment that gets resolved needs its lesson (library comments do not).
+    lessons = read_lessons() if a.get("session") else None
+    if lessons is not None:
+        bare = [r["id"] for r in items if r.get("resolve") and not r.get("lesson")
+                and by_id[r["id"]].get("status") != "resolved"]
+        if bare:
+            raise ValueError("Give each resolved comment a lesson (%s): a rule id from get_rules when an "
+                             "existing rule covers it, 'new' with rule={area, text} when it applies to the next "
+                             "videos too, or 'one-off'." % ", ".join(bare))
     done = []
     for r in items:
         c = by_id[r["id"]]
+        if lessons is not None and r.get("lesson"):
+            apply_lesson(lessons, s, c, r)
         if r.get("text", "").strip() or r.get("fixed_in"):
             reply = {"by": "claude", "text": r.get("text", "").strip(), "at": now_iso()}
             if r.get("fixed_in"):
@@ -1007,9 +1019,416 @@ def t_reply_comment(a):
         if "resolve" in r:
             c["status"] = "resolved" if r["resolve"] else "open"
         done.append(c)
+    if lessons is not None and any(r.get("lesson") for r in items):
+        write_lessons(lessons)
     write_comments(s, data)
     views = [comment_view(s, c) for c in done]
     return views[0] if len(views) == 1 and not a.get("replies") else {"updated": views}
+
+
+# ---------- lessons: what the agent learned from the user's comments ----------
+# <root>/_library/rules/<area>.json {"rules": [{id, area, text, on, by, made, from: [ref], repeats: [ref],
+# check?}]}: one file per step of the content journey, so an agent reads only the steps it works on
+# (2026-10-09: one lessons.json held them all, and one "post" area held every platform). The comment
+# copilot's lessons are rules/comments.md, markdown it reads and the user edits in Comments > Library.
+# A ref is "<project>/<session>#<comment id>". Each resolved session comment carries
+# "lesson": "one-off" or a rule id, and "repeat": true when that rule was made before the comment:
+# the agent made the same mistake again. The Feedback board shows the rules (the user edits, turns
+# off or deletes them) and how the number of comments per video changes. A rule with a check is
+# measured by check_edit, so it no longer rests on the agent's memory.
+# Rules stay few and short (AREA_MAX per area, RULE_MAX characters): every chat reads them.
+AREAS = ["storyboard", "script", "sound", "cut", "picture", "captions", "graphics", "thumbnail",
+         "post-all", "post-linkedin", "post-x", "post-youtube", "post-vertical", "other"]
+EDIT_AREAS = ["sound", "cut", "picture", "captions", "graphics"]
+AREA_MAX = 10
+RULE_MAX = 220
+CHECKS = {
+    "loudness": "Integrated loudness in LUFS: {target, tolerance} (default -14 ± 1).",
+    "peak": "True peak in dBTP: {max} (default -1).",
+    "pauses": "No silence longer than {max} seconds (default 0.4), quieter than {floor} dB (default -35).",
+    "length": "At most {max} seconds long.",
+}
+# The old "post" area at the split: these two are about LinkedIn ("see more", the first comment).
+SPLIT_POST = {"post-1": "post-linkedin", "post-2": "post-linkedin"}
+
+
+def rules_dir():
+    return os.path.join(root(), LIB, "rules")
+
+
+def area_file(area):
+    return os.path.join(rules_dir(), area + ".json")
+
+
+def post_area(file):
+    """The post rules a comment on this file belongs to: posts/x.md and posts/x/variants/ are X."""
+    f = (file or "").replace(os.sep, "/")
+    for p in ("x", "youtube", "vertical"):
+        if f.startswith("posts/%s.md" % p) or f.startswith("posts/%s/" % p):
+            return "post-" + p
+    if f.startswith(("posts/linkedin.md", "posts/variants/", "posts/first-comment", "posts/hooks.json", "posts/history/")):
+        return "post-linkedin"
+    return "post-all"
+
+
+def split_old_lessons():
+    """Moves the one lessons.json into a file per area, once. It stays as lessons-before-split.json.
+    A chat that started before the split still runs the old server: it finds no lessons.json, starts
+    an empty one and adds its new rule there. Those rules move in too (absorb_old_rules)."""
+    old = os.path.join(root(), LIB, "lessons.json")
+    if not os.path.isfile(old):
+        return
+    try:
+        with open(old) as f:
+            d = json.load(f)
+    except (OSError, ValueError):
+        return
+    for r in d.get("rules", []):
+        if r.get("area") == "post":
+            r["area"] = SPLIT_POST.get(r["id"], "post-all")
+        elif r.get("area") not in AREAS:
+            r["area"] = "other"
+    if os.path.isdir(rules_dir()) and any(f.endswith(".json") for f in os.listdir(rules_dir())):
+        absorb_old_rules(d.get("rules", []))
+        keep = "lessons-absorbed-%s.json" % time.strftime("%Y%m%d-%H%M%S", time.gmtime())
+    else:
+        write_lessons({"rules": d.get("rules", [])})
+        keep = "lessons-before-split.json"
+    try:
+        os.replace(old, os.path.join(root(), LIB, keep))
+    except FileNotFoundError:
+        pass  # the app or another chat moved it first
+
+
+def absorb_old_rules(rules):
+    """Adds the rules an old server wrote to lessons.json after the split. It saw no rules, so its ids
+    start again at <area>-1: a taken id gets the next free one, and the comments that point to it follow."""
+    d = read_lessons(split=False)
+    texts = {" ".join(r["text"].lower().split()) for r in d["rules"]}
+    for r in rules:
+        if " ".join((r.get("text") or "").lower().split()) in texts or not r.get("id"):
+            continue
+        if any(x["id"] == r["id"] for x in d["rules"]):
+            n = 1 + max([int(x["id"].rsplit("-", 1)[1]) for x in d["rules"]
+                         if x["id"].startswith(r["area"] + "-") and x["id"].rsplit("-", 1)[1].isdigit()] or [0])
+            new = "%s-%d" % (r["area"], n)
+            for ref in r.get("from", []) + r.get("repeats", []):
+                path, _, cid = ref.partition("#")
+                s = os.path.join(root(), path)
+                cs = read_comments(s)
+                for c in cs["comments"]:
+                    if c.get("id") == cid and c.get("lesson") == r["id"]:
+                        c["lesson"] = new
+                        write_comments(s, cs)
+            r["id"] = new
+        d["rules"].append(r)
+        texts.add(" ".join(r["text"].lower().split()))
+    write_lessons(d)
+
+
+def read_lessons(split=True):
+    if split:
+        split_old_lessons()
+    rules, bad = [], []
+    for area in AREAS:
+        try:
+            with open(area_file(area)) as f:
+                rules += [dict(r, area=area) for r in json.load(f).get("rules", [])]
+        except FileNotFoundError:
+            pass
+        except (OSError, ValueError):
+            bad.append(area)
+    return {"rules": rules, "unreadable": bad}
+
+
+def write_lessons(d):
+    """One file per area. A file that did not read (the user's typo) is left alone, never emptied."""
+    os.makedirs(rules_dir(), exist_ok=True)
+    for area in AREAS:
+        if area in d.get("unreadable", []):
+            continue
+        mine = [r for r in d["rules"] if r["area"] == area]
+        p = area_file(area)
+        if not mine:
+            if os.path.exists(p):
+                os.remove(p)
+            continue
+        tmp = p + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump({"rules": mine}, f, indent=2, ensure_ascii=False)
+        os.replace(tmp, p)
+
+
+# The steps this chat has read the rules for. A tool that writes for a step refuses once when they are
+# unread, and the refusal carries them, so no agent writes a post or an edit without them (2026-10-09:
+# "make sure the agents actually look into those"). One MCP process is one chat.
+RULES_SEEN = set()
+
+
+def need_rules(*areas):
+    want = [x for x in areas if x not in RULES_SEEN]
+    if not want:
+        return
+    RULES_SEEN.update(want)
+    rules = [r for r in read_lessons()["rules"] if r.get("on", True) and r["area"] in want]
+    lines = ["- %s: %s" % (r["id"], r["text"]) for r in rules]
+    if "comments" in want:
+        text = read_text(lessons_path()).strip()
+        if text:
+            lines.append(text)
+    if not lines:
+        return
+    raise ValueError("Nothing written yet. First read the user's rules for %s; they come from his comments. "
+                     "Check your work against each one, then call again:\n%s" % (", ".join(want), "\n".join(lines)))
+
+
+def rule_view(r):
+    v = {"id": r["id"], "area": r["area"], "text": r["text"]}
+    if r.get("check"):
+        v["check"] = r["check"]
+    if r.get("repeats"):
+        v["repeated"] = len(r["repeats"])
+    if r.get("by") == "you":
+        v["by_user"] = True
+    return v
+
+
+def comment_ref(s, cid):
+    return "%s#%s" % (os.path.relpath(s, root()), cid)
+
+
+def clean_check(c):
+    if not c:
+        return None
+    if not isinstance(c, dict) or c.get("kind") not in CHECKS:
+        raise ValueError("check.kind is one of: %s." % ", ".join(sorted(CHECKS)))
+    out = {"kind": c["kind"]}
+    for k in ("target", "tolerance", "max", "floor"):
+        if c.get(k) is not None:
+            out[k] = float(c[k])
+    return out
+
+
+def new_rule(d, area, text, check=None, by="takes", ref=None):
+    """Adds a rule to d (not written). Refuses a full area: merge or remove one first."""
+    area = (area or "").strip().lower()
+    if area not in AREAS:
+        raise ValueError("area is one of: %s." % ", ".join(AREAS))
+    text = " ".join((text or "").split())
+    if not text:
+        raise ValueError("Give the rule's text: one short sentence.")
+    if len(text) > RULE_MAX:
+        raise ValueError("Rule is %d characters; keep it under %d. One rule, one sentence." % (len(text), RULE_MAX))
+    on = [r for r in d["rules"] if r["area"] == area and r.get("on", True)]
+    if len(on) >= AREA_MAX:
+        raise ValueError("The %s area has %d rules, the most it keeps. Merge two into one (set_rule id=... "
+                         "text=...) or remove one (set_rule id=... remove=true), then add this one. Or use "
+                         "lesson 'one-off'." % (area, len(on)))
+    n = 1 + max([int(r["id"].rsplit("-", 1)[1]) for r in d["rules"]
+                 if r["id"].startswith(area + "-") and r["id"].rsplit("-", 1)[1].isdigit()] or [0])
+    r = {"id": "%s-%d" % (area, n), "area": area, "text": text, "on": True, "by": by, "made": now_iso(),
+         "from": [ref] if ref else [], "repeats": []}
+    c = clean_check(check)
+    if c:
+        r["check"] = c
+    d["rules"].append(r)
+    return r
+
+
+def t_get_rules(a):
+    """The rules learned from the user's comments, the ones that are on."""
+    d = read_lessons()
+    areas = a.get("area")
+    if isinstance(areas, str):
+        areas = [x.strip() for x in areas.split(",") if x.strip()]
+    if not areas:
+        # Only the list of steps: every rule at once is ~4k tokens, and an agent needs one or two steps
+        # (2026-10-09). area=all still gives everything, for the Feedback board.
+        on = [r for r in d["rules"] if r.get("on", True)]
+        steps = [{"area": x, "rules": n} for x in AREAS for n in [sum(r["area"] == x for r in on)] if n]
+        lines = [l for l in read_text(lessons_path()).splitlines() if l.lstrip().startswith("-")]
+        steps.append({"area": "comments", "rules": len(lines)})
+        return {"steps": steps, "note": "Call get_rules again with the steps you work on, e.g. area='post-all,"
+                "post-x', 'script', 'edit' (sound, cut, picture, captions, graphics), 'thumbnail', "
+                "'comments'. area='all' gives every rule."}
+    if "all" in areas:
+        areas = []
+    # "post" is every post file; "edit" the five steps of an edit.
+    areas = [y for x in (areas or []) for y in ([z for z in AREAS if z.startswith("post-")] if x == "post"
+                                                else EDIT_AREAS if x == "edit" else [x])]
+    RULES_SEEN.update(areas or AREAS + ["comments"])
+    rules = [rule_view(r) for r in d["rules"] if r.get("on", True) and (not areas or r["area"] in areas)]
+    out = {"rules": rules}
+    if not areas or "comments" in areas:
+        out["comments"] = read_text(lessons_path())
+    out["note"] = ("Follow every rule here; they come from the user's comments. A rule the user wrote or changed "
+                   "(by_user) wins over anything else. 'comments' holds the comment copilot's lessons. Before you "
+                   "show an edit, run check_edit on it. When you resolve a comment, give it a lesson in "
+                   "reply_comment: an existing rule id, 'new' with rule={area, text}, or 'one-off' (area 'post' "
+                   "picks the platform from the commented file). Keep the set small: at most %d per area, so "
+                   "merge or sharpen a rule before you add one." % AREA_MAX)
+    return out
+
+
+def t_set_rule(a):
+    """Add, change, turn off or remove one rule."""
+    d = read_lessons()
+    if not a.get("id"):
+        r = new_rule(d, a.get("area"), a.get("text"), a.get("check"), ref=a.get("from"))
+        write_lessons(d)
+        return {"added": rule_view(r)}
+    r = next((x for x in d["rules"] if x["id"] == a["id"]), None)
+    if r is None:
+        raise ValueError("No rule %s. Use get_rules." % a["id"])
+    if r.get("by") == "you" and ("text" in a or "on" in a or a.get("remove")):
+        raise ValueError("The user wrote or changed rule %s. Ask him before you change it." % r["id"])
+    if a.get("remove"):
+        d["rules"].remove(r)
+        write_lessons(d)
+        return {"removed": r["id"]}
+    if "text" in a:
+        text = " ".join((a["text"] or "").split())
+        if not text or len(text) > RULE_MAX:
+            raise ValueError("Rule text: one sentence, 1 to %d characters." % RULE_MAX)
+        r["text"] = text
+    if "check" in a:
+        c = clean_check(a["check"])
+        if c:
+            r["check"] = c
+        else:
+            r.pop("check", None)
+    if "on" in a:
+        r["on"] = bool(a["on"])
+    r["changed"] = now_iso()
+    write_lessons(d)
+    return {"changed": rule_view(r)}
+
+
+def apply_lesson(d, s, c, r):
+    """Puts the reply's lesson on comment c, and the comment on its rule. Returns the rule id or 'one-off'."""
+    lesson = (r.get("lesson") or "").strip()
+    ref = comment_ref(s, c["id"])
+    if lesson == "one-off":
+        c["lesson"] = "one-off"
+        c.pop("repeat", None)
+        return lesson
+    if lesson == "new":
+        rule = dict(r.get("rule") or {})
+        if (rule.get("area") or "").strip().lower() == "post":
+            rule["area"] = post_area(c.get("file"))
+        made = new_rule(d, rule.get("area"), rule.get("text"), rule.get("check"), ref=ref)
+        c["lesson"] = made["id"]
+        c.pop("repeat", None)
+        return made["id"]
+    rule = next((x for x in d["rules"] if x["id"] == lesson), None)
+    if rule is None:
+        raise ValueError("Comment %s: lesson is a rule id from get_rules, 'new' with rule={area, text}, "
+                         "or 'one-off' (not '%s')." % (c["id"], lesson))
+    c["lesson"] = rule["id"]
+    # The rule was there before the user wrote the comment: the same mistake again.
+    made, at = parse_iso(rule.get("made", "")), parse_iso((c.get("at") or "")[:19] + "Z")
+    if made and at and made < at:
+        c["repeat"] = True
+        if ref not in rule["repeats"]:
+            rule["repeats"].append(ref)
+    elif ref not in rule["from"]:
+        rule["from"].append(ref)
+    return rule["id"]
+
+
+# ---------- checks ----------
+
+def measure(path, kind, c):
+    """One measured value for a check kind, and where it fails (a list of seconds) for pauses."""
+    ffmpeg = find_tool("ffmpeg")
+    if kind == "length":
+        return media_seconds(path), []
+    if kind in ("loudness", "peak"):
+        out = subprocess.run([ffmpeg, "-hide_banner", "-nostats", "-i", path, "-vn", "-af",
+                              "ebur128=peak=true", "-f", "null", "-"], capture_output=True, text=True).stderr
+        summary = out.rsplit("Summary:", 1)[-1]
+        key = r"I:\s*(-?[\d.]+|-inf)\s*LUFS" if kind == "loudness" else r"Peak:\s*(-?[\d.]+|-inf)\s*dBFS"
+        m = re.search(key, summary)
+        if not m:
+            raise ValueError("No audio to measure.")
+        return (float("-inf") if m.group(1) == "-inf" else float(m.group(1))), []
+    if kind == "pauses":
+        longest = c.get("max", 0.4)
+        out = subprocess.run([ffmpeg, "-hide_banner", "-nostats", "-i", path, "-vn", "-af",
+                              "silencedetect=noise=%sdB:d=%s" % (c.get("floor", -35), longest),
+                              "-f", "null", "-"], capture_output=True, text=True).stderr
+        starts = [float(x) for x in re.findall(r"silence_start:\s*(-?[\d.]+)", out)]
+        ends = [(float(e), float(dur)) for e, dur in
+                re.findall(r"silence_end:\s*(-?[\d.]+)\s*\|\s*silence_duration:\s*([\d.]+)", out)]
+        total = media_seconds(path)
+        # A silence at the very start or end is the cover frame or a fade, not a pause.
+        gaps = [(s, dur) for s, (e, dur) in zip(starts, ends) if s > 0.3 and e < total - 0.3]
+        return (max([dur for _, dur in gaps] or [0.0])), [round(s, 2) for s, _ in gaps]
+    raise ValueError("Unknown check %s." % kind)
+
+
+def media_seconds(path):
+    probe = find_tool("ffprobe")
+    out = subprocess.run([probe, "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", path],
+                         capture_output=True, text=True).stdout.strip()
+    try:
+        return float(out)
+    except ValueError:
+        raise ValueError("Cannot read %s." % path)
+
+
+def run_check(path, c):
+    kind = c["kind"]
+    value, at = measure(path, kind, c)
+    if kind == "loudness":
+        target, tol = c.get("target", -14.0), c.get("tolerance", 1.0)
+        ok = abs(value - target) <= tol
+        want = "%g ± %g LUFS" % (target, tol)
+    elif kind == "peak":
+        ok, want = value <= c.get("max", -1.0), "at most %g dBTP" % c.get("max", -1.0)
+    elif kind == "pauses":
+        ok, want = not at, "no pause over %g s" % c.get("max", 0.4)
+    else:
+        ok, want = value <= c.get("max", 0), "at most %g s" % c.get("max", 0)
+    res = {"pass": ok, "value": round(value, 2) if value not in (float("inf"), float("-inf")) else str(value), "want": want}
+    if at:
+        res["at"] = at[:12]
+    return res
+
+
+def t_check_edit(a):
+    """Runs every rule that has a check on one video, and saves the result for the Feedback board."""
+    s = resolve_session(a["session"])
+    f = a["file"]
+    path = f if os.path.isabs(f) else os.path.join(s, f)
+    if not os.path.isfile(path):
+        raise ValueError("No file %s." % f)
+    rules = [r for r in read_lessons()["rules"] if r.get("on", True) and r.get("check")]
+    results = []
+    for r in rules:
+        try:
+            res = run_check(path, r["check"])
+        except ValueError as e:
+            res = {"pass": None, "error": str(e)}
+        results.append(dict({"rule": r["id"], "text": r["text"]}, **res))
+    rel = os.path.relpath(path, s)
+    cp = os.path.join(s, "checks.json")
+    try:
+        with open(cp) as fh:
+            saved = json.load(fh)
+    except (OSError, ValueError):
+        saved = {}
+    saved[rel] = {"at": now_iso(), "results": [{"rule": x["rule"], "pass": x["pass"]} for x in results]}
+    tmp = cp + ".tmp"
+    with open(tmp, "w") as fh:
+        json.dump(saved, fh, indent=2)
+    os.replace(tmp, cp)
+    failed = [x for x in results if x["pass"] is False]
+    return {"file": rel, "results": results, "passed": not failed,
+            "note": ("Fix each failed check and run check_edit again before you show the edit."
+                     if failed else "All checks pass. Rules without a check: look at the stills.")
+            if rules else "No rule has a check yet. When a rule is repeated and a number can test it, "
+                          "add a check with set_rule (kinds: %s)." % ", ".join(sorted(CHECKS))}
 
 
 def read_hooks(s):
@@ -1031,6 +1450,7 @@ def first_paragraph(text):
 def t_set_hooks(a):
     """Hook options for the opening. The app shows them above the teleprompter to pick from."""
     s = resolve_session(a["session"])
+    need_rules("script")
     hooks = write_hooks(os.path.join(s, "hooks.json"), a["hooks"])
     return {"hooks": hooks, "note": "The user picks one in the app; it replaces the first paragraph of the script."}
 
@@ -1058,18 +1478,27 @@ def write_hooks(path, given):
 #       a shot: id (s1, s2...: stays the same across set_storyboard calls, takes and comments point at it),
 #               section (hook, main, end: the app shows each as its own row), kind (DESK, MG, B-ROLL, SCREEN, WALK, END...), say (the script lines it covers, word for word),
 #               do (how to film or build it), sketch (what the frame shows, for the drawing), seconds (optional),
-#               image (the sketch file, set when drawn), error (why it could not be drawn)
+#               image (the sketch file, set when drawn), error (why it could not be drawn),
+#               video (the clip or still that shows instead of the sketch: the one in the video),
+#               variants (2026-10-09: every clip or still tried for the shot, in a fixed order, A B C...;
+#               video is one of them. The user flips through them on the Storyboard tab and picks one)
 #   storyboard/<hash>.png        one sketch per shot, named by the hash of its sketch text: a changed sketch
 #                                is a new file, an unchanged one is never drawn twice.
 #
 # The app shows the shots as a horizontal timeline on the Storyboard tab. Sketches are drawn in the
-# background (Nano Banana 2.1; GPT Image 2.5 Flare when Gemini fails) and land in the json one by one,
-# so the tab fills in while you watch. storyboard/.models.json keeps the model that drew each sketch.
+# background (Nano Banana 2.1; GPT Image 2.5 Flare when Gemini fails; Nano Banana on Replicate when both
+# fail) and land in the json one by one, so the tab fills in while you watch. storyboard/.models.json keeps
+# the model that drew each sketch.
+#
+# No image key (2026-10-09: not every user has a Gemini key): set_storyboard saves the shots, draws nothing,
+# writes "nokey": true in the json and tells the chat, so it asks the user for a key or draws the sketches
+# with its own image tool and passes each as the shot's 'image'. The app shows a card with a link to
+# Settings › Gemini and a Draw button, which runs the sketch runner again.
 
 STORYBOARD_DIR = "storyboard"
 # Nano Banana 2.1 (out 2026-10-06) is the cheapest of the three image models ($0.034 a 1K image) and
 # draws the marker style well; GPT Image 2.5 Flare draws when Gemini fails.
-SKETCH_MODELS = ("nano-banana-2.1", "flare")
+SKETCH_MODELS = ("nano-banana-2.1", "flare", "replicate-nano-banana")
 SKETCH_QUALITY = "low"  # marker sketches are low fidelity on purpose
 SKETCH_STYLE = ("Low-fidelity film storyboard frame. Quick loose black marker sketch on plain white paper, like a "
                 "director's thumbnail. Very simple lines, no shading, no color except one blue marker for motion "
@@ -1184,6 +1613,8 @@ def storyboard_view(s):
              "say": (x.get("say") or "")[:80]}
         if x.get("video"):
             r["video"] = x["video"]
+        if x.get("variants"):
+            r["variants"] = x["variants"]
         if x.get("generating"):
             r["generating"] = x["generating"]
         if x.get("clip_error"):
@@ -1202,6 +1633,7 @@ def storyboard_view(s):
 def t_set_storyboard(a):
     """Write the storyboard and draw the missing sketches in the background."""
     s = resolve_session(a["session"])
+    need_rules("storyboard", "script")
     before = read_storyboard(s)
     old = before["shots"]
     fmt = (a.get("format") or before.get("format") or DEFAULT_FORMAT).strip()
@@ -1210,7 +1642,14 @@ def t_set_storyboard(a):
     for i, x in enumerate(a["shots"]):
         say, sketch = (x.get("say") or "").strip(), (x.get("sketch") or "").strip()
         video = shot_video(s, (x.get("video") or "").strip())
-        if not sketch and not video:
+        variants = None
+        if isinstance(x.get("variants"), list):
+            variants = list(dict.fromkeys(shot_video(s, str(v).strip()) for v in x["variants"] if str(v).strip()))
+            video = video or (variants[0] if variants else None)
+            if video and video not in variants:
+                variants.insert(0, video)
+        given_image = (x.get("image") or "").strip()
+        if not sketch and not video and not given_image:
             raise ValueError("Shot %d has no sketch: say what the frame shows." % (i + 1))
         shot = {"section": shot_section(x), "kind": (x.get("kind") or "SHOT").strip().upper(), "say": say,
                 "do": (x.get("do") or "").strip(), "sketch": sketch}
@@ -1219,13 +1658,23 @@ def t_set_storyboard(a):
         if video:
             # A real clip shows instead of a sketch (the app plays it on hover): nothing to draw.
             shot["video"] = video
+            if variants and len(variants) > 1:
+                shot["variants"] = variants
+        elif given_image:
+            shot["image"] = shot_image(s, given_image, sketch, fmt)
         else:
             name = sketch_name(sketch, fmt)
             if os.path.exists(os.path.join(s, STORYBOARD_DIR, name)) and not x.get("redraw"):
                 shot["image"] = name
         shots.append(shot)
-    for shot, i in zip(shots, shot_ids(old, a["shots"])):
+    olds = {o.get("id"): o for o in old}
+    for shot, i, given in zip(shots, shot_ids(old, a["shots"]), a["shots"]):
         shot["id"] = i
+        # Variants left out are kept while the shot still shows one of them: a rewrite of the lines
+        # must not drop the angles the user is choosing between.
+        o = olds.get(i) or {}
+        if "variants" not in given and shot.get("video") in (o.get("variants") or []):
+            shot["variants"] = o["variants"]
     # A Higgsfield clip still on its way keeps its place: the runner finds the shot by id.
     running = {o.get("id"): o["generating"] for o in old if o.get("generating")}
     for shot in shots:
@@ -1233,19 +1682,23 @@ def t_set_storyboard(a):
             shot["generating"] = running[shot["id"]]
     # The app shows hook, main, end in that order: keep the file in the same order.
     shots.sort(key=lambda x: SECTIONS.index(x["section"]))
-    write_storyboard(s, {"shots": shots, "format": fmt})
+    todo = sum(1 for x in shots if not x.get("image") and not x.get("video"))
+    nokey = bool(todo) and not image_sources()
+    write_storyboard(s, dict({"shots": shots, "format": fmt}, **({"nokey": True} if nokey else {})))
     for given in a["shots"]:
-        if given.get("redraw"):
+        if given.get("redraw") and not given.get("image"):
             p = os.path.join(s, STORYBOARD_DIR, sketch_name((given.get("sketch") or "").strip(), fmt))
             if os.path.exists(p):
                 os.remove(p)
     gone = {o.get("id") for o in old} - {x["id"] for x in shots} - {None}
-    todo = sum(1 for x in shots if not x.get("image") and not x.get("video"))
-    if todo:
+    if todo and not nokey:
         start_sketches(s)
-    out = {"shots": len(shots), "format": fmt, "drawing": todo, "ids": [x["id"] for x in shots],
+    out = {"shots": len(shots), "format": fmt, "drawing": 0 if nokey else todo, "ids": [x["id"] for x in shots],
            "note": ("Drawing %d sketches in the background (about 30 s). The Storyboard tab fills in as they land."
                     % todo) if todo else "All sketches already drawn."}
+    if nokey:
+        out["no_sketches"] = todo
+        out["note"] = NO_KEY_NOTE
     linked = sorted({t.get("shot") for t in read_meta(s).get("takes", [])} & gone)
     if linked:
         out["warning"] = "Shots %s are gone but takes point at them. Give their id to the shot that replaces them." % ", ".join(linked)
@@ -1266,14 +1719,62 @@ def shot_video(s, f):
     return os.path.relpath(added, s)
 
 
-def start_sketches(s):
-    subprocess.Popen([sys.executable, os.path.abspath(__file__), "--sketch-run", s],
+NO_KEY_NOTE = ("No sketches: Takes has no image key (Gemini, OpenAI or Replicate). Ask the user for a Gemini key "
+               "(Takes › Settings › Gemini; aistudio.google.com/apikey) or an OpenAI key, then call set_storyboard "
+               "again or let them click Draw on the Storyboard tab. Or, if you can make images yourself, draw each "
+               "sketch and pass it as the shot's 'image' (a PNG or JPG path).")
+
+
+def image_sources():
+    """The image services Takes can draw with right now, as names."""
+    if os.environ.get("TAKES_SKETCH_CMD"):
+        return ["test"]
+    found = []
+    if gemini_key():
+        found.append("Gemini")
+    if openai_key():
+        found.append("OpenAI")
+    if rep_key():
+        found.append("Replicate")
+    return found
+
+
+def shot_image(s, f, sketch, fmt):
+    """An image the chat made for a shot, copied into storyboard/ under the name a drawn sketch gets
+    (so set_storyboard keeps it). Returns that name."""
+    src = os.path.expanduser(f)
+    if not os.path.isabs(src):
+        src = os.path.join(s, src)
+    if not os.path.isfile(src):
+        raise ValueError("No image at %s." % f)
+    if os.path.splitext(src)[1].lower() not in (".png", ".jpg", ".jpeg", ".webp", ".heic"):
+        raise ValueError("The shot's image must be a PNG, JPG, WEBP or HEIC file: %s." % f)
+    if sketch:
+        name = sketch_name(sketch, fmt)
+    else:
+        name = hashlib.sha1(open(src, "rb").read()).hexdigest()[:12] + ".png"
+    out = os.path.join(s, STORYBOARD_DIR, name)
+    os.makedirs(os.path.dirname(out), exist_ok=True)
+    if os.path.splitext(src)[1].lower() == ".png":
+        shutil.copyfile(src, out + ".tmp")
+    else:
+        r = subprocess.run(["sips", "-s", "format", "png", src, "--out", out + ".tmp"], capture_output=True)
+        if r.returncode != 0:
+            shutil.copyfile(src, out + ".tmp")  # the app reads the file by its contents
+    os.replace(out + ".tmp", out)
+    note_model(s, os.path.join(STORYBOARD_DIR, name), "Made in the chat")
+    return name
+
+
+def start_sketches(s, retry=False):
+    subprocess.Popen([sys.executable, os.path.abspath(__file__), "--sketch-run", s] + (["--retry"] if retry else []),
                      stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                      start_new_session=True)
 
 
-def sketch_run(s):
-    """Draw every shot without an image. Runs detached; one runner per session at a time."""
+def sketch_run(s, retry=False):
+    """Draw every shot without an image. Runs detached; one runner per session at a time.
+    retry: shots that failed before are drawn again (the app's Draw button)."""
     import fcntl
     import threading
     from concurrent.futures import ThreadPoolExecutor
@@ -1284,6 +1785,17 @@ def sketch_run(s):
     except OSError:
         return  # another runner draws; it re-reads the storyboard before it stops
     mu = threading.Lock()
+    d = read_storyboard(s)
+    nokey = not image_sources()
+    if retry and not nokey:
+        for x in d["shots"]:
+            x.pop("error", None)
+    if nokey or d.pop("nokey", None) or retry:
+        if nokey:
+            d["nokey"] = True
+        write_storyboard(s, d)
+    if nokey:
+        return
 
     def land(sketch, image=None, error=None):
         with mu:
@@ -1379,9 +1891,12 @@ def draw_gemini(prompt, out, fmt, model, images=(), size="1K"):
 #
 # Every image Takes makes (sketches, make_image) goes straight to Google or OpenAI: much cheaper than a
 # Higgsfield image. Higgsfield is for video only. The user picked these three as the defaults:
-#   nano-banana-2.1  cheapest and fast: sketches
+#   nano-banana-2.1  cheapest and fast: sketches; at 4K the sharpest, for the final
 #   flare            fast, high quality: a new image
 #   sunburst         best quality and editing: a change to an image
+# Drafts first, final last (2026-10-09): GPT Image draws while the user finds the direction (fast, but
+# 1536 px at most and soft up close). When he likes one, make_image from=<draft> redraws it with Nano
+# Banana 2.1 at 4K (5504x3072), the draft and its references as the guide.
 # When one fails (no key, no credit), the next one draws. Each file's model goes in .models.json in its
 # folder (generated/, storyboard/), and the app shows it.
 
@@ -1389,24 +1904,60 @@ IMAGE_MODELS = {
     "nano-banana-2.1": ("gemini", "gemini-nano-banana-2.1", "Nano Banana 2.1"),
     "flare": ("openai", "gpt-image-2.5-flare", "GPT Image 2.5 Flare"),
     "sunburst": ("openai", "gpt-image-2.5-sunburst", "GPT Image 2.5 Sunburst"),
+    # For a user with only a Replicate token (the Replicate plugin): the last sketch fallback.
+    "replicate-nano-banana": ("replicate", "google/nano-banana", "Nano Banana · Replicate"),
 }
 IMAGE_MODEL = "gpt-image-2.5-flare"
+FINAL_MODELS = ("nano-banana-2.1", "sunburst")
+FINAL_SIZE = "4K"
+FINAL_ASK = ("Redraw the first image as the finished, full-quality picture: keep its composition, framing, "
+             "people, faces, clothes, light and look exactly, and make it sharp and detailed.")
 
 
-def draw_image(prompt, out, fmt=None, images=(), quality="medium", models=("flare",)):
-    """Draw with the first model that works; returns its name ("Nano Banana 2.1")."""
+def draw_image(prompt, out, fmt=None, images=(), quality="medium", models=("flare",), size=None):
+    """Draw with the first model that works; returns its name ("Nano Banana 2.1"). size: Gemini's (4K)."""
     problems = []
     for m in models:
         api, model_id, label = IMAGE_MODELS[m]
         try:
             if api == "openai":
                 openai_image(prompt, out, fmt, images=images, quality=quality, model=model_id)
+            elif api == "replicate":
+                replicate_image(prompt, out, fmt, model_id)
             else:
-                draw_gemini(prompt, out, fmt, model_id, images=images, size="2K" if quality == "high" else "1K")
+                draw_gemini(prompt, out, fmt, model_id, images=images, size=size or ("2K" if quality == "high" else "1K"))
             return label
         except ValueError as e:
             problems.append("%s: %s" % (label, e))
     raise ValueError(" ".join(problems))
+
+
+def replicate_image(prompt, out, fmt, model):
+    """Draw one image with a Replicate model (Nano Banana: prompt, aspect_ratio, output_format)."""
+    import time
+    if os.environ.get("TAKES_IMAGE_CMD"):  # tests: the same stand-in as GPT Image, never the real API
+        r = subprocess.run(json.loads(os.environ["TAKES_IMAGE_CMD"]) + [out, prompt], capture_output=True, text=True)
+        if r.returncode != 0:
+            raise ValueError(r.stderr.strip() or "The image failed.")
+        return
+    if not rep_key():
+        raise ValueError("No Replicate API token.")
+    inp = {"prompt": prompt, "output_format": "png"}
+    if fmt:
+        inp["aspect_ratio"] = draw_format(fmt)
+    p = rep_http("POST", "/models/%s/predictions" % model, {"input": inp})
+    deadline = time.time() + 5 * 60
+    while p.get("status") not in ("succeeded", "failed", "canceled"):
+        if time.time() > deadline:
+            raise ValueError("Replicate did not finish in 5 min.")
+        time.sleep(2)
+        p = rep_http("GET", (p.get("urls") or {}).get("get") or "/predictions/" + p["id"])
+    if p["status"] != "succeeded":
+        raise ValueError("Replicate: %s" % (p.get("error") or p["status"]))
+    url = rep_output_url(p.get("output"))
+    if not url:
+        raise ValueError("Replicate gave no image.")
+    rep_download(url, out)
 
 
 def note_model(s, rel, label):
@@ -1421,6 +1972,50 @@ def note_model(s, rel, label):
     with open(p + ".tmp", "w") as f:
         json.dump(d, f, indent=2)
     os.replace(p + ".tmp", p)
+
+
+def note_prompt(s, rel, prompt, images, fmt):
+    """Keep how make_image drew a file (<folder>/.prompts.json), so its final can redraw it the same way."""
+    p = os.path.join(s, os.path.dirname(rel), ".prompts.json")
+    try:
+        d = json.load(open(p))
+    except (OSError, ValueError):
+        d = {}
+    d[os.path.basename(rel)] = {"prompt": prompt, "images": images, "format": fmt}
+    with open(p + ".tmp", "w") as f:
+        json.dump(d, f, indent=2)
+    os.replace(p + ".tmp", p)
+
+
+def drawn_with(s, rel):
+    try:
+        return json.load(open(os.path.join(s, os.path.dirname(rel), ".prompts.json"))).get(os.path.basename(rel)) or {}
+    except (OSError, ValueError):
+        return {}
+
+
+def image_format(f):
+    """An image's shape (16:9), read from its PNG or JPEG header; None when it cannot tell."""
+    try:
+        import struct
+        b = open(f, "rb").read(64 * 1024)
+        if b[:8] == b"\x89PNG\r\n\x1a\n":
+            w, h = struct.unpack(">II", b[16:24])
+            return parse_format("%d:%d" % (w, h))
+        i = 2
+        while i < len(b) - 9 and b[:2] == b"\xff\xd8":
+            if b[i] != 0xFF:
+                break
+            m, n = b[i + 1], struct.unpack(">H", b[i + 2:i + 4])[0]
+            if m in (0xC0, 0xC1, 0xC2):
+                h, w = struct.unpack(">HH", b[i + 5:i + 9])
+                return parse_format("%d:%d" % (w, h))
+            i += 2 + n
+    except (OSError, ValueError, struct.error):
+        pass
+    return None
+
+
 IMAGE_SIZES = ("1024x1024", "1536x1024", "1024x1536")  # the sizes every GPT Image takes
 
 
@@ -1520,43 +2115,74 @@ def openai_problem(body):
 
 
 def t_make_image(a):
-    """Make or change an image (Flare new, Sunburst for a change); it lands in generated/<name>-vN.png."""
+    """Make or change an image (Flare new, Sunburst for a change), or the final of a draft (from=, Nano
+    Banana 2.1 at 4K); it lands in generated/<name>-vN.png."""
     s = resolve_session(a["session"])
     prompt = (a.get("prompt") or "").strip()
-    if not prompt:
+    src = (a.get("from") or "").strip()
+    final = bool(a.get("final")) or bool(src)
+    if not prompt and not src:
         raise ValueError("Give a prompt: what the image shows, or what to change.")
     refs = a.get("images") or ([a["image"]] if a.get("image") else [])
     if isinstance(refs, str):
         refs = [refs]
+    fmt = (a.get("format") or "").strip() or None
+    name = a.get("name")
+    if src:
+        # The final of a draft: the draft first, then what it was drawn from, same prompt and shape.
+        f = session_file(s, src)
+        if media_kind(f) != "image":
+            raise ValueError("from= is an image of this session (the draft to finish).")
+        src = os.path.relpath(f, s)
+        was = drawn_with(s, src)
+        refs = [src] + [r for r in (was.get("images") or []) + refs if r != src]
+        prompt = " ".join(x for x in (FINAL_ASK, was.get("prompt") or "", prompt) if x)
+        fmt = fmt or was.get("format") or image_format(f)
+        name = name or re.sub(r"-v\d+$", "", os.path.splitext(os.path.basename(src))[0])
     board = read_storyboard(s)
-    paths = []
+    paths, kept = [], []
     for ref in refs[:16]:
         if ref == "sketch":
             shot = next((x for x in board["shots"] if x.get("id") == a.get("shot")), None)
             if not shot or not shot.get("image"):
                 raise ValueError("'sketch' needs shot=<id> whose sketch is drawn.")
             paths.append(os.path.join(s, STORYBOARD_DIR, shot["image"]))
+            kept.append(os.path.relpath(paths[-1], s))
             continue
         f = session_file(s, ref)
         if media_kind(f) != "image":
             raise ValueError("%s is not an image." % ref)
         paths.append(f)
-    fmt = (a.get("format") or "").strip() or (None if paths else "1:1")
-    quality = (a.get("quality") or "medium").strip().lower()
+        kept.append(os.path.relpath(f, s))
+    fmt = fmt or (None if paths else "1:1")
+    quality = (a.get("quality") or ("high" if final else "medium")).strip().lower()
     if quality not in ("low", "medium", "high"):
         raise ValueError("quality is low, medium or high.")
-    name = slug(a.get("name") or " ".join(prompt.split()[:5])) or "image"
+    name = slug(name or " ".join(prompt.split()[:5])) or "image"
     d = os.path.join(s, GENERATED_DIR)
     os.makedirs(d, exist_ok=True)
     have = versions_in(d, name)
     rel = os.path.join(GENERATED_DIR, "%s-v%d.png" % (name, (have[-1] if have else 0) + 1))
-    first = (a.get("model") or ("sunburst" if paths else "flare")).strip().lower()
-    if first not in IMAGE_MODELS:
-        raise ValueError("model is nano-banana-2.1, flare or sunburst.")
-    order = [first] + [m for m in ("flare", "nano-banana-2.1") if m != first]
-    label = draw_image(prompt, os.path.join(s, rel), fmt, images=paths, quality=quality, models=order)
+    if final:
+        order, size = list(FINAL_MODELS), FINAL_SIZE
+    else:
+        first = (a.get("model") or ("sunburst" if paths else "flare")).strip().lower()
+        if first not in IMAGE_MODELS:
+            raise ValueError("model is nano-banana-2.1, flare or sunburst.")
+        order, size = [first] + [m for m in ("flare", "nano-banana-2.1") if m != first], None
+    label = draw_image(prompt, os.path.join(s, rel), fmt, images=paths, quality=quality, models=order, size=size)
     note_model(s, rel, label)
-    return {"file": rel, "model": label, "note": "Shows on the Assets tab with the model's name. Look at it before you reply."}
+    if not src:
+        note_prompt(s, rel, prompt, kept, fmt)
+    else:
+        note_prompt(s, rel, drawn_with(s, src).get("prompt") or prompt, kept[1:], fmt)
+    out = {"file": rel, "model": label, "note": "Shows on the Assets tab with the model's name. Look at it before you reply."}
+    if final:
+        out["final"] = True
+    elif label.startswith("GPT Image"):
+        out["note"] += (" This is a draft (GPT Image, 1536 px). When the user likes the direction, make the final "
+                        "with from=%s: Nano Banana 2.1 at 4K." % rel)
+    return out
 
 
 # ---------- ElevenLabs: voice-over, fixed words, other voices (2026-10-06) ----------
@@ -2174,6 +2800,17 @@ def hf_save_job(s, job):
     return p
 
 
+def put_clip(x, f):
+    """A new clip on a shot: it shows, and the one it replaces stays as a variant (2026-10-09)."""
+    v = list(x.get("variants") or [])
+    for c in (x.get("video"), f):
+        if c and c not in v:
+            v.append(c)
+    if len(v) > 1:
+        x["variants"] = v
+    x["video"] = f
+
+
 def edit_shot(s, shot_id, fn):
     """Change one shot under a lock, so a runner and the sketch writer do not drop each other's change."""
     import fcntl
@@ -2189,9 +2826,36 @@ def edit_shot(s, shot_id, fn):
     return False
 
 
+def hf_config_path():
+    return os.path.join(root(), LIB, "higgsfield.json")
+
+
+def hf_default_model():
+    """The video model ✦ and the chat use, picked on Plugins › Higgsfield (seedance_2_5 until then)."""
+    try:
+        m = json.load(open(hf_config_path())).get("model")
+        if isinstance(m, str) and re.fullmatch(r"[\w.\-]+", m):
+            return m
+    except (OSError, ValueError, AttributeError):
+        pass
+    return HF_VIDEO_MODEL
+
+
+def hf_set_default(model):
+    model = str(model or "").strip()
+    if not re.fullmatch(r"[\w.\-]+", model):
+        raise ValueError("A Higgsfield model is its job type, e.g. seedance_2_5: %r is not." % model)
+    p = hf_config_path()
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    with open(p + ".tmp", "w") as f:
+        json.dump({"model": model}, f)
+    os.replace(p + ".tmp", p)
+    return model
+
+
 def t_higgsfield_status(a):
     """Installed, signed in, credits; and a session's jobs."""
-    out = {"installed": higgsfield_cli() is not None}
+    out = {"installed": higgsfield_cli() is not None, "default_model": hf_default_model()}
     if not out["installed"]:
         out["note"] = "Higgsfield is not installed. " + HF_SETUP
     else:
@@ -2252,7 +2916,7 @@ def t_higgsfield(a):
     if workflow:
         args = ["generate", "workflow", workflow]
     else:
-        args = ["generate", "create", (a.get("model") or HF_VIDEO_MODEL).strip()]
+        args = ["generate", "create", (a.get("model") or hf_default_model()).strip()]
     if prompt:
         args += ["--prompt", prompt]
     for flag, path in (("--image", image), ("--start-image", start), ("--end-image", end), ("--video", video)):
@@ -2368,7 +3032,718 @@ def higgsfield_run(s, job_path):
             def done(x):
                 x.pop("generating", None)
                 x.pop("clip_error", None)
-                x["video"] = job["file"]
+                put_clip(x, job["file"])
+            edit_shot(s, job["shot"], done)
+    except Exception as e:
+        job.update(status="error", error=str(e)[:300], ended=now_iso())
+        if job.get("shot"):
+            def failed(x):
+                x.pop("generating", None)
+                x["clip_error"] = job["error"]
+            edit_shot(s, job["shot"], failed)
+    hf_save_job(s, job)
+
+
+# ---------- Replicate: AI video, pay per clip (2026-10-09) ----------
+#
+# The same models as Higgsfield (Seedance 2.5 and the rest) at Replicate's price per second, with no
+# plan. The API key sits in the login Keychain ("Takes Replicate"), saved from Takes › Plugins ›
+# Replicate. The user keeps a short list of default models there (_library/replicate.json, first one
+# is the default); everything else (length, shape, sound, reference images) the chat sets per job
+# from the model's own inputs (replicate_model). A job runs detached like a Higgsfield one, in the
+# same generated/.jobs folder.
+
+REP_API = "https://api.replicate.com/v1"
+REP_KEYCHAIN = "Takes Replicate"
+REP_SETUP = "Open Takes › Plugins › Replicate and paste your Replicate API token."
+REP_DEFAULT_MODELS = ["bytedance/seedance-2.5"]
+REP_AGENT = "Takes (+https://gettakes.app)"
+# Takes' own words for a job, and the input names models use for them, most usual first.
+REP_INPUTS = {
+    "image": ("image", "start_image", "first_frame_image", "first_frame", "input_image", "image_url"),
+    "end_image": ("end_image", "last_frame_image", "last_frame", "end_frame", "tail_image"),
+    "video": ("video", "input_video", "video_url"),
+    "duration": ("duration", "seconds", "length"),
+    "aspect_ratio": ("aspect_ratio", "ratio"),
+    "resolution": ("resolution",),
+    "audio": ("generate_audio", "with_audio", "audio"),
+}
+
+
+def rep_key():
+    """REPLICATE_API_TOKEN, else the Keychain, else ~/.claude/.env."""
+    if os.environ.get("REPLICATE_API_TOKEN"):
+        return os.environ["REPLICATE_API_TOKEN"]
+    if not os.environ.get("TAKES_NO_KEYCHAIN"):
+        try:
+            r = subprocess.run(["security", "find-generic-password", "-s", REP_KEYCHAIN, "-a", "api-key", "-w"],
+                               capture_output=True, text=True, timeout=10)
+            if r.returncode == 0 and r.stdout.strip():
+                return r.stdout.strip()
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    try:
+        for line in open(os.path.expanduser("~/.claude/.env")):
+            k, _, v = line.strip().partition("=")
+            if k.strip().removeprefix("export ").strip() == "REPLICATE_API_TOKEN":
+                return v.strip().strip('"').strip("'") or None
+    except OSError:
+        pass
+    return None
+
+
+def rep_save_key(key):
+    """Into the login Keychain through security's stdin, never its arguments. Empty removes it."""
+    key = key.strip()
+    if not key:
+        cmd = 'delete-generic-password -s "%s" -a api-key\n' % REP_KEYCHAIN
+    else:
+        if not re.fullmatch(r"[A-Za-z0-9_\-]{20,200}", key):
+            raise ValueError("That does not look like a Replicate API token (it starts with r8_).")
+        cmd = 'add-generic-password -U -s "%s" -a api-key -w "%s"\n' % (REP_KEYCHAIN, key)
+    r = subprocess.run(["security", "-i"], input=cmd, capture_output=True, text=True, timeout=20)
+    if key and r.returncode != 0:
+        raise ValueError("The Keychain did not take the token.")
+
+
+def rep_problem(code, body):
+    try:
+        d = json.loads(body)
+        why = d.get("detail") or d.get("title") or body
+    except ValueError:
+        why = body
+    why = (why if isinstance(why, str) else json.dumps(why))[:300]
+    if code == 401:
+        return "Replicate said the token is wrong. " + REP_SETUP
+    if code == 402:
+        return "Replicate says the account has no credit left: add some at replicate.com/account/billing."
+    if code == 404:
+        return "Replicate has no such model (%s). Names look like owner/name, e.g. bytedance/seedance-2.5." % why
+    return "Replicate: %s" % why
+
+
+def rep_http(method, path, body=None, upload=None):
+    """One Replicate call: a JSON body, or upload=<file path> for the files API. Returns the JSON."""
+    import urllib.request
+    import uuid
+    key = rep_key()
+    if not key:
+        raise ValueError("No Replicate API token. " + REP_SETUP)
+    # Cloudflare in front of Replicate turns away Python's own User-Agent ("error code: 1010", 2026-10-09).
+    headers = {"Authorization": "Bearer " + key, "User-Agent": REP_AGENT}
+    data = None
+    if upload:
+        b = uuid.uuid4().hex
+        data = (b'--%s\r\nContent-Disposition: form-data; name="content"; filename="%s"\r\n'
+                b'Content-Type: application/octet-stream\r\n\r\n' % (b.encode(), os.path.basename(upload).encode())
+                + open(upload, "rb").read() + b"\r\n--%s--\r\n" % b.encode())
+        headers["Content-Type"] = "multipart/form-data; boundary=" + b
+    elif body is not None:
+        data = json.dumps(body).encode()
+        headers["Content-Type"] = "application/json"
+    url = path if path.startswith("https://") else REP_API + path
+    req = urllib.request.Request(url, data=data, method=method, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=600) as r:
+            return json.loads(r.read() or b"{}")
+    except urllib.error.HTTPError as e:
+        raise ValueError(rep_problem(e.code, e.read().decode(errors="replace")))
+    except urllib.error.URLError as e:
+        raise ValueError("Replicate did not answer: %s" % e.reason)
+
+
+def rep_config_path():
+    return os.path.join(root(), LIB, "replicate.json")
+
+
+def rep_models():
+    """The user's default video models, the first one is the default."""
+    try:
+        m = json.load(open(rep_config_path())).get("models")
+        if isinstance(m, list) and m:
+            return [str(x) for x in m]
+    except (OSError, ValueError, AttributeError):
+        pass
+    return list(REP_DEFAULT_MODELS)
+
+
+def rep_set_models(models):
+    clean = []
+    for m in models:
+        m = str(m).strip().removeprefix("https://replicate.com/").strip("/")
+        if not re.fullmatch(r"[\w.\-]+/[\w.\-]+(:[0-9a-f]{64})?", m):
+            raise ValueError("A model is owner/name, e.g. bytedance/seedance-2.5: %r is not." % m)
+        if m not in clean:
+            clean.append(m)
+    p = rep_config_path()
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    with open(p + ".tmp", "w") as f:
+        json.dump({"models": clean}, f, indent=2)
+    os.replace(p + ".tmp", p)
+    return clean
+
+
+def rep_model_info(model):
+    """The model's page facts and its inputs (name -> schema), from its latest version."""
+    name, _, version = model.partition(":")
+    m = rep_http("GET", "/models/" + name)
+    if version:
+        v = rep_http("GET", "/models/%s/versions/%s" % (name, version))
+    else:
+        v = m.get("latest_version") or {}
+    schemas = ((v.get("openapi_schema") or {}).get("components") or {}).get("schemas") or {}
+    props = (schemas.get("Input") or {}).get("properties") or {}
+    for p in props.values():  # enums sit in other schemas: {"allOf": [{"$ref": "#/components/schemas/x"}]}
+        for ref in p.get("allOf") or []:
+            target = schemas.get(str(ref.get("$ref", "")).rsplit("/", 1)[-1]) or {}
+            for k in ("enum", "type"):
+                if k in target:
+                    p.setdefault(k, target[k])
+    return {"model": model, "title": m.get("name") or name.split("/")[-1], "description": m.get("description"),
+            "runs": m.get("run_count"), "official": bool(m.get("is_official")) or None,
+            "version": version or v.get("id"), "inputs": props,
+            "required": (schemas.get("Input") or {}).get("required") or []}
+
+
+def rep_label(model):
+    """'bytedance/seedance-2.5' -> 'Seedance 2.5'."""
+    name = model.split("/")[-1].split(":")[0]
+    # i2v, t2v, r2v read as I2V.
+    return " ".join(w.upper() if re.fullmatch(r"[a-z]2[a-z]", w) else w if w[:1].isdigit() else w.capitalize()
+                    for w in re.split(r"[-_]", name) if w)
+
+
+def rep_is_file(schema):
+    """A file input: a uri string, or a list of them."""
+    if schema.get("format") == "uri":
+        return True
+    items = schema.get("items") or {}
+    return schema.get("type") == "array" and items.get("format") == "uri"
+
+
+def rep_input(s, info, a, shot):
+    """The prediction's input: Takes' words mapped to the model's names, then params as they are.
+    File inputs keep session refs ('sketch', a take number, a path); the runner uploads them."""
+    props = info["inputs"]
+    out, dropped = {}, []
+
+    def put(word, value):
+        if value is None or value == "":
+            return
+        name = next((n for n in REP_INPUTS[word] if n in props), None)
+        if word == "audio" and name and props[name].get("type") != "boolean":
+            name = None  # an 'audio' input that is a sound file, not a switch
+        if not name:
+            dropped.append(word)
+            return
+        out[name] = value
+
+    if a.get("prompt") and "prompt" in props:
+        out["prompt"] = a["prompt"].strip()
+    put("image", a.get("image") or a.get("start_image"))
+    put("end_image", a.get("end_image"))
+    put("video", a.get("video"))
+    if (a.get("aspect_ratio") or "").strip():
+        put("aspect_ratio", a["aspect_ratio"].strip())
+    elif shot and any(n in props for n in REP_INPUTS["aspect_ratio"]):  # the storyboard's shape
+        ratio = read_storyboard(s).get("format") or DEFAULT_FORMAT
+        enum = props.get(next(n for n in REP_INPUTS["aspect_ratio"] if n in props), {}).get("enum")
+        # Seedance has no 4:5 (the default board): its "adaptive" follows the frame instead.
+        if enum and ratio not in enum:
+            ratio = "adaptive" if "adaptive" in enum else None
+        put("aspect_ratio", ratio)
+    duration = a.get("duration")
+    if not duration and shot:
+        duration = max(4, min(15, round(shot_seconds(shot))))
+    put("duration", duration)
+    put("resolution", a.get("resolution"))
+    if a.get("audio") is not None:
+        put("audio", bool(a["audio"]))
+    for k, v in (a.get("params") or {}).items():
+        if k not in props:
+            raise ValueError("%s takes no input %r. Its inputs: %s." % (info["model"], k, ", ".join(sorted(props))))
+        out[k] = v
+    for k, v in list(out.items()):  # the types the model asks for
+        t = props.get(k, {}).get("type")
+        try:
+            if t == "integer" and not isinstance(v, bool):
+                out[k] = int(round(float(v)))
+            elif t == "number" and not isinstance(v, bool):
+                out[k] = float(v)
+            elif t == "string" and isinstance(v, (int, float)) and not isinstance(v, bool):
+                out[k] = str(int(v)) if float(v).is_integer() else str(v)
+        except (TypeError, ValueError):
+            raise ValueError("%s wants a %s for %s, not %r." % (info["model"], t, k, v))
+        enum = props.get(k, {}).get("enum")
+        if enum and out[k] not in enum:
+            raise ValueError("%s for %s is one of %s." % (info["model"], k, ", ".join(map(str, enum))))
+    missing = [r for r in info["required"] if r not in out]
+    if missing:
+        raise ValueError("%s needs %s." % (info["model"], ", ".join(missing)))
+    return out, dropped
+
+
+def t_replicate_model(a):
+    """A model's inputs, so a job can set what the user asks for."""
+    info = rep_model_info((a.get("model") or rep_models()[0]).strip())
+    keep = ("type", "description", "default", "enum", "minimum", "maximum", "format")
+    return {k: info[k] for k in ("model", "title", "description", "runs", "required")} | {
+        "inputs": {n: {k: p[k] for k in keep if k in p} for n, p in info["inputs"].items()},
+        "defaults": rep_models()}
+
+
+def t_replicate_status(a):
+    out = {"token": rep_key() is not None, "models": rep_models(), "default": rep_models()[0]}
+    if not out["token"]:
+        out["note"] = "No Replicate API token. " + REP_SETUP
+    else:
+        try:
+            acc = rep_http("GET", "/account")
+            out["account"] = acc.get("username") or acc.get("name")
+        except ValueError as e:
+            out["problem"] = str(e)
+    if a.get("session"):
+        s = resolve_session(a["session"])
+        out["jobs"] = [{k: j.get(k) for k in ("id", "file", "status", "model", "shot", "error", "started", "ended")}
+                       for j in hf_jobs(s) if j.get("provider") == "replicate"][-10:]
+    return out
+
+
+# The browser on Plugins › Replicate (2026-10-09): a short hand-picked list, then the most run video
+# models from Replicate's two video collections. Only official models: they run by name and keep a
+# steady price. Each one brings a preview (its cover, and its example output when that is a video).
+REP_FEATURED = ["bytedance/seedance-2.5", "kwaivgi/kling-v3-omni-video", "wan-video/wan-2.7-i2v",
+                "minimax/hailuo-2.3", "runwayml/gen-4.5", "luma/ray-3.2"]
+REP_COLLECTIONS = ("image-to-video", "text-to-video")
+REP_CATALOG_HOURS = 24
+
+
+def rep_card(m):
+    """One model for the browser: name, runs, words and preview files."""
+    ex = (m.get("default_example") or {}).get("output")
+    files = [m.get("cover_image_url")] + (ex if isinstance(ex, list) else [ex])
+    files = [f for f in files if isinstance(f, str) and f.startswith("https://")]
+    is_video = lambda f: urllib.parse.urlparse(f).path.lower().endswith((".mp4", ".mov", ".webm"))
+    name = "%s/%s" % (m["owner"], m["name"])
+    return {"model": name, "label": rep_label(name), "description": (m.get("description") or "").strip(),
+            "runs": m.get("run_count") or 0, "url": m.get("url") or "https://replicate.com/" + name,
+            "image": next((f for f in files if not is_video(f)), None),
+            "video": next((f for f in files if is_video(f)), None)}
+
+
+def t_replicate_catalog(a):
+    """Featured and most popular video models on Replicate, kept a day in _library."""
+    p = os.path.join(root(), LIB, "replicate-catalog.json")
+    try:
+        if not a.get("fresh") and time.time() - os.path.getmtime(p) < REP_CATALOG_HOURS * 3600:
+            return json.load(open(p))
+    except (OSError, ValueError):
+        pass
+    found = {}
+    for slug in REP_COLLECTIONS:
+        for m in rep_http("GET", "/collections/" + slug).get("models", []):
+            if m.get("is_official"):
+                found.setdefault("%s/%s" % (m["owner"], m["name"]), m)
+
+    def one(name):
+        try:
+            return found.get(name) or rep_http("GET", "/models/" + name)
+        except ValueError:
+            return None  # gone from Replicate: the list goes on without it
+    with concurrent.futures.ThreadPoolExecutor(6) as pool:
+        featured = [rep_card(m) for m in pool.map(one, REP_FEATURED) if m]
+    picked = {c["model"] for c in featured}
+    popular = sorted((m for n, m in found.items() if n not in picked), key=lambda m: -(m.get("run_count") or 0))
+    out = {"featured": featured, "popular": [rep_card(m) for m in popular[:12]], "updated": time.time()}
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    with open(p + ".tmp", "w") as f:
+        json.dump(out, f)
+    os.replace(p + ".tmp", p)
+    return out
+
+
+# ---------- model details (2026-10-09): the card's sheet on Plugins › Replicate and › Higgsfield.
+# One shape for both: price rows, speed, what the model takes, its settings, the user's own clips.
+
+def secs_text(x):
+    x = int(round(x))
+    return "%d s" % x if x < 60 else "%d min %d s" % (x // 60, x % 60) if x % 60 else "%d min" % (x // 60)
+
+
+def jobs_everywhere():
+    """Every AI job in every session, newest last: for "your clips took about…"."""
+    out = []
+    for d in glob.glob(os.path.join(root(), "*", "*", GENERATED_DIR, ".jobs")):
+        out += hf_jobs(os.path.dirname(os.path.dirname(d)))
+    return sorted(out, key=lambda j: j.get("started") or "")
+
+
+def yours(match):
+    """'You made 3 clips with it: about 2 min 10 s each.' from the done jobs that match."""
+    took = []
+    for j in jobs_everywhere():
+        if j.get("status") == "done" and match(j) and j.get("started") and j.get("ended"):
+            try:
+                t0, t1 = (datetime.strptime(j[k], "%Y-%m-%dT%H:%M:%SZ") for k in ("started", "ended"))
+                took.append((t1 - t0).total_seconds())
+            except ValueError:
+                pass
+    if not took:
+        return None
+    took.sort()
+    n = len(took)
+    return "You made %d clip%s with it: about %s each." % (n, "" if n == 1 else "s", secs_text(took[n // 2]))
+
+
+def options_text(name, p):
+    """A setting's choices in a few words: '480p, 720p', '4 to 15 s', 'on by default'."""
+    if p.get("enum"):
+        return ", ".join(str(x) for x in p["enum"] if x not in (None, ""))
+    lo, hi = p.get("minimum"), p.get("maximum")
+    unit = " s" if name == "duration" else ""
+    if lo is not None and hi is not None:
+        return "up to %s%s" % (hi, unit) if lo < 1 else "%s to %s%s" % (lo, hi, unit)  # -1 means "the model picks"
+    if p.get("type") == "boolean":
+        return "on by default" if p.get("default") else "off by default"
+    if p.get("default") is not None:
+        return "%s%s by default" % (p["default"], unit)
+    return None
+
+
+# Takes' words for a model's settings and media inputs, both providers.
+DETAIL_SETTINGS = (("duration", "Length"), ("resolution", "Quality"), ("aspect_ratio", "Shape"))
+DETAIL_TAKES = (("image", "Start frame"), ("end_image", "End frame"), ("video", "Video in"),
+                ("image_references", "Reference images"), ("reference_images", "Reference images"),
+                ("video_references", "Reference videos"), ("reference_videos", "Reference videos"),
+                ("audio_references", "Reference sounds"), ("reference_audios", "Reference sounds"),
+                ("audio", "Sound"))
+
+
+def detail_from_inputs(inputs, name_of):
+    """Settings and the media a model takes, from {input name: schema}. name_of maps Takes' word to
+    the model's own input name (None when it has none)."""
+    settings = []
+    for word, title in DETAIL_SETTINGS:
+        n = name_of(word)
+        v = n and options_text(word, inputs[n])
+        if v:
+            settings.append({"name": title, "value": v})
+    takes = []
+    for word, title in DETAIL_TAKES:
+        n = name_of(word)
+        if n and title not in takes:
+            takes.append(title)
+    return settings, takes
+
+
+def rep_page_prices(model):
+    """The price rows from the model's replicate.com page (the API has no prices): [{when, price}]."""
+    import urllib.request
+    req = urllib.request.Request("https://replicate.com/" + model.split(":")[0], headers={"User-Agent": REP_AGENT})
+    with urllib.request.urlopen(req, timeout=30) as r:
+        html = r.read().decode(errors="replace")
+    key = '"billingConfig":'
+    i = html.find(key)
+    if i < 0:
+        return []
+    cfg, _ = json.JSONDecoder().raw_decode(html[i + len(key):].lstrip())
+    rows = []
+    for tier in (cfg or {}).get("current_tiers") or []:
+        when = []
+        for c in tier.get("criteria") or []:
+            v, title = c.get("value"), (c.get("title") or "").strip()
+            if isinstance(v, bool):
+                when.append(title if v else title.replace("with ", "without ", 1) if title.startswith("with ") else "no " + title)
+            else:
+                when.append(str(v).replace("non_video_in", "no video in").replace("video_in", "video in").replace("_", " "))
+        for pr in tier.get("prices") or []:
+            title = pr.get("title") or ""
+            unit = "a second" if "per second" in title else "a video" if "per output video" in title else title
+            rows.append({"when": ", ".join(when) or "every run", "price": "%s %s" % (pr.get("price"), unit),
+                         "per_second": "per second" in title, "dollars": float(re.sub(r"[^\d.]", "", pr.get("price") or "") or 0)})
+    return rows
+
+
+def t_replicate_details(a):
+    """Price, speed, settings and inputs of one Replicate model, kept a day."""
+    model = (a.get("model") or rep_models()[0]).strip()
+    p = os.path.join(root(), LIB, "replicate-details.json")
+    # v2: "up to 30 s" for a minimum of -1; an older copy is read again.
+    try:
+        cache = json.load(open(p))
+    except (OSError, ValueError):
+        cache = {}
+    hit = cache.get(model)
+    if hit and hit.get("v") == 2 and time.time() - hit.get("updated", 0) < REP_CATALOG_HOURS * 3600 and not a.get("fresh"):
+        hit["yours"] = yours(lambda j: j.get("provider") == "replicate" and j.get("model") == model)
+        return hit
+    info = rep_model_info(model)
+    m = rep_http("GET", "/models/" + model.split(":")[0])
+    inputs = info["inputs"]
+
+    def name_of(word):
+        if word in REP_INPUTS:
+            return next((n for n in REP_INPUTS[word] if n in inputs), None)
+        return word if word in inputs else None
+    settings, takes = detail_from_inputs(inputs, name_of)
+    try:
+        prices = rep_page_prices(model)
+    except Exception:  # the page changed or did not answer: the sheet links to it instead
+        prices = []
+    clip = None
+    per_s = [r["dollars"] for r in prices if r["per_second"] and r["dollars"]]
+    if per_s:
+        lo, hi = 5 * min(per_s), 5 * max(per_s)
+        clip = "A 5 s clip costs $%.2f" % lo + (" to $%.2f, by its settings." % hi if hi > lo else ".")
+    ex = m.get("default_example") or {}
+    took = (ex.get("metrics") or {}).get("predict_time")
+    speed = None
+    if took:
+        inp = ex.get("input") or {}
+        what = ", ".join(x for x in ("%s s" % inp["duration"] if inp.get("duration") else "", inp.get("resolution") or "") if x)
+        speed = "Replicate's example%s took %s." % (" (%s)" % what if what else "", secs_text(took))
+    card = rep_card(m)
+    out = {"model": model, "label": card["label"], "description": card["description"], "page": card["url"],
+           "image": card["image"], "video": card["video"], "runs": card["runs"],
+           "prices": [{"when": r["when"], "price": r["price"]} for r in prices], "price_note": clip,
+           "speed": speed, "settings": settings, "takes": takes, "updated": time.time(), "v": 2}
+    cache[model] = out
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    with open(p + ".tmp", "w") as f:
+        json.dump(cache, f)
+    os.replace(p + ".tmp", p)
+    return out | {"yours": yours(lambda j: j.get("provider") == "replicate" and j.get("model") == model)}
+
+
+# Plugins › Higgsfield's browser. Higgsfield shares no previews or run counts, so Featured is a
+# hand-picked list, each shown with the same model's example from Replicate (when Replicate is
+# connected); the rest of its video models follow without pictures. Tools (upscale, background
+# removal, ads) stay out: they make no new footage.
+HF_FEATURED = [("seedance_2_5", "bytedance/seedance-2.5"), ("kling3_0", "kwaivgi/kling-v3-video"),
+               ("kling_o3_image_reference", "kwaivgi/kling-v3-omni-video"), ("wan3_0", "alibaba/wan-3"),
+               ("seedance_2_0", "bytedance/seedance-2.0"), ("happy_horse_video", "alibaba/happyhorse-1.1"),
+               ("grok_video_v15", "xai/grok-imagine-video"), ("seedance1_5", "bytedance/seedance-1.5-pro")]
+HF_NOT_FOOTAGE = re.compile(r"upscale|deflicker|background|depth|fps_boost|topaz|clipify|ad_multiplier|hf_mult|sam_3|edit")
+
+
+def hf_video_models():
+    ok, out = hf_call(["model", "list", "--video", "--json"], timeout=60)
+    if not ok:
+        raise ValueError(hf_problem(out))
+    return {m["job_type"]: m.get("display_name") or m["job_type"] for m in json.loads(out)}
+
+
+def t_higgsfield_catalog(a):
+    p = os.path.join(root(), LIB, "higgsfield-catalog.json")
+    try:
+        if not a.get("fresh") and time.time() - os.path.getmtime(p) < REP_CATALOG_HOURS * 3600:
+            return json.load(open(p)) | {"default": hf_default_model()}
+    except (OSError, ValueError):
+        pass
+    names = hf_video_models()
+
+    def card(job, rep_model=None):
+        c = {"model": job, "label": names[job], "description": "", "runs": 0, "url": None, "image": None, "video": None}
+        if rep_model and rep_key():
+            try:
+                r = rep_card(rep_http("GET", "/models/" + rep_model))
+                c |= {"description": r["description"], "image": r["image"], "video": r["video"], "preview_from": rep_model}
+            except ValueError:
+                pass
+        return c
+    picks = [(j, r) for j, r in HF_FEATURED if j in names]
+    with concurrent.futures.ThreadPoolExecutor(6) as pool:
+        featured = list(pool.map(lambda x: card(*x), picks))
+    taken = {j for j, _ in picks}
+    more = [card(j) for j in sorted(names, key=lambda j: names[j].lower()) if j not in taken and not HF_NOT_FOOTAGE.search(j)]
+    out = {"featured": featured, "more": more, "updated": time.time()}
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    with open(p + ".tmp", "w") as f:
+        json.dump(out, f)
+    os.replace(p + ".tmp", p)
+    return out | {"default": hf_default_model()}
+
+
+def t_higgsfield_details(a):
+    """Credits for a clip at each quality (Higgsfield's own estimate, free), settings, inputs."""
+    job = (a.get("model") or hf_default_model()).strip()
+    ok, out = hf_call(["model", "get", job, "--json"], timeout=60)
+    if not ok:
+        raise ValueError(hf_problem(out))
+    m = json.loads(out)
+    inputs = {x["name"]: x for x in m.get("params") or []}
+    alias = {"image": ("start_image", "image", "first_frame"), "end_image": ("end_image", "last_frame"),
+             "video": ("video",), "audio": ("generate_audio", "audio")}
+
+    def name_of(word):
+        return next((n for n in alias.get(word, (word,)) if n in inputs), None)
+    settings, takes = detail_from_inputs(inputs, name_of)
+    res = (inputs.get("resolution") or {}).get("enum") or [None]
+    has_len = "duration" in inputs
+
+    def cost(r):
+        args = ["generate", "cost", job, "--prompt", "a calm shot", "--json"]
+        if has_len:
+            args += ["--duration", "5"]
+        if r:
+            args += ["--resolution", r]
+        ok, out = hf_call(args, timeout=45)
+        try:
+            return {"when": ", ".join(x for x in ("5 s" if has_len else "", r or "") if x) or "one clip",
+                    "price": "%s credits" % json.loads(out)["credits"]} if ok else None
+        except (ValueError, KeyError):
+            return None
+    with concurrent.futures.ThreadPoolExecutor(4) as pool:
+        prices = [x for x in pool.map(cost, res) if x]
+    note = None
+    ok, acct = hf_call(["account", "status"], timeout=30)
+    left = re.search(r"([\d,]+) credits", acct or "") if ok else None
+    if left and prices:
+        n = int(left.group(1).replace(",", ""))
+        cheapest = min(int(x["price"].split()[0]) for x in prices)
+        note = "You have %d credits: about %d clips at %s." % (n, n // max(cheapest, 1),
+                                                                 next(x["when"] for x in prices if int(x["price"].split()[0]) == cheapest))
+    elif not prices:
+        note = "Higgsfield gives no estimate without the model's media. Ask Takes for the price of a real clip."
+    return {"model": job, "label": m.get("display_name") or job, "description": "", "page": None,
+            "prices": prices, "price_note": note,
+            "speed": None, "settings": settings, "takes": takes, "default": hf_default_model() == job,
+            "yours": yours(lambda j: j.get("provider") != "replicate" and (j.get("args") or [None] * 3)[2:3] == [job])}
+
+
+def t_replicate(a):
+    """Start a Replicate job. The file lands in generated/ when it is done."""
+    s = resolve_session(a["session"])
+    if not rep_key():
+        raise ValueError("No Replicate API token. " + REP_SETUP)
+    model = (a.get("model") or rep_models()[0]).strip().removeprefix("https://replicate.com/").strip("/")
+    shot = None
+    if a.get("shot"):
+        shot = next((x for x in read_storyboard(s)["shots"] if x.get("id") == a["shot"]), None)
+        if not shot:
+            raise ValueError("No shot %s in the storyboard. get_session lists the ids." % a["shot"])
+    info = rep_model_info(model)
+    inp, dropped = rep_input(s, info, a, shot)
+    # Every file input must be a session file now, not when the runner gets to it.
+    files = {}
+    for k, v in inp.items():
+        if rep_is_file(info["inputs"].get(k, {})):
+            for ref in (v if isinstance(v, list) else [v]):
+                if not str(ref).startswith(("http://", "https://", "data:")):
+                    files[str(ref)] = rep_local(s, ref, shot)
+    name = slug(a.get("name") or (shot and "shot-%s" % shot["id"]) or " ".join((a.get("prompt") or "").split()[:5]) or "clip") or "clip"
+    d = os.path.join(s, GENERATED_DIR)
+    os.makedirs(d, exist_ok=True)
+    have = versions_in(d, name)
+    n = (have[-1] if have else 0) + 1
+    rel = os.path.join(GENERATED_DIR, "%s-v%d.mp4" % (name, n))
+    job = {"id": "%s-v%d" % (name, n), "provider": "replicate", "file": rel, "kind": "video", "model": model,
+           "version": info["version"] if ":" in model else None, "input": inp, "files": files,
+           "shot": shot and shot["id"], "status": "running", "started": now_iso()}
+    path = hf_save_job(s, job)
+    if shot:
+        def mark(x):
+            x["generating"] = rel
+            x.pop("clip_error", None)
+        edit_shot(s, shot["id"], mark)
+    start_replicate(s, path)
+    note = ("Replicate works in the background (a video takes 1-5 min). The file lands at %s and shows on the "
+            "Assets tab%s. replicate_status shows how it went. Replicate bills the user per second of video."
+            % (rel, "; the shot plays it then" if shot else ""))
+    if dropped:
+        note += " %s takes no %s, so it was left out (replicate_model lists its inputs)." % (model, ", ".join(dropped))
+    return {"file": rel, "job": job["id"], "model": model, "input": inp, "note": note}
+
+
+def start_replicate(s, job_path):
+    subprocess.Popen([sys.executable, os.path.abspath(__file__), "--replicate-run", s, job_path],
+                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                     start_new_session=True)
+
+
+def rep_local(s, ref, shot):
+    ref = str(ref).strip()
+    if ref == "sketch":
+        if not shot or not shot.get("image"):
+            raise ValueError("'sketch' needs a shot whose sketch is drawn.")
+        return os.path.join(s, STORYBOARD_DIR, shot["image"])
+    p = session_file(s, ref)
+    if not os.path.isfile(p):
+        raise ValueError("No file %s in the session." % ref)
+    return p
+
+
+def rep_output_url(out):
+    """The video in a prediction's output: a URL, a list of them, or a dict holding them."""
+    found = []
+
+    def walk(v):
+        if isinstance(v, dict):
+            for x in v.values():
+                walk(x)
+        elif isinstance(v, list):
+            for x in v:
+                walk(x)
+        elif isinstance(v, str) and re.match(r"^https?://\S+$", v.strip()):
+            found.append(v.strip())
+    walk(out)
+    ext = lambda u: os.path.splitext(u.split("?")[0])[1].lower()
+    return next((u for u in found if ext(u) in MEDIA_EXT["video"]), found[0] if found else None)
+
+
+def rep_download(url, dest):
+    import urllib.request
+    req = urllib.request.Request(url, headers={"User-Agent": REP_AGENT})
+    with urllib.request.urlopen(req, timeout=600) as res, open(dest + ".part", "wb") as f:
+        shutil.copyfileobj(res, f)
+    os.replace(dest + ".part", dest)
+
+
+def replicate_run(s, job_path, poll=5):
+    """Detached: upload the files, start the prediction, wait for it, download the video."""
+    import time
+    job = json.load(open(job_path))
+    try:
+        inp = dict(job["input"])
+        uploaded = {}
+        for ref, local in (job.get("files") or {}).items():
+            uploaded[ref] = rep_http("POST", "/files", upload=local)["urls"]["get"]
+        for k, v in inp.items():
+            if isinstance(v, list):
+                inp[k] = [uploaded.get(str(x), x) for x in v]
+            elif str(v) in uploaded:
+                inp[k] = uploaded[str(v)]
+        if job.get("version"):
+            p = rep_http("POST", "/predictions", {"version": job["version"], "input": inp})
+        else:
+            p = rep_http("POST", "/models/%s/predictions" % job["model"], {"input": inp})
+        job["prediction"] = p.get("id")
+        hf_save_job(s, job)
+        deadline = time.time() + 40 * 60
+        while p.get("status") not in ("succeeded", "failed", "canceled"):
+            if time.time() > deadline:
+                raise ValueError("Replicate did not finish in 40 min (prediction %s)." % p.get("id"))
+            time.sleep(poll)
+            p = rep_http("GET", (p.get("urls") or {}).get("get") or "/predictions/" + p["id"])
+        if p["status"] != "succeeded":
+            raise ValueError("Replicate: %s" % (p.get("error") or p["status"]))
+        url = rep_output_url(p.get("output"))
+        if not url:
+            raise ValueError("Replicate finished but gave no file.")
+        dest = os.path.join(s, job["file"])
+        real = os.path.splitext(url.split("?")[0])[1].lower()
+        if real in MEDIA_EXT["video"] and real != os.path.splitext(dest)[1]:
+            dest = os.path.splitext(dest)[0] + real
+            job["file"] = os.path.relpath(dest, s)
+        rep_download(url, dest)
+        secs = (p.get("metrics") or {}).get("predict_time")
+        job.update(status="done", url=url, ended=now_iso(), seconds=secs)
+        note_model(s, job["file"], rep_label(job["model"]) + " · Replicate")
+        if job.get("shot"):
+            def done(x):
+                x.pop("generating", None)
+                x.pop("clip_error", None)
+                put_clip(x, job["file"])
             edit_shot(s, job["shot"], done)
     except Exception as e:
         job.update(status="error", error=str(e)[:300], ended=now_iso())
@@ -2423,6 +3798,11 @@ PLATFORMS = {
 BLOG = False
 if not BLOG:
     del PLATFORMS["article"]
+# The comment copilot and the Performance board (Features.socialBoards in the app) are private too
+# (2026-10-09): the public copy sets SOCIAL = False and its server lists none of their tools.
+SOCIAL = False
+SOCIAL_TOOLS = {"get_comment_context", "add_comment_suggestion", "redraft_comment", "list_comment_suggestions",
+                "set_comment_posted", "set_comment_stats", "set_post_stats", "get_performance"}
 ARTICLE_CATEGORIES = ["Tech", "Life", "Business"]
 ARTICLE_SITE_REPO = "marvtub/personal-website"
 # The blog's components (components/mdx on the site); the app's preview draws each the same way.
@@ -2452,6 +3832,11 @@ POST_HISTORY = os.path.join("posts", "history")
 # posts/first-comment.md: plain text the user wants as the first comment under the live post. LinkedIn's
 # scheduler cannot schedule it, so it goes on once the post is live (front matter first_comment_posted).
 POST_FIRST_COMMENT = os.path.join("posts", "first-comment.md")
+
+
+def post_rules(p):
+    """The rule files a post for platform p follows."""
+    return ["post-all"] + (["post-" + p] if "post-" + p in AREAS else [])
 
 
 def platform_of(a):
@@ -2761,6 +4146,7 @@ def t_set_post(a):
     """Write the session's post for LinkedIn (default) or X. The app shows it as a feed preview."""
     s = resolve_session(a["session"])
     p = platform_of(a)
+    need_rules(*post_rules(p))
     if a.get("first_comment") is not None:
         if p != "linkedin":
             raise ValueError("first_comment is for LinkedIn. On X, put the follow-up in the thread (tweets).")
@@ -2852,6 +4238,7 @@ def t_create_post_variants(a):
     """Other versions of the post, as tabs above the preview."""
     s = resolve_session(a["session"])
     p = platform_of(a)
+    need_rules(*post_rules(p))
     if read_post(s, p) is None:
         raise ValueError("Write the main %s post with set_post first; variants sit next to it." % PLATFORMS[p]["name"])
     d = os.path.join(s, pf(p, "variants"))
@@ -2898,6 +4285,7 @@ def t_delete_post_variants(a):
 def t_set_post_hooks(a):
     s = resolve_session(a["session"])
     p = platform_of(a)
+    need_rules(*post_rules(p))
     if read_post(s, p) is None:
         raise ValueError("Write the %s post with set_post first." % PLATFORMS[p]["name"])
     hooks = write_hooks(os.path.join(s, pf(p, "hooks")), a["hooks"])
@@ -3026,6 +4414,8 @@ def t_create_session(a):
 def t_update_session(a):
     s = resolve_session(a["session"])
     meta = read_meta(s)
+    if "script" in a:
+        need_rules("script")
     if "script" in a:
         set_main_script(s, a["script"], a.get("author", "claude"), a.get("note", ""))
     if a.get("title", "").strip():
@@ -3402,8 +4792,9 @@ def t_get_performance(a):
 
 # ---------- Music and sound effects ----------
 # <root>/_library/audio/<Group>/<file>: Music/, SFX/, ... copied from a source folder (default
-# ~/Documents/Epidemic Sound; the app's "soundSource" setting). A session picks one song:
-# session.json "music": {"file": "Music/x.mp3", "start": seconds of the song at video 0, "volume": 0-1}.
+# ~/Documents/Epidemic Sound; the app's "soundSource" setting). The app never plays sound over a
+# video: the agent mixes music and effects into a new version of the file (2026-10-09). Until then
+# set_music and set_sfx stored picks the app played live, and the song was heard twice.
 
 AUDIO_EXTS = (".mp3", ".m4a", ".wav", ".aif", ".aiff", ".aac", ".flac")
 
@@ -3462,51 +4853,6 @@ def audio_tags(path):
     return {}
 
 
-def music_view(m):
-    if not m:
-        return None
-    path = os.path.join(audio_dir(), m["file"])
-    return dict(m, title=song_title(m["file"]), path=path, exists=os.path.exists(path),
-                note="start = second of the song that plays at 0:00 of the video. volume is what the user "
-                     "liked under his voice in the app; use it as the starting mix.")
-
-
-def sfx_view(s, cues):
-    """The sound effects the user placed on the session's videos, with full paths."""
-    out = []
-    for c in cues or []:
-        video = c["video"] if os.path.isabs(c["video"]) else os.path.join(s, c["video"])
-        out.append(dict(c, title=song_title(c["file"]), path=os.path.join(audio_dir(), c["file"]), video_path=video))
-    return out
-
-
-def t_set_sfx(a):
-    """Replace the sound effects on one video of the session."""
-    s = resolve_session(a["session"])
-    meta = read_meta(s)
-    v = a["video"]
-    if os.path.isabs(v) and v.startswith(os.path.normpath(s) + os.sep):
-        v = os.path.relpath(v, s)
-    if not os.path.exists(v if os.path.isabs(v) else os.path.join(s, v)):
-        raise ValueError("No video at %s." % v)
-    new = []
-    for c in a.get("cues") or []:
-        f = c["file"]
-        if os.path.isabs(f):
-            f = os.path.relpath(f, audio_dir())
-        if f.startswith("..") or not os.path.exists(os.path.join(audio_dir(), f)):
-            raise ValueError("No sound at _library/audio/%s. Use a file from list_music." % f)
-        new.append({"file": f, "video": v, "at": round(float(c["at"]), 2), "volume": float(c.get("volume", 0.8))})
-    keep = [c for c in meta.get("sfx") or [] if c.get("video") != v]
-    all_ = sorted(keep + new, key=lambda c: (c["video"], c["at"]))
-    if all_:
-        meta["sfx"] = all_
-    else:
-        meta.pop("sfx", None)
-    write_meta(s, meta)
-    return {"session": os.path.relpath(s, root()), "sfx": sfx_view(s, meta.get("sfx"))}
-
-
 def t_list_music(a):
     copied = sync_audio()
     d, q, group = audio_dir(), (a.get("query") or "").lower(), a.get("group")
@@ -3523,24 +4869,6 @@ def t_list_music(a):
             out.append(dict({"file": rel, "group": g, "title": song_title(f), "path": os.path.join(d, rel)},
                             **audio_tags(os.path.join(d, rel))))
     return {"library": d, "source": sound_source(), "copied_new": copied, "sounds": out}
-
-
-def t_set_music(a):
-    s = resolve_session(a["session"])
-    meta = read_meta(s)
-    if not a.get("file"):
-        meta.pop("music", None)
-    else:
-        f = a["file"]
-        if os.path.isabs(f):
-            f = os.path.relpath(f, audio_dir())
-        if f.startswith("..") or not os.path.exists(os.path.join(audio_dir(), f)):
-            raise ValueError("No sound at _library/audio/%s. Use a file from list_music." % f)
-        old = meta.get("music") or {}
-        meta["music"] = {"file": f, "start": float(a.get("start", old.get("start", 0) if old.get("file") == f else 0)),
-                         "volume": float(a.get("volume", old.get("volume", 0.35)))}
-    write_meta(s, meta)
-    return {"session": os.path.relpath(s, root()), "music": music_view(meta.get("music"))}
 
 
 # ---------- B-roll ----------
@@ -3739,6 +5067,7 @@ def t_move_sessions(a):
 
 def t_create_variants(a):
     s = resolve_session(a["session"])
+    need_rules("script")
     d = os.path.join(s, "variants")
     os.makedirs(d, exist_ok=True)
     made = []
@@ -4468,10 +5797,27 @@ def suggestions_dir():
 
 
 def lessons_path():
-    p = os.path.join(comments_dir(), "lessons.md")
+    """The comment copilot's lessons: rules/comments.md, with the other rules (comments/lessons.md before 2026-10-09)."""
+    p = os.path.join(rules_dir(), "comments.md")
+    old = os.path.join(comments_dir(), "lessons.md")
     if not os.path.exists(p):
-        os.makedirs(comments_dir(), exist_ok=True)
-        write_text(p, LESSONS_SEED)
+        os.makedirs(rules_dir(), exist_ok=True)
+        try:
+            os.replace(old, p)
+        except FileNotFoundError:
+            write_text(p, LESSONS_SEED)
+    elif os.path.exists(old):
+        # A chat on the old server finds no lessons.md, seeds a new one and may add a lesson to it:
+        # keep its new lines.
+        try:
+            have = read_text(p)
+            new = [l for l in read_text(old).splitlines()
+                   if l.strip() and l not in have.splitlines() and l not in LESSONS_SEED.splitlines()]
+            if new:
+                write_text(p, have.rstrip("\n") + "\n" + "\n".join(new) + "\n")
+            os.remove(old)
+        except OSError:
+            pass
     return p
 
 
@@ -4717,6 +6063,7 @@ def scout_briefs(skip_urls, skip_authors, targets_file):
 
 
 def t_get_comment_context(a):
+    RULES_SEEN.add("comments")
     sugg = all_suggestions()
     decided = [s for s in sugg if s.get("decision")]
     decided.sort(key=lambda s: s["decision"].get("at", ""))
@@ -4808,6 +6155,7 @@ def save_author_photo(url, sid):
 
 
 def t_add_comment_suggestion(a):
+    need_rules("comments")
     url = (a.get("post_url") or "").strip()
     if not url:
         raise ValueError("post_url is required.")
@@ -4838,6 +6186,7 @@ def t_add_comment_suggestion(a):
 
 
 def t_redraft_comment(a):
+    need_rules("comments")
     s = read_suggestion(a["id"])
     if s.get("status") not in ("redraft", "review", "feedback"):
         raise ValueError("Suggestion %s is %s: only a draft in review or waiting for a redraft changes." % (s["id"], s.get("status")))
@@ -4907,6 +6256,11 @@ TWEETS = {"type": "array", "items": {"type": "string"},
 LIBRARY = {"type": "string", "description": "A library: 'style:<Name>' for one of the user's styles (e.g. "
            "'style:Magazine'; a new name makes a new style), a project name for that project's own additions, "
            "or 'comments' for the comment copilot's files (lessons, target list, style guide)."}
+LESSON = {"type": "string", "description": "With resolve: what this comment taught. A rule id from "
+          "get_rules, 'new' (then give rule), or 'one-off'."}
+RULE = {"type": "object", "description": "With lesson 'new': {area, text, check?}. One short sentence that "
+        "holds for the next videos too.", "properties": {"area": {"type": "string", "enum": AREAS + ["post"]},
+        "text": {"type": "string"}, "check": {"type": "object"}}}
 TOOLS = [
     ("get_comment_context", "LinkedIn comment copilot: everything to read before drafting comments for the user. "
      "Returns lessons.md (his rules), the target list, his best past comments, recent examples (approved as is, "
@@ -4983,8 +6337,14 @@ TOOLS = [
      "build it in one short line, 'sketch' is what the frame shows (people, props, framing, the camera move or "
      "the motion as arrows; never text in the frame). A sketch already drawn is kept; a new or changed sketch is "
      "drawn in the background, about 30 s. redraw=true draws a shot again with the same sketch text. "
+     "With no image key, nothing is drawn and the answer says so: ask the user for a key, or pass your own "
+     "sketch as the shot's 'image'. "
      "'video' puts a real clip on the shot instead of a sketch (a file from list_broll, or a file in the "
-     "session such as edits/x.mp4); the app shows its frame and plays it on hover. "
+     "session such as edits/x.mp4 or a still such as generated/x.png); the app shows its frame and plays it on hover. "
+     "'variants' puts several clips or stills on one shot (A, B, C... in that order) for the user to choose "
+     "from: the shot shows as a stack, he flips through them and picks one; 'video' is the one in the video "
+     "(default the first). Left out, the shot keeps its variants. A new Higgsfield or Replicate clip for a "
+     "shot keeps the old one as a variant. "
      "The user records takes per shot and comments on shots: get_session's 'storyboard' lists each shot's id, "
      "section, takes and open comments. 'format' is the video's shape: the cards and sketches use it.",
      {"session": SESSION,
@@ -5004,6 +6364,12 @@ TOOLS = [
          "seconds": {"type": "number", "description": "Optional. Default: from the words in 'say'."},
          "video": {"type": "string", "description": "Optional: a clip that shows instead of the sketch. A file "
                    "from list_broll (it is added to the session's broll/) or a path in the session."},
+         "variants": {"type": "array", "items": {"type": "string"},
+                      "description": "Optional: every clip or still tried for this shot, in order (paths as for "
+                                     "video). The user picks one on the Storyboard tab; video is the one in the video."},
+         "image": {"type": "string", "description": "Optional: a sketch you made yourself (PNG or JPG path), "
+                   "used instead of drawing one. For when set_storyboard says Takes has no image key and you "
+                   "can make images."},
          "redraw": {"type": "boolean"}}}}}, ["session", "shots"], t_set_storyboard),
     ("set_post", "Write the session's post for LinkedIn (default, posts/linkedin.md) or X (platform=x, "
      "posts/x.md). One session holds one post per platform, so the LinkedIn post and its X version sit together. "
@@ -5116,33 +6482,63 @@ TOOLS = [
      "replies=[{id, text, resolve, fixed_in, fixed_at}] for every comment. fixed_in is the new version's file "
      "(e.g. 'edits/hook-v4.mp4') and fixed_at the second in it where the fix shows: The user clicks the reply to "
      "jump there. Keep text to one line ('Caption 20% smaller'). Ask a question with resolve omitted when a "
-     "comment is unclear.",
+     "comment is unclear. In a session, each resolved comment needs a lesson: a rule id from get_rules when "
+     "that rule covers it (the same mistake again), 'new' with rule={area, text} when it applies to the next "
+     "videos too, else 'one-off'.",
      {"session": SESSION, "library": LIBRARY,
       "replies": {"type": "array", "items": {"type": "object", "properties": {
           "id": {"type": "string", "description": "Comment id, e.g. 'c3'."}, "text": S, "resolve": {"type": "boolean"},
           "fixed_in": {"type": "string", "description": "File of the new version, relative to the session or library."},
-          "fixed_at": {"type": "number", "description": "Seconds into fixed_in where the fix shows."}},
+          "fixed_at": {"type": "number", "description": "Seconds into fixed_in where the fix shows."},
+          "lesson": LESSON, "rule": RULE},
           "required": ["id"]}},
       "id": {"type": "string", "description": "Single reply: comment id. Prefer replies=[...]."},
-      "text": S, "resolve": {"type": "boolean"}, "fixed_in": S, "fixed_at": {"type": "number"}},
+      "text": S, "resolve": {"type": "boolean"}, "fixed_in": S, "fixed_at": {"type": "number"},
+      "lesson": LESSON, "rule": RULE},
      [], t_reply_comment),
+    ("get_rules", "The rules learned from the user's comments, one file per step of the content journey: plan "
+     "(storyboard, script), make (sound, cut, picture, captions, graphics), package (thumbnail), publish "
+     "(post-all, post-linkedin, post-x, post-youtube, post-vertical), engage (comments: the comment copilot's "
+     "lessons) and other. Read the steps you work on before you write, edit or design, and follow them: the "
+     "tools that write for a step refuse once until you have. The user edits them on the Feedback board.",
+     {"area": {"type": "string", "description": "The steps, comma separated, e.g. 'post-all,post-x' or 'cut,sound'. "
+               "'post' is every post file, 'edit' the five make steps, 'all' every rule. Without it: only the "
+               "list of steps and how many rules each has."}},
+     [], t_get_rules),
+    ("set_rule", "Add, change, turn off or remove one learned rule. Keep each rule one short sentence and the "
+     "set small (at most %d per area): sharpen or merge a rule before you add one. Never change a rule "
+     "The user wrote (by_user) without asking him. A check makes check_edit measure the rule: %s" % (
+         AREA_MAX, " ".join("%s: %s" % kv for kv in sorted(CHECKS.items()))),
+     {"id": {"type": "string", "description": "The rule to change. Omit to add a new rule."},
+      "area": {"type": "string", "enum": AREAS}, "text": S,
+      "check": {"type": "object", "description": "{kind, target, tolerance, max, floor}. null removes it."},
+      "on": {"type": "boolean"}, "remove": {"type": "boolean"}}, [], t_set_rule),
+    ("check_edit", "Measure an edit against every learned rule that has a check (loudness, true peak, pauses, "
+     "length). Run it before you show the user a new version, fix what fails, and run it again.",
+     {"session": SESSION, "file": {"type": "string", "description": "The video, e.g. 'edits/hook-v4.mp4'."}},
+     ["session", "file"], t_check_edit),
     ("make_image", "Make or change an image straight from Google or OpenAI (much cheaper than a Higgsfield "
-     "image: never use higgsfield for images). Models: flare (GPT Image 2.5 Flare, fast, high quality: the "
-     "default for a new image), sunburst (GPT Image 2.5 Sunburst, best quality and editing: the default for a "
-     "change), nano-banana-2.1 (cheapest, fast). When one fails the next one draws. Waits about 10-60 s and "
-     "returns the file, <session>/generated/<name>-vN.png, and the model that drew it; the Assets tab shows "
-     "both. Change an image: images=[session files] (a thumbnail, a still, 'sketch' with shot=<id>) and say "
-     "what to change. One image per ask.",
+     "image: never use higgsfield for images). Drafts first, final last: while the user finds the direction, "
+     "draw with GPT Image (fast, 1536 px at most): flare (GPT Image 2.5 Flare, the default for a new image) "
+     "or sunburst (GPT Image 2.5 Sunburst, the default for a change or with references). When he likes a "
+     "draft, make its final: from=<that draft> redraws it with Nano Banana 2.1 at 4K, the newest and sharpest, "
+     "with the draft and its references as the guide and the same prompt (add one only for a change). Never "
+     "make a final before he picks. When one model fails the next one draws. Waits about 10-60 s and returns "
+     "the file, <session>/generated/<name>-vN.png, and the model that drew it; the Assets tab shows both. "
+     "Change an image: images=[session files] (a thumbnail, a still, 'sketch' with shot=<id>) and say what to "
+     "change. One image per ask.",
      {"session": SESSION,
-      "prompt": {"type": "string", "description": "What the image shows, or what to change in the given images."},
+      "prompt": {"type": "string", "description": "What the image shows, or what to change in the given images. Optional with from."},
+      "from": {"type": "string", "description": "The draft the user picked: make its final (Nano Banana 2.1, 4K, same picture)."},
+      "final": {"type": "boolean", "description": "Draw the final now with Nano Banana 2.1 at 4K, without a draft. Prefer a draft, then from."},
       "images": {"type": "array", "items": {"type": "string"},
                  "description": "Session images to change or use as references (paths, or 'sketch' with shot)."},
       "shot": {"type": "string", "description": "With images=['sketch']: the shot whose sketch to use."},
       "format": {"type": "string", "description": "Shape, e.g. 16:9, 9:16, 4:5, 1:1. Default 1:1, or the input's shape."},
       "quality": {"type": "string", "enum": ["low", "medium", "high"], "description": "Default medium."},
-      "model": {"type": "string", "enum": list(IMAGE_MODELS), "description": "Default flare, or sunburst with images."},
+      "model": {"type": "string", "enum": list(IMAGE_MODELS), "description": "For a draft: default flare, or sunburst with images."},
       "name": {"type": "string", "description": "Short file name. Default: the prompt's first words."}},
-     ["session", "prompt"], t_make_image),
+     ["session"], t_make_image),
     ("voices", "ElevenLabs voices: the account's own voices (the user's clone, designed and saved voices), the "
      "default voice, the plan and characters left. search=<words> searches the ElevenLabs voice library "
      "(with gender, accent, language, age, use_case); add=<add id from search> with name saves one to the "
@@ -5206,7 +6602,7 @@ TOOLS = [
      "(subject, setting, light, camera move); pass image='sketch' to use the sketch only as a composition "
      "reference with params {mode: omni_reference}, and say in the prompt that the result is real footage, not a "
      "drawing. Change a video: video=<session file> with params {mode: video_edit} (Seedance), or "
-     "workflow=reframe with aspect_ratio for a new shape. Default model: seedance_2_5; other models by id (`higgsfield model list` in Bash; `higgsfield model get <id>` for params). "
+     "workflow=reframe with aspect_ratio for a new shape. Default model: the one the user picked on Plugins › Higgsfield (higgsfield_status default_model); other models by id (`higgsfield model list` in Bash; `higgsfield model get <id>` for params). "
      "Each job costs the user's Higgsfield credits: one job per ask, never a batch he did not ask for. "
      "Not installed or not signed in: tell him to open Plugins › Higgsfield.",
      {"session": SESSION,
@@ -5226,6 +6622,39 @@ TOOLS = [
     ("higgsfield_status", "Is Higgsfield installed and signed in, and how many credits are left; with session, "
      "its Higgsfield jobs (running, done, error).",
      {"session": SESSION}, [], t_higgsfield_status),
+    ("replicate", "Make or change a video on Replicate: the same models as Higgsfield (Seedance 2.5, Kling, "
+     "Veo, ...) at a price per second of video, no plan. Returns at once; the job runs in the background and the "
+     "file lands in <session>/generated/<name>-vN.mp4, where the Assets tab shows it. model: owner/name; leave it "
+     "out for the user's default (replicate_status lists his default models, the first is the default; pick another "
+     "of them when it fits better). Takes maps prompt, image (the FIRST FRAME), end_image, video, duration, "
+     "aspect_ratio, resolution and audio to the model's own input names; anything else goes in params by the "
+     "model's names (call replicate_model first to see its inputs, defaults and allowed values). File inputs, "
+     "in those fields or params, take a session file, a take number or 'sketch' (the shot's sketch); Takes uploads "
+     "them. With shot=<id> the storyboard shot shows 'Generating' and then plays the clip (aspect ratio = the "
+     "storyboard format, length = the shot's length, 4-15 s). For a shot, write a real-footage prompt from the "
+     "shot's do and say; never use the sketch as the first frame (the video would look drawn): pass it only to a "
+     "reference-image input if the model has one. Each job costs the user money: one job per ask, never a batch he "
+     "did not ask for. No token: tell him to open Plugins › Replicate.",
+     {"session": SESSION,
+      "prompt": {"type": "string", "description": "What the clip shows and how the camera moves."},
+      "model": {"type": "string", "description": "owner/name (or owner/name:version). Leave out for the default."},
+      "shot": {"type": "string", "description": "A storyboard shot id: the clip becomes that shot's video."},
+      "image": {"type": "string", "description": "First frame: a session file or take still. Not a sketch."},
+      "end_image": {"type": "string", "description": "Last frame (session file)."},
+      "video": {"type": "string", "description": "A session video to change (take number or path), for models that take one."},
+      "duration": {"type": "number", "description": "Seconds."},
+      "aspect_ratio": {"type": "string", "description": "e.g. 16:9, 9:16, 1:1."},
+      "resolution": {"type": "string", "description": "e.g. 480p (cheap drafts), 720p, 1080p."},
+      "audio": {"type": "boolean", "description": "Make sound with the video, when the model can."},
+      "params": {"type": "object", "description": "More inputs by the model's own names (replicate_model lists them)."},
+      "name": {"type": "string", "description": "Short file name. Default: shot-<id> or the prompt's first words."}},
+     ["session"], t_replicate),
+    ("replicate_model", "A Replicate model's inputs (type, default, allowed values, what each does), so a job "
+     "can set what the user asks for. Leave model out for his default.",
+     {"model": {"type": "string", "description": "owner/name, e.g. bytedance/seedance-2.5."}}, [], t_replicate_model),
+    ("replicate_status", "Is a Replicate token set, which account, the user's default video models; with session, "
+     "its Replicate jobs (running, done, error).",
+     {"session": SESSION}, [], t_replicate_status),
     ("next_path", "Get the path for a new file you make: the right folder and the next version number. "
      "kind=edit: <session>/edits/<name>-vN.mp4. kind=thumbnail: <session>/thumbnails/<name>-vN.png (use the "
      "edit's name, plus an option word if you offer several). kind=library: <library>/assets/<group>/<name>-vN.<ext>. "
@@ -5380,26 +6809,10 @@ TOOLS = [
     ("list_music", "List the user's music and sound effects (_library/audio/Music, SFX, ...): file, title, "
      "artist, genre, bpm, duration, path. New downloads in his source folder (Epidemic Sound) are copied in "
      "first. Use for picking a song or an SFX for an edit. SFX are short effects (whoosh, pop, typing, "
-     "notification): mix them into the edit at a cut or a moment with ffmpeg, under the voice.",
+     "notification). Mix songs and effects into a new version of the edit with ffmpeg, under the voice: the "
+     "app plays only the file, never a song or an effect beside it. The app's Use button asks you for this.",
      {"group": {"type": "string", "description": "Music or SFX. Omit for all."},
       "query": {"type": "string", "description": "Words in the file name."}}, [], t_list_music),
-    ("set_music", "Pick the song for a session's video (the user tries songs under the video in the app's "
-     "sounds tab and picks one there too). get_session returns it as 'music' with its path, start and "
-     "volume: use that song in the edit. Omit file to clear. Only suggest; ask before replacing his pick.",
-     {"session": SESSION, "file": {"type": "string", "description": "From list_music, e.g. 'Music/26428_Chasing the Truth.mp3'."},
-      "start": {"type": "number", "description": "Second of the song that plays at the start of the video."},
-      "volume": {"type": "number", "description": "0-1, under the voice. Default 0.35."}},
-     ["session"], t_set_music),
-    ("set_sfx", "Place sound effects on one of the session's videos (a take or an edit): each cue is a file "
-     "from list_music (SFX/...) at a second of that video. Replaces that video's cues; cues=[] clears them. "
-     "The user places them in the app too (sounds tab, 'add at'), and hears them when the video plays. "
-     "get_session returns them as 'sfx' with path and video_path: mix each into the edit at 'at', at 'volume' "
-     "(0-1, relative to the file). A cue on a take is a moment of the raw take: map it through your cut list.",
-     {"session": SESSION, "video": {"type": "string", "description": "The video, relative to the session "
-                                                                   "(take-02-camera.mov, edits/x-v3.mp4)."},
-      "cues": {"type": "array", "items": {"type": "object", "properties": {
-          "file": S, "at": {"type": "number"}, "volume": {"type": "number"}}, "required": ["file", "at"]}}},
-     ["session", "video"], t_set_sfx),
     ("trash_takes", "Move takes to the macOS Trash (recoverable). Pass take numbers, or non_keepers=true "
      "to trash every take without a star.",
      {"session": SESSION, "takes": {"type": "array", "items": {"type": "integer"}}, "non_keepers": {"type": "boolean"}},
@@ -5446,6 +6859,8 @@ TOOLS = [
      {"path": {"type": "string", "description": "Project name, 'Project/folder', 'Project/folder/edits/x-v2.mp4', or absolute path."}},
      ["path"], t_open_in_app),
 ]
+if not SOCIAL:
+    TOOLS = [t for t in TOOLS if t[0] not in SOCIAL_TOOLS]
 BY_NAME = {t[0]: t for t in TOOLS}
 
 
@@ -5496,6 +6911,9 @@ def handle(msg):
                                     "(area) and text (quoted selection), in sessions and libraries: when "
                                     "get_session or get_library shows open_comments, call get_comments, read each "
                                     "frame PNG, fix, and reply_comment with resolve=true. "
+                                    "The user's rules from past comments: get_rules for the step you work on (script, "
+                                    "storyboard, the edit steps, thumbnail, post-all plus post-<platform>, comments) "
+                                    "before you write; the tools that write for a step refuse once until you have. "
                                     "A take's voice: clean_voice cleans it (the user's voice-cleanup); when get_session shows voice.file "
                                     "under a take, use that WAV as the take's audio in edits. "
                                     "A take recorded for a storyboard shot has best_cut in get_session. by=gemini is only Gemini's "
@@ -5505,9 +6923,10 @@ def handle(msg):
                                     "range you use, even when it stays the same. "
                                     "B-roll: list_broll gives the user's own clips with descriptions; add_broll puts one in "
                                     "a session; save_broll saves a session's video into the library. "
-                                    "AI media: the higgsfield tool makes a clip for a storyboard shot or changes a session "
-                                    "video; make_image makes or changes an image (Nano Banana 2.1 or GPT Image 2.5, never Higgsfield for "
-                                    "images); results land in generated/. "
+                                    "AI media: the replicate tool (pay per clip, the user's default models) or the higgsfield tool (his "
+                                    "Higgsfield plan) makes a clip for a storyboard shot or changes a session video; use the one "
+                                    "he names, else replicate when replicate_status shows a token; make_image makes or changes an image (GPT Image 2.5 drafts; when the user likes one, "
+                                    "from=<draft> makes the 4K Nano Banana 2.1 final; never Higgsfield for images); results land in generated/. "
                                     "Trashing is recoverable."})
     elif method == "ping":
         reply(id_, {})
@@ -5551,9 +6970,35 @@ if __name__ == "__main__":
     elif sys.argv[1:2] == ["--broll-describe"]:
         broll_describe(sys.argv[2], rename="--rename" in sys.argv[3:])
     elif sys.argv[1:2] == ["--sketch-run"]:
-        sketch_run(sys.argv[2])
+        sketch_run(sys.argv[2], retry="--retry" in sys.argv[3:])
     elif sys.argv[1:2] == ["--higgsfield-run"]:
         higgsfield_run(sys.argv[2], sys.argv[3])
+    elif sys.argv[1:2] == ["--replicate-run"]:
+        replicate_run(sys.argv[2], sys.argv[3])
+    elif sys.argv[1:2] == ["--replicate"]:  # the app's Plugins › Replicate: one call, JSON in and out
+        try:
+            arg = json.loads(sys.argv[3] if len(sys.argv) > 3 else "{}")
+            if sys.argv[2] == "save_key":
+                rep_save_key(sys.stdin.read())
+                res = {"saved": True}
+            elif sys.argv[2] == "set_models":
+                res = {"models": rep_set_models(arg.get("models") or [])}
+            else:
+                res = {"status": t_replicate_status, "model": t_replicate_model, "catalog": t_replicate_catalog,
+                       "details": t_replicate_details}[sys.argv[2]](arg)
+        except (ValueError, KeyError) as e:
+            res = {"error": str(e)}
+        print(json.dumps(res))
+    elif sys.argv[1:2] == ["--higgsfield"]:  # the app's Plugins › Higgsfield browser
+        try:
+            arg = json.loads(sys.argv[3] if len(sys.argv) > 3 else "{}")
+            if sys.argv[2] == "set_default":
+                res = {"default": hf_set_default(arg.get("model"))}
+            else:
+                res = {"catalog": t_higgsfield_catalog, "details": t_higgsfield_details}[sys.argv[2]](arg)
+        except (ValueError, KeyError) as e:
+            res = {"error": str(e)}
+        print(json.dumps(res))
     elif sys.argv[1:2] == ["--eleven"]:  # the app's Plugins › Voices: one tool, JSON in and out
         try:
             if sys.argv[2] == "save_key":

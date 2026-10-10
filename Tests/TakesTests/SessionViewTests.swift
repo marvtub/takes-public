@@ -6,9 +6,14 @@ import Testing
 
 @Suite(.serialized) struct SessionViewTests {
     @Test func keepsTabFileAndTimePerSession() {
-        let a = URL(fileURLWithPath: "/tmp/takes-view-\(UUID().uuidString)/p/a")
-        let b = URL(fileURLWithPath: "/tmp/takes-view-\(UUID().uuidString)/p/b")
+        // Real folders: past 200 saved sessions, a write drops one whose folder is gone, and saved
+        // views pile up in the test process's defaults over many runs.
+        let base = FileManager.default.temporaryDirectory.appending(path: "takes-view-\(UUID().uuidString)")
+        let a = base.appending(path: "p/a"), b = base.appending(path: "p/b")
+        try? FileManager.default.createDirectory(at: a, withIntermediateDirectories: true)
+        try? FileManager.default.createDirectory(at: b, withIntermediateDirectories: true)
         defer {
+            try? FileManager.default.removeItem(at: base)
             var all = UserDefaults.standard.dictionary(forKey: SessionView.key) ?? [:]
             all[a.path] = nil; all[b.path] = nil
             UserDefaults.standard.set(all, forKey: SessionView.key)

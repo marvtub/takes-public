@@ -95,7 +95,7 @@ import SwiftUI
         time("warmup", app, Text("x"))
         time("script", app, VStack { ScriptPane(doc: doc); TakesList(doc: doc) })
         time("assets", app, AssetsPane(doc: doc, wide: true))
-        time("sounds", app, SoundsPane(doc: doc, bed: app.bed, wide: true))
+        time("sounds", app, SoundsPane(doc: doc, wide: true))
         time("post", app, PostPane(doc: doc))
         time("header", app, SessionHeader(doc: doc))
     }

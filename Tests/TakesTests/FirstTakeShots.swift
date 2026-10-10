@@ -9,12 +9,25 @@ import Testing
 let firstTakeDir = ProcessInfo.processInfo.environment["TAKES_FIRSTTAKE"]
 let firstTakeMedia = ProcessInfo.processInfo.environment["TAKES_FIRSTTAKE_MEDIA"]
 
-@MainActor @Suite(.serialized) struct FirstTakeShots {
+@MainActor @Suite(.serialized) final class FirstTakeShots {
     let size = CGSize(width: 1360, height: 860)
+    /// Each test's library, removed after it with the views it saved (2026-10-08: 237 left-over
+    /// sessions in the test runner's sessionViews made SessionView.write drop new ones).
+    private var roots: [URL] = []
+
+    deinit {
+        var all = UserDefaults.standard.dictionary(forKey: SessionView.key) ?? [:]
+        for root in roots {
+            for key in all.keys where key.hasPrefix(root.standardizedFileURL.path + "/") { all[key] = nil }
+            try? FileManager.default.removeItem(at: root)
+        }
+        UserDefaults.standard.set(all, forKey: SessionView.key)
+    }
 
     private func library() throws -> (AppModel, URL) {
         let root = FileManager.default.temporaryDirectory.appending(path: "takes-firsttake-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        roots.append(root)
         let app = AppModel()
         app.library.setRoot(root)
         return (app, root)

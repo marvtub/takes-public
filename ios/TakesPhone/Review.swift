@@ -203,7 +203,7 @@ struct MediaReview: View {
                     } else if let image {
                         Image(uiImage: image).resizable().scaledToFit()
                     } else {
-                        ProgressView().tint(.white).frame(maxWidth: .infinity, maxHeight: .infinity)
+                        Color.clear.frame(maxWidth: .infinity, maxHeight: .infinity)
                     }
                 }
                 .frame(width: geo.size.width, height: geo.size.height)

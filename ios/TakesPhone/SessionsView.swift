@@ -3,7 +3,7 @@ import SwiftUI
 // The list of videos, laid out as the Mac's sidebar (2026-10-04: "look at the desktop app and
 // get the design on the mobile app"): the brand and a new video on top, Find a session, each
 // project as a section of plain rows with the day on the right, Published folded under it, and
-// Performance and Comments at the foot. No cards, no floating buttons, no system menus.
+// Performance, Comments and the other pages in the Takes menu. No cards, no floating buttons, no system menus.
 
 struct SessionsView: View {
     @EnvironmentObject var model: Model
@@ -16,6 +16,10 @@ struct SessionsView: View {
     @State private var appearance = false
     @State private var brandOpen = false
     @State private var showArchived = false
+    /// A project's panel (rename, trash) and its cards (2026-10-09).
+    @State private var projectMore: String?
+    @State private var confirm: Confirm?
+    @State private var ask: NameAsk?
     @AppStorage("foldedProjects") private var folded = ""
     @AppStorage("openPublished") private var openPublished = ""
     @AppStorage("newProject") private var lastProject = "Inbox"
@@ -75,8 +79,18 @@ struct SessionsView: View {
             }
             .background(Palette.surface.ignoresSafeArea())
             .toolbar(.hidden, for: .navigationBar)
+            .overlay {
+                if let p = projectMore {
+                    FloatingPanel(open: Binding(get: { projectMore != nil }, set: { if !$0 { projectMore = nil } }), top: 96) {
+                        ProjectMore(project: p, open: Binding(get: { projectMore != nil }, set: { if !$0 { projectMore = nil } }),
+                                    confirm: $confirm, ask: $ask)
+                    }
+                }
+            }
+            .asks(confirm: $confirm, name: $ask)
             .navigationDestination(for: Session.self) { SessionView(session: $0) }
             .sheet(isPresented: $appearance) { AppearanceSheet { appearance = false } }
+            .task(id: model.connected) { if model.connected { await model.loadPlugins() } }
         }
     }
 
@@ -114,10 +128,13 @@ struct SessionsView: View {
         }
     }
 
-    /// What the Mac's brand menu holds, as rows in the sidebar's own style: the look, which
-    /// project to show, and forgetting the Mac.
+    /// What the Mac's brand menu holds, as rows in the sidebar's own style: the pages (they sat
+    /// in the foot and took half the screen, 2026-10-09), the look, which project to show, and
+    /// forgetting the Mac.
     private var brandPanel: some View {
         VStack(alignment: .leading, spacing: 1) {
+            pages
+            Rectangle().fill(Palette.border).frame(height: 1).padding(.vertical, 6).padding(.horizontal, 12)
             panelRow("Appearance", icon: "paintpalette") { appearance = true; brandOpen = false }
             Text("Show").font(.inter(.footnote, .medium)).foregroundStyle(Palette.faint)
                 .padding(.horizontal, 12).padding(.top, 10).padding(.bottom, 2)
@@ -161,13 +178,21 @@ struct SessionsView: View {
     @ViewBuilder
     private func section(_ name: String, _ items: [Session]) -> some View {
         let shut = search.isEmpty && names(folded).contains(name)
-        let live = items.filter { !$0.published }
+        // As the Mac's sidebar: in work first, then scheduled, the next to go out first (2026-10-09).
+        let live = items.filter { !$0.published && $0.booked.isEmpty } + items.filter { !$0.published && !$0.booked.isEmpty }.sorted { $0.next < $1.next }
         let done = items.filter(\.published)
         Button { Brand.select(); toggle(&folded, name) } label: {
             HStack(spacing: 6) {
                 Text(name).font(.inter(.subheadline, .semibold)).foregroundStyle(Palette.muted).lineLimit(1)
                 if shut { Text("\(items.count)").font(.inter(.footnote, .medium)).foregroundStyle(Palette.faint) }
                 Spacer()
+                // The Mac sidebar's project menu: our own panel.
+                Button { Brand.select(); withAnimation(Brand.quick) { projectMore = name } } label: {
+                    Image(systemName: "ellipsis").font(.system(size: 14, weight: .semibold)).foregroundStyle(Palette.faint)
+                        .frame(width: 36, height: 34).contentShape(Rectangle())
+                }
+                .buttonStyle(.press)
+                .accessibilityLabel("\(name) actions")
             }
             .padding(.horizontal, 12).frame(height: 34)
             .contentShape(Rectangle())
@@ -220,9 +245,11 @@ struct SessionsView: View {
         } content: {
             NavigationLink(value: s) {
                 HStack(spacing: 10) {
+                    // The Mac's SessionDot: live, scheduled (a ring), ready or new from Takes (filled).
                     Group {
                         if s.published { Circle().fill(Palette.live) }
-                        else if s.unread || s.notice { Circle().fill(Palette.accent) }
+                        else if !s.booked.isEmpty { Circle().strokeBorder(Palette.accent, lineWidth: 1.5) }
+                        else if s.ready || s.unread || s.notice { Circle().fill(Palette.accent) }
                         else { Color.clear }
                     }
                     .frame(width: 7, height: 7)
@@ -232,6 +259,12 @@ struct SessionsView: View {
                     Spacer(minLength: 8)
                     if s.running {
                         WorkingDots(color: Palette.accent)
+                    } else if !s.booked.isEmpty, !s.published {
+                        HStack(spacing: 4) {
+                            ForEach(s.booked, id: \.platform) { PostLogo(platform: $0.platform, size: 13) }
+                            Text(s.next == .distantFuture ? "No time" : Plan.short(s.next))
+                        }
+                        .font(.inter(.footnote)).monospacedDigit().foregroundStyle(Palette.faint)
                     } else {
                         Text(Self.age(s.updated)).font(.inter(.footnote)).monospacedDigit().foregroundStyle(Palette.faint)
                     }
@@ -257,24 +290,31 @@ struct SessionsView: View {
 
     // MARK: Foot
 
-    /// Update, Performance, Comments and Styles, under a hairline: the Mac's sidebar foot.
+    /// Performance, Comments, Search, the plugins and Styles: the Mac's sidebar foot, inside the
+    /// Takes menu so the sessions keep the screen.
+    @ViewBuilder private var pages: some View {
+        if Features.socialBoards {
+            footRow("Performance", icon: "chart.bar.xaxis") { tab?.wrappedValue = "performance" }
+            footRow("Comments", icon: "text.bubble") { tab?.wrappedValue = "comments" }
+        }
+        // The Mac's ⌘K (2026-10-09).
+        footRow("Search", icon: "magnifyingglass") { tab?.wrappedValue = "search" }
+        ForEach(model.plugins, id: \.id) { p in footRow(p.title, icon: p.icon) { tab?.wrappedValue = "plugin:" + p.id } }
+        footRow("Styles", icon: "square.stack") { tab?.wrappedValue = "styles" }
+    }
+
+    /// Update and the waiting changes. Both draw nothing when there is none.
     private var foot: some View {
         VStack(spacing: 1) {
             UpdatePill()
             OutboxBar(outbox: model.outbox)
-            if Features.socialBoards {
-                footRow("Performance", icon: "chart.bar.xaxis") { tab?.wrappedValue = "performance" }
-                footRow("Comments", icon: "text.bubble") { tab?.wrappedValue = "comments" }
-            }
-            footRow("Styles", icon: "square.stack") { tab?.wrappedValue = "styles" }
         }
-        .padding(.horizontal, 10).padding(.top, 6).padding(.bottom, 4)
-        .overlay(alignment: .top) { Rectangle().fill(Palette.border).frame(height: 1) }
+        .padding(.horizontal, 10)
         .background(Palette.surface)
     }
 
     private func footRow(_ title: String, icon: String, _ action: @escaping () -> Void) -> some View {
-        Button { Brand.select(); action() } label: {
+        Button { Brand.select(); brandOpen = false; action() } label: {
             HStack(spacing: 11) {
                 Image(systemName: icon).font(.system(size: 15)).foregroundStyle(Palette.muted).frame(width: 20)
                 Text(title).font(.inter(.body, .medium)).foregroundStyle(Palette.muted)

@@ -74,10 +74,6 @@ struct OpenCommentsChip: View {
                     .swipeActions(edge: .leading) {
                         Button { shown = false; send(c.ask) } label: { Label("Send", systemImage: "paperplane") }.tint(Palette.accent)
                     }
-                    .contextMenu {
-                        Button { shown = false; send(c.ask) } label: { Label("Send to Takes", systemImage: "paperplane") }
-                        Button { resolve(c) } label: { Label("Resolve", systemImage: "checkmark.circle") }
-                    }
                 }
             }
             .listStyle(.plain)

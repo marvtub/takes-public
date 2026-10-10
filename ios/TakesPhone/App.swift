@@ -94,13 +94,25 @@ struct Tabs: View {
     /// Always opens on the list of videos, as the Mac opens on its sidebar: with no tab bar, a
     /// remembered Comments page hid the list (2026-10-04).
     @State private var tab = "videos"
+    private static let base: Set<String> = ["videos", "comments", "performance", "styles"]
 
     var body: some View {
-        TabView(selection: $tab) {
+        // Five pages at most: a sixth makes iOS add its own More list, with a stock back button
+        // (2026-10-09). Search and the plugin screens share the last page.
+        TabView(selection: Binding(get: { Self.base.contains(tab) ? tab : "extra" }, set: { if $0 != "extra" { tab = $0 } })) {
             SessionsView().toolbar(.hidden, for: .tabBar).tag("videos")
             CopilotView().toolbar(.hidden, for: .tabBar).tag("comments")
             NavigationStack { PerformanceView() }.toolbar(.hidden, for: .tabBar).tag("performance")
             NavigationStack { StylesView() }.toolbar(.hidden, for: .tabBar).tag("styles")
+            Group {
+                if tab.hasPrefix("plugin:") {
+                    // The Mac plugins with a phone screen (2026-10-09): admin only, none in the public copy.
+                    NavigationStack { PrivatePhone.screen(String(tab.dropFirst("plugin:".count))) }.id(tab)
+                } else {
+                    SearchView()
+                }
+            }
+            .toolbar(.hidden, for: .tabBar).tag("extra")
         }
         .environment(\.tabBar, $tab)
     }

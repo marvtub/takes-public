@@ -519,27 +519,32 @@ struct StylesBoard: View {
 
     private func makingCard(_ m: Making) -> some View {
         VStack(alignment: .leading, spacing: 10) {
-            VStack(alignment: .leading, spacing: 12) {
-                if m.stopped {
-                    Image(systemName: "pause.circle").font(.system(size: 22)).foregroundStyle(Theme.faint)
-                    Text("Takes stopped before the preview.").font(Theme.sans(12.5, .medium)).foregroundStyle(Theme.ink)
-                    HStack(spacing: 8) {
-                        Button("Open the chat") { app.chats.open = true }.buttonStyle(AccentButtonStyle(kind: .quiet))
-                        Button("Close") { makingSince = 0; checkMaking() }.buttonStyle(BracketButtonStyle(active: false))
+            // The card's shape comes from the cell, the text sits in it (2026-10-09): sized by its
+            // own text, the card was squeezed to a thin column, a word per line.
+            Color.clear.aspectRatio(4.0 / 5.0, contentMode: .fit).overlay(alignment: .topLeading) {
+                VStack(alignment: .leading, spacing: 12) {
+                    if m.stopped {
+                        Image(systemName: "pause.circle").font(.system(size: 22)).foregroundStyle(Theme.faint)
+                        Text("Takes stopped before the preview.").font(Theme.sans(12.5, .medium)).foregroundStyle(Theme.ink)
+                        HStack(spacing: 8) {
+                            Button("Open the chat") { app.chats.open = true }.buttonStyle(AccentButtonStyle(kind: .quiet))
+                            Button("Close") { makingSince = 0; checkMaking() }.buttonStyle(BracketButtonStyle(active: false))
+                        }
+                    } else {
+                        ProgressView().controlSize(.small)
+                        Text("Step \(m.step) of 3").font(Theme.sans(11.5, .medium)).foregroundStyle(Theme.accent)
+                        Text(Self.steps[m.step - 1]).font(Theme.sans(12.5)).foregroundStyle(Theme.ink)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Text("You can keep working. The card shows the style when it is ready.")
+                            .font(Theme.sans(11.5)).foregroundStyle(Theme.faint)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
-                } else {
-                    ProgressView().controlSize(.small)
-                    Text("Step \(m.step) of 3").font(Theme.sans(11.5, .medium)).foregroundStyle(Theme.accent)
-                    Text(Self.steps[m.step - 1]).font(Theme.sans(12.5)).foregroundStyle(Theme.ink)
-                        .fixedSize(horizontal: false, vertical: true)
-                    Text("You can keep working. The card shows the style when it is ready.")
-                        .font(Theme.sans(11.5)).foregroundStyle(Theme.faint)
-                        .fixedSize(horizontal: false, vertical: true)
                 }
+                .padding(16)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             }
-            .padding(16)
-            .frame(maxWidth: .infinity, alignment: .leading).aspectRatio(4.0 / 5.0, contentMode: .fit)
             .background(Theme.surface, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
             .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .strokeBorder(Theme.accent.opacity(m.stopped ? 0 : 0.6), style: StrokeStyle(lineWidth: 1.5, dash: [5, 4])))
             Text(m.name ?? "New style").font(Theme.display(15)).foregroundStyle(Theme.ink).lineLimit(1)
@@ -557,7 +562,9 @@ struct StylesBoard: View {
         return VStack(alignment: .leading, spacing: 10) {
             Group {
                 if c.preview != nil {
-                    StylePoster(video: c.video, poster: c.poster, selected: isOpen) { opened = dir }
+                    StylePoster(video: c.video, poster: c.poster, selected: isOpen,
+                                onSelect: { opened = dir },
+                                onOpen: c.preview.map { p in { opened = dir; app.styleFile = p } })
                 } else {
                     VStack(spacing: 10) {
                         Image(systemName: "film").font(.system(size: 22)).foregroundStyle(Theme.faint)
@@ -584,6 +591,7 @@ struct StylesBoard: View {
                 HStack(spacing: 8) {
                     if c.usedBy.isEmpty {
                         Text("Not used yet").font(Theme.sans(11.5)).foregroundStyle(Theme.faint)
+                            .lineLimit(1).fixedSize()
                     } else {
                         Menu {
                             ForEach(c.usedBy, id: \.self) { s in
@@ -599,10 +607,10 @@ struct StylesBoard: View {
                     if c.isNew {
                         Button("Keep") { StyleLib.keep(c.name, root: root); scan() }
                             .buttonStyle(BracketButtonStyle(active: false))
-                            .help("Keep this style. It loses the New mark.")
+                            .help("Keep this style. It loses the New mark.").fixedSize()
                         Button("Trash") { trash(c) }
                             .buttonStyle(BracketButtonStyle(active: false))
-                            .help("Move this style to the Trash")
+                            .help("Move this style to the Trash").fixedSize()
                     }
                 }
             }
@@ -1118,7 +1126,7 @@ struct DocReview: View {
         } else if let id = focused, let i = comments.firstIndex(where: { $0.id == id }) {
             let c = comments[i]
             CommentCard(comment: c, number: i + 1,
-                        onReply: { store.reply(id, $0) },
+                        onEdit: { store.setText(id, $0) },
                         onResolve: { store.setResolved(id, c.open) },
                         onDelete: { store.delete(id); focused = nil },
                         onClose: { withAnimation(Theme.motion) { focused = nil } },
@@ -1164,6 +1172,8 @@ private struct StylePoster: View {
     let poster: URL?
     let selected: Bool
     var onSelect: () -> Void = {}
+    /// Opens the preview big, to comment on it (2026-10-09): the hover button or a double-click.
+    var onOpen: (() -> Void)?
     @State private var image: NSImage?
     @State private var duration: Double?
     @State private var hover = false
@@ -1209,6 +1219,14 @@ private struct StylePoster: View {
                     .padding(10)
                 }
             }
+            .overlay(alignment: .topTrailing) {
+                if hover, let onOpen {
+                    Button(action: onOpen) { StagePill(text: "Open", icon: "arrow.up.left.and.arrow.down.right") }
+                        .buttonStyle(.plain).padding(10)
+                        .help("Open the preview to watch it big and comment on it")
+                        .transition(.opacity)
+                }
+            }
             .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .strokeBorder(selected ? Theme.accent : Theme.border, lineWidth: selected ? 2 : 1))
             .shadow(color: Theme.shadow, radius: hover ? 14 : 8, y: hover ? 6 : 3)
@@ -1219,6 +1237,7 @@ private struct StylePoster: View {
                 hover = h
                 h ? play() : stop()
             }
+            .onTapGesture(count: 2) { onOpen?() }
             .onTapGesture {
                 onSelect()
                 guard let player else { return }
@@ -1227,7 +1246,7 @@ private struct StylePoster: View {
             }
             .onDisappear(perform: stop)
             .task(id: [poster, video]) { await load() }
-            .help(video == nil ? "" : "Hover to play. Click for sound.")
+            .help(video == nil ? "" : "Hover to play. Click for sound. Double-click to open it and comment.")
     }
 
     private func play() {

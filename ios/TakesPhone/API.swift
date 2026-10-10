@@ -21,6 +21,13 @@ struct Session: Codable, Identifiable, Hashable {
     /// How far it got (idea, script, board, recorded, edit, posted) and its storyboard shots. nil from an older Mac.
     var stage: String? = nil
     var shots: Int? = nil
+    /// Its posts that are ready, scheduled or posted (Schedule.swift). Nil from a Mac before 2026-10-09.
+    var plan: [Planned]? = nil
+
+    /// Scheduled posts, and when the first goes out (none: last).
+    var booked: [Planned] { (plan ?? []).filter { $0.status == "scheduled" } }
+    var ready: Bool { (plan ?? []).contains { $0.status != "posted" } }
+    var next: Date { booked.compactMap(\.at).min() ?? .distantFuture }
 }
 
 struct RemoteFile: Codable, Identifiable, Hashable {
@@ -37,6 +44,10 @@ struct RemoteFile: Codable, Identifiable, Hashable {
     var shot: String?
     /// The AI model that made it (generated/). nil from an older Mac.
     var model: String? = nil
+    /// A take's best cut; an image's Change Image… draft and Make Final ask. Nil from a Mac before 2026-10-09.
+    var cut: Cut? = nil
+    var change: String? = nil
+    var final: String? = nil
     var id: String { path }
     var isVideo: Bool { kind == "video" }
     var isImage: Bool { kind == "image" }
@@ -74,6 +85,8 @@ struct Chat: Codable, Hashable {
     var running: Bool
     var messages: [Message]
     var context: ContextUse?
+    /// Messages waiting on the Mac for the run to end. From a Mac before 2026-10-09: nil.
+    var queued: [String]?
 
     /// Claude runs a /compact: the chat says so instead of "Claude is working" (2026-10-03).
     var compacting: Bool {
@@ -93,6 +106,8 @@ struct Post: Codable, Hashable {
     var variants: [PostVariant]?
     /// Claude's opening options for the post.
     var hooks: [PostHook]?
+    /// Saved versions. Nil from a Mac before 2026-10-09.
+    var history: Int? = nil
 }
 
 /// One platform's post: LinkedIn, X, YouTube or Vertical. Nil list from a Mac before 2026-10-05.
@@ -106,6 +121,16 @@ struct PlatformPost: Codable, Hashable, Identifiable {
     var status: String
     var url: String?
     var limit: Int
+    /// Other versions, opening options and saved versions. Nil from a Mac before 2026-10-09.
+    var variants: [PostVariant]? = nil
+    var hooks: [PostHook]? = nil
+    var history: Int? = nil
+    /// When it goes out, in its own zone, and whether the platform still has an older time or text.
+    var at: Date? = nil
+    var tz: String? = nil
+    var needsUpdate: Bool? = nil
+    /// Vertical: tiktok, reels, shorts.
+    var places: [String]? = nil
     var id: String { platform }
 }
 
@@ -176,6 +201,39 @@ struct SessionDetail: Codable, Hashable {
     var sides: [SidePost]?
     /// The style this video is edited in. Nil from a Mac before 2026-10-08.
     var style: SessionStyle?
+    /// The Script tab's draft bar: variants, the favorite, saved versions, hooks. Nil from a Mac before 2026-10-09.
+    var scriptVariants: [PostVariant]? = nil
+    var scriptFavorite: String? = nil
+    var scriptHistory: Int? = nil
+    var scriptHooks: [PostHook]? = nil
+    /// Where it is marked published ("" for somewhere else).
+    var publishedOn: [String]? = nil
+}
+
+/// A saved version of the script or a post (the Mac's history sheet).
+struct Version: Codable, Hashable, Identifiable {
+    var path: String
+    var created: Date
+    var author: String
+    var note: String
+    var draft: String
+    var draftName: String
+    var text: String
+    var id: String { path }
+}
+
+/// A take's clean voice, as the Mac's Voice panel shows it.
+struct VoiceState: Codable, Hashable {
+    var state: String
+    var on: Bool
+    var strength: Double
+    var quiet: Bool
+    var summary: String
+    var error: String?
+    var started: Date?
+    var estimate: Double
+    var file: String?
+    var ready: Bool { state == "done" }
 }
 
 // MARK: Styles (the Mac's Styles board)
@@ -271,6 +329,12 @@ struct Shot: Codable, Identifiable, Hashable {
     var comments: [Comment]
     /// Width over height: the storyboard's format, or the clip's own shape. Nil from an older Mac: the board reads it off the picture.
     var ratio: Double?
+    /// Every clip or still tried (A B C…), the one in the video, and Make Final's ask per GPT Image
+    /// draft. Nil from a Mac before 2026-10-09.
+    var variants: [String]? = nil
+    var video: String? = nil
+    var finals: [String: String]? = nil
+    var generating: Bool? = nil
 
     var shape: CGFloat { CGFloat(ratio.flatMap { $0 > 0 ? $0 : nil } ?? 0.8) }
 
@@ -658,4 +722,56 @@ struct API {
         r.timeoutInterval = 600
         return r
     }
+}
+
+/// A Mac plugin with a phone screen.
+struct PluginInfo: Codable, Hashable {
+    var id: String
+    var title: String
+    var icon: String
+}
+
+// MARK: Board and Assets (2026-10-09, the Mac's PhoneBoard.swift)
+
+/// A take's best cut: Gemini's first suggestion, or the range Takes checked.
+struct Cut: Codable, Hashable {
+    var state: String
+    var start: Double?
+    var end: Double?
+    var clean: Bool?
+    var why: String?
+    var error: String?
+    var by: String?
+
+    var range: String? {
+        guard state == "done", let start, let end else { return nil }
+        return String(format: "%.1f–%.1f s", start, end)
+    }
+}
+
+struct BrollClip: Codable, Hashable, Identifiable {
+    var path: String
+    var title: String
+    var vertical: Bool?
+    var added: Bool
+    var id: String { path }
+}
+
+struct BrollFolder: Codable, Hashable, Identifiable {
+    var folder: String
+    var name: String
+    var clips: [BrollClip]
+    var id: String { folder }
+}
+
+struct SoundItem: Codable, Hashable, Identifiable {
+    var rel: String
+    var title: String
+    var group: String
+    var path: String
+    var id: String { rel }
+}
+
+struct Sounds: Codable, Hashable {
+    var sounds: [SoundItem]
 }

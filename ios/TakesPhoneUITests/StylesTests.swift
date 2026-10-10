@@ -27,9 +27,7 @@ final class StylesTests: XCTestCase {
     func testStylesBoardAndAVideosStyle() throws {
         _ = get("/test/styles")
         let app = launch("dark")
-        let styles = app.buttons["Styles"]
-        XCTAssertTrue(styles.waitForExistence(timeout: 15))
-        styles.tap()
+        app.page("Styles")
         let magazine = app.buttons["Magazine style"]
         XCTAssertTrue(magazine.waitForExistence(timeout: 10))
         XCTAssertTrue(app.staticTexts["In 1 video"].exists)

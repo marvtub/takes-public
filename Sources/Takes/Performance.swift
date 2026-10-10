@@ -177,9 +177,9 @@ struct PerformanceView: View {
                 }
                 .padding(18)
                 .id(platform)
-                .transition(.opacity)
+                .transition(.page)
             }
-            .animation(Theme.motion, value: platform)
+            .animation(.page, value: platform)
         }
         .background(Theme.paper)
         .onAppear { Perf.mark("performance"); board.scan(root) }

@@ -114,6 +114,49 @@ class MakeImage(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "quota.*no credits"):
             t.draw_sketch("one man", out + "3", "16:9")
 
+    def test_a_draft_says_how_to_make_its_final(self):
+        r = t.t_make_image({"session": self.s, "prompt": "A desk at night", "name": "desk", "format": "16:9"})
+        self.assertIn("from=generated/desk-v1.png", r["note"])
+        self.assertNotIn("final", r)
+        self.assertEqual(json.load(open(os.path.join(self.s, "generated", ".prompts.json")))["desk-v1.png"],
+                         {"prompt": "A desk at night", "images": [], "format": "16:9"})
+
+    def test_the_final_of_a_draft_is_nano_banana_at_4k_with_the_draft_first(self):
+        # The user likes the GPT draft: from= redraws it sharp with the same prompt, references and shape.
+        got = []
+
+        def gemini(prompt, out, fmt, model, images=(), size="1K"):
+            got.append(dict(prompt=prompt, fmt=fmt, model=model, images=list(images), size=size))
+            open(out, "wb").write(b"\x89PNG gemini")
+        t.draw_gemini = gemini
+        face = os.path.join(self.s, "thumbnails", "face-v1.png")
+        open(face, "wb").write(b"\x89PNG")
+        d = t.t_make_image({"session": self.s, "prompt": "He waves through the window", "name": "window",
+                            "images": ["thumbnails/face-v1.png"], "format": "16:9"})
+        self.assertEqual(d["model"], "GPT Image 2.5 Sunburst")
+        r = t.t_make_image({"session": self.s, "from": d["file"]})
+        self.assertEqual((r["file"], r["model"], r["final"]), ("generated/window-v2.png", "Nano Banana 2.1", True))
+        g = got[-1]
+        self.assertEqual((g["model"], g["size"], g["fmt"]), ("gemini-nano-banana-2.1", "4K", "16:9"))
+        self.assertEqual([os.path.relpath(x, self.s) for x in g["images"]], ["generated/window-v1.png", "thumbnails/face-v1.png"])
+        self.assertTrue(g["prompt"].startswith(t.FINAL_ASK))
+        self.assertIn("He waves through the window", g["prompt"])
+        self.assertEqual(self.models("generated")["window-v2.png"], "Nano Banana 2.1")
+
+    def test_a_final_falls_back_to_sunburst_and_reads_the_shape_of_an_unknown_draft(self):
+        def broke(*a, **k):
+            raise ValueError("Gemini said 429: quota.")
+        t.draw_gemini = broke
+        import struct
+        png = b"\x89PNG\r\n\x1a\n" + struct.pack(">I", 13) + b"IHDR" + struct.pack(">II", 1536, 864) + b"\0" * 16
+        open(os.path.join(self.s, "thumbnails", "old-v3.png"), "wb").write(png)
+        r = t.t_make_image({"session": self.s, "from": "thumbnails/old-v3.png", "prompt": "Warmer light"})
+        self.assertEqual((r["file"], r["model"]), ("generated/old-v1.png", "GPT Image 2.5 Sunburst"))
+        self.assertTrue(self.args()[1].endswith("Warmer light"))
+        self.assertEqual(t.image_format(os.path.join(self.s, "thumbnails", "old-v3.png")), "16:9")
+        with self.assertRaises(ValueError):
+            t.t_make_image({"session": self.s, "from": "script.md"})
+
     def test_higgsfield_models_get_a_readable_name(self):
         self.assertEqual(t.hf_label({"args": ["generate", "create", "seedance_2_5", "--prompt", "x"]}), "Seedance 2.5")
         self.assertEqual(t.hf_label({"args": ["generate", "create", "kling3_0"]}), "Kling 3.0")

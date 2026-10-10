@@ -38,8 +38,6 @@ struct SessionMeta: Codable, Equatable {
     var favorite: String?  // favorite script draft: "main" or a variant slug
     var order: [Int]?  // take numbers in the order the user dragged them; nil = newest first
     var published: [Post]?  // where the video is live (Publish.swift); nil = not published
-    var music: SongPick?  // the song picked for the video (Sounds.swift)
-    var sfx: [EffectCue]?  // sound effects placed on a video at a second (Sounds.swift)
     var style: String?  // the style this video uses (StyleLibrary.swift); nil = its project's
     var archived: Bool?  // out of the way: in the closed group at the bottom (phone swipe, sidebar menu)
     var opens: [String: String]?  // first open: {"tab": "assets", "file": "edits/x.mp4"} (SessionView.read)
@@ -353,9 +351,6 @@ final class SessionDoc {
             s += "Published: " + posts.map { p in
                 "\(p.label) (\(Self.dayFormatter.string(from: p.at)))" + (p.url.map { " \($0)" } ?? "")
             }.joined(separator: ", ") + "\n"
-        }
-        if let m = meta.music {
-            s += "Music: `_library/audio/\(m.file)` from \(Self.clock(m.start)) at \(Int((m.volume * 100).rounded()))%\n"
         }
         s += "\n"
         s += "## Takes\n\n"

@@ -589,27 +589,3 @@ private struct StartPage: View {
 
     private func write() { flow.write(idea, app: app) }
 }
-
-/// PageMotion's arrive (blur, rise, fade), started when the page shows and slowed by the pace.
-/// `index` sets the order.
-struct ArriveOnShow: ViewModifier {
-    @Environment(\.accessibilityReduceMotion) var still
-    let index: Int
-    @State private var on = false
-
-    func body(content: Content) -> some View {
-        // One run loop first: the hidden state must draw before it animates (PageMotion.swift).
-        let shown = on || revealAtOnce
-        content
-            .animation(.smooth(duration: 0.6 * Onboarding.pace).delay(Double(index) * 0.06 * Onboarding.pace)) {
-                $0.opacity(shown ? 1 : 0)
-                    .blur(radius: shown || still ? 0 : 8)
-                    .offset(y: shown || still ? 0 : 12)
-            }
-            .onAppear { DispatchQueue.main.async { on = true } }
-    }
-}
-
-extension View {
-    func arrive(_ index: Int) -> some View { modifier(ArriveOnShow(index: index)) }
-}

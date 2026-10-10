@@ -1,0 +1,11 @@
+{
+  "name": "takes",
+  "owner": { "name": "Marvin Aziz", "url": "https://github.com/marvtub" },
+  "plugins": [
+    {
+      "name": "takes",
+      "source": "./",
+      "description": "Storyboard and edit talking-head videos with the Takes Mac app (gettakes.app)."
+    }
+  ]
+}

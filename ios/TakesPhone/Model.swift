@@ -464,6 +464,76 @@ final class Model: ObservableObject {
                                              json: ["id": comment, "resolved": resolved ? "true" : "false"]))
     }
 
+    // MARK: Actions that need the Mac now (2026-10-09)
+
+    /// A short line at the foot of the screen, as the Mac's toasts.
+    @Published var toast: String?
+    /// Every project on the Mac, empty ones too: where a session can move.
+    @Published var projects: [String] = []
+
+    /// The Mac's plugin screens for this phone (GET /api/plugins). Empty from the public copy.
+    @Published var plugins: [PluginInfo] = []
+
+    func loadPlugins() async {
+        guard let d = try? await act("/api/plugins", [:], nil, method: "GET"),
+              let p = try? API.decoder.decode([PluginInfo].self, from: d), p != plugins else { return }
+        plugins = p
+    }
+
+    func loadProjects() async {
+        if let p = try? await api.projects(), p != projects { projects = p }
+    }
+
+    /// Trash, rename, move, clean voice: these change folders, so they never wait offline.
+    /// Returns the Mac's answer, or throws with what to tell the user.
+    @discardableResult
+    func act(_ path: String, _ query: [String: String] = [:], _ json: [String: Any]? = nil, method: String = "POST") async throws -> Data {
+        guard connected else { throw APIError(status: 0, message: "The Mac is away. Try again when it answers.") }
+        var q = query
+        if let id = q["id"] { q["id"] = resolve(id) }
+        do {
+            return try await api.raw(api.request(path, q, method: method, json: json ?? (method == "POST" ? [:] : nil)))
+        } catch let e as APIError {
+            throw e
+        } catch {
+            connected = false
+            throw APIError(status: 0, message: "The Mac did not answer. Try again.")
+        }
+    }
+
+    /// The same, for a caller that shows the error itself: nil when it worked.
+    func tryAct(_ path: String, _ query: [String: String] = [:], _ json: [String: Any]? = nil) async -> String? {
+        do { try await act(path, query, json); return nil } catch { return error.localizedDescription }
+    }
+
+    /// A session got a new folder (renamed, moved): screens that hold the old id reach the new one.
+    func moved(_ old: String, to real: Session) {
+        let old = resolve(old)
+        renamed[old] = real.id
+        for (k, v) in renamed where v == old { renamed[k] = real.id }
+        UserDefaults.standard.set(renamed, forKey: "renamedSessions")
+        sessions.removeAll { $0.id == real.id }
+        if let i = sessions.firstIndex(where: { $0.id == old }) { sessions[i] = real } else { sessions.insert(real, at: 0) }
+        if chatID == old { chatID = real.id }
+    }
+
+    /// The session went to the Trash on the Mac.
+    func gone(_ id: String) {
+        let id = resolve(id)
+        sessions.removeAll { $0.id == id }
+        if chatID == id { chatID = nil }
+    }
+
+    func scriptDraft(_ id: String, _ body: [String: String]) async throws {
+        _ = try await outbox.send(Outbox.Op(.scriptDraft, session: id, path: "/api/script/draft", query: ["id": id], json: body))
+    }
+
+    func postDraft(_ id: String, platform: String, _ body: [String: String]) async throws {
+        var q = ["id": id]
+        if platform != "linkedin" { q["platform"] = platform }
+        _ = try await outbox.send(Outbox.Op(.postDraft, session: id, path: "/api/post/draft", query: q, json: body))
+    }
+
     // MARK: New videos
 
     /// A new, empty video. Without the Mac it starts on the phone: it shows in the list, and
@@ -550,11 +620,24 @@ final class Model: ObservableObject {
         for op in outbox.ops where op.session == id && op.refused == nil {
             switch op.kind {
             case .script: if let t = op.string("text") { d.script = t }
-            case .post: if let t = op.string("text") { d.post?.text = t }
+            case .post:
+                if let t = op.string("text") {
+                    if let p = op.query["platform"], let j = d.posts?.firstIndex(where: { $0.platform == p }) { d.posts?[j].text = t }
+                    else { d.post?.text = t }
+                }
             case .postDraft:
+                if op.string("action") == "save", let t = op.string("text") {
+                    if let p = op.query["platform"], let j = d.posts?.firstIndex(where: { $0.platform == p }),
+                       let i = d.posts?[j].variants?.firstIndex(where: { $0.slug == op.string("slug") }) {
+                        d.posts?[j].variants?[i].text = t
+                    } else if op.query["platform"] == nil, let i = d.post?.variants?.firstIndex(where: { $0.slug == op.string("slug") }) {
+                        d.post?.variants?[i].text = t
+                    }
+                }
+            case .scriptDraft:
                 if op.string("action") == "save", let t = op.string("text"),
-                   let i = d.post?.variants?.firstIndex(where: { $0.slug == op.string("slug") }) {
-                    d.post?.variants?[i].text = t
+                   let i = d.scriptVariants?.firstIndex(where: { $0.slug == op.string("slug") }) {
+                    d.scriptVariants?[i].text = t
                 }
             case .say: d.chat.messages.append(Self.waitingMessage(op))
             case .keeper:

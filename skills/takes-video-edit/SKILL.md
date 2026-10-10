@@ -18,7 +18,8 @@ and look at them with the Read tool before you call the edit done.
 
 ## Start from the Takes session
 
-Use the `takes` MCP, not file guessing.
+Use the `takes` MCP, not file guessing. **First `get_rules area=edit,thumbnail`**: what you learned from the user's
+comments on earlier videos. Follow every rule; a rule the user wrote (`by_user`) wins.
 
 1. `get_session` gives the script, every take (file path, duration, `keeper` star, the script
    variant and hook it was read with), every asset, the folder rules, `warnings` and
@@ -33,11 +34,11 @@ Use the `takes` MCP, not file guessing.
 5. **Style:** call `get_library session=<session>` before you design captions, a thumbnail or a
    title. Use its `tokens` (colours, type) and `template` if the user picked a style. No style:
    use plain, readable defaults (see below).
-6. **Music and sound effects:** `get_session` returns the user's picks as `music` (`path`,
-   `start`, `volume`) and `sfx` (cues with `at` and `volume` on a take or an edit). Use them as
-   given. A cue on a raw take is a moment of the take: map it through your cut list. No pick:
-   ask, or suggest options from `list_music`. Call `set_music` or `set_sfx` only when the user
-   agrees.
+6. **Music and sound effects:** mix them into a new version of the edit with ffmpeg, under the
+   voice. Takes plays only the file: it never adds a song or an effect while a video plays, so
+   what the user hears is what posts. Find files with `list_music`. The Sound page's Use button
+   sends you the file, and for an effect the video and second. No song asked for: suggest two
+   or three from `list_music` and ask first.
 7. **Find footage by meaning:** `search_media` searches the whole library on this Mac: clips by
    what they show ("walking outside", "close-up of a phone"), stills, and the words in transcripts
    ("where I talk about pricing"). Hits have `path` and, for video and speech, `at` in seconds.
@@ -149,8 +150,10 @@ several options when the user did not ask for one specific look.
 1. `set_post` with `media` set to the new edit, for each post of that shape: `platform:
    "vertical"` for 9:16, `platform: "youtube"` for a long 16:9 edit, and the LinkedIn or X post as
    usual. Only change `media`; keep the user's post text.
-2. `open_in_app` with the new file's path, once per finished version. It never takes focus.
-3. Never open files or apps on the user's screen yourself (no `open`, no QuickTime).
+2. `check_edit` on the new file: it measures every rule that has a check. Fix what fails and run
+   it again before the user sees the edit.
+3. `open_in_app` with the new file's path, once per finished version. It never takes focus.
+4. Never open files or apps on the user's screen yourself (no `open`, no QuickTime).
 
 ## Review comments
 
@@ -161,9 +164,14 @@ image area, or on selected script text. `get_session` shows `open_comments`.
    there, from `<stem>.words.json`) and a `frame` PNG with the area outlined. **Read every frame
    PNG.** The outline shows what "this" means.
 2. Fix all of them in one new version, at the path from `next_path`.
-3. One `reply_comment` call: `replies: [{id, text, resolve: true, fixed_in, fixed_at}]`.
+3. One `reply_comment` call: `replies: [{id, text, resolve: true, fixed_in, fixed_at, lesson}]`.
    `fixed_in` is the new file, `fixed_at` the second where the fix shows. One line of text each.
    If a comment is unclear, ask a question and leave it open.
+   **`lesson`** says what the comment taught: the id of a rule from `get_rules` that already
+   covers it (the same mistake again), `"new"` with `rule: {area, text}` when it holds for the
+   next videos too, or `"one-off"`. Keep rules few and short (10 per area): sharpen or merge a
+   rule with `set_rule` before you add one. When a rule comes back again and a number can test it
+   (loudness, peak, pauses, length), give it a `check` with `set_rule`.
 4. Script comments: fix with `update_session` or `update_variant`, then reply.
 
 ## When it is live

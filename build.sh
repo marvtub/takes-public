@@ -21,6 +21,12 @@ if [[ "${1:-}" == "install" && "${ANY_BRANCH:-}" != 1 ]]; then
     exit 1
   fi
 fi
+# The public copy must build and pass too: it leaves the Private folders out, and a release failed
+# when a test used private code (2026-10-08). test.sh checks it after a full run; with the tests
+# skipped, an install still checks it. Only the private repo has the check.
+if [[ "${1:-}" == "install" && "${SKIP_TESTS:-}" == 1 && -f scripts/public/check-public-build.sh ]]; then
+  scripts/public/check-public-build.sh || exit 1
+fi
 # Tests first, so a regression never reaches ~/Applications. SKIP_TESTS=1 skips them.
 [[ "${SKIP_TESTS:-}" == 1 ]] || ./test.sh --quiet
 swift build -c release

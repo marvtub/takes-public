@@ -4,6 +4,7 @@ import os
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import takes_mcp as t  # noqa: E402
@@ -73,6 +74,69 @@ class Storyboard(unittest.TestCase):
         t.sketch_run(self.s)
         self.assertEqual(t.read_storyboard(self.s)["shots"][0]["error"], "quota")
 
+    def test_no_image_key_draws_nothing_and_tells_the_chat(self):
+        os.environ.pop("TAKES_SKETCH_CMD")
+        none = lambda: None  # noqa: E731
+        with mock.patch.object(t, "gemini_key", none), mock.patch.object(t, "openai_key", none), \
+                mock.patch.object(t, "rep_key", none):
+            started = []
+            with mock.patch.object(t, "start_sketches", lambda s: started.append(s)):
+                r = t.t_set_storyboard({"session": self.s, "shots": [{"sketch": "A man."}, {"sketch": "A dog."}]})
+            self.assertEqual((r["drawing"], r["no_sketches"], started), (0, 2, []))
+            self.assertIn("image key", r["note"])
+            self.assertIn("'image'", r["note"])
+            self.assertTrue(t.read_storyboard(self.s)["nokey"])
+            t.sketch_run(self.s, retry=True)  # Draw with still no key: still nokey, nothing drawn
+            d = t.read_storyboard(self.s)
+            self.assertTrue(d["nokey"])
+            self.assertTrue(all("image" not in x for x in d["shots"]))
+        # A key now (the test stand-in): Draw clears nokey and draws them.
+        os.environ["TAKES_SKETCH_CMD"] = json.dumps([sys.executable, os.path.join(self.root, "fake.py")])
+        t.sketch_run(self.s, retry=True)
+        d = t.read_storyboard(self.s)
+        self.assertNotIn("nokey", d)
+        self.assertTrue(all(x.get("image") for x in d["shots"]))
+
+    def test_the_chat_can_bring_its_own_sketch(self):
+        mine = os.path.join(self.root, "mine.png")
+        open(mine, "wb").write(b"\x89PNG mine")
+        none = lambda: None  # noqa: E731
+        os.environ.pop("TAKES_SKETCH_CMD")
+        with mock.patch.object(t, "gemini_key", none), mock.patch.object(t, "openai_key", none), \
+                mock.patch.object(t, "rep_key", none):
+            r = t.t_set_storyboard({"session": self.s, "shots": [{"sketch": "A man.", "image": mine},
+                                                                   {"say": "Hi.", "image": mine}]})
+        self.assertEqual(r["drawing"], 0)
+        self.assertNotIn("no_sketches", r)
+        d = t.read_storyboard(self.s)
+        self.assertNotIn("nokey", d)
+        self.assertEqual(d["shots"][0]["image"], t.sketch_name("A man."))
+        for x in d["shots"]:
+            self.assertEqual(open(os.path.join(self.s, "storyboard", x["image"]), "rb").read(), b"\x89PNG mine")
+        models = json.load(open(os.path.join(self.s, "storyboard", ".models.json")))
+        self.assertEqual(models[d["shots"][0]["image"]], "Made in the chat")
+        # Later calls without 'image' keep the sketch it brought.
+        r = t.t_set_storyboard({"session": self.s, "shots": [{"sketch": "A man."}]})
+        self.assertEqual(r["drawing"], 0)
+        with self.assertRaises(ValueError):
+            t.t_set_storyboard({"session": self.s, "shots": [{"sketch": "A cat.", "image": "/nope.png"}]})
+
+    def test_replicate_is_the_last_sketch_source(self):
+        self.assertEqual(t.SKETCH_MODELS[-1], "replicate-nano-banana")
+        self.assertEqual(t.IMAGE_MODELS["replicate-nano-banana"][0], "replicate")
+        calls = []
+
+        def http(method, path, body=None, upload=None):
+            calls.append((method, path, body))
+            return {"status": "succeeded", "output": "https://x.test/out.png"}
+        out = os.path.join(self.root, "r.png")
+        with mock.patch.object(t, "rep_key", lambda: "k"), mock.patch.object(t, "rep_http", http), \
+                mock.patch.object(t, "rep_download", lambda url, dest: open(dest, "wb").write(b"png")):
+            label = t.draw_image("A man.", out, "9:16", models=("replicate-nano-banana",))
+        self.assertEqual(label, "Nano Banana · Replicate")
+        self.assertEqual(calls[0][1], "/models/google/nano-banana/predictions")
+        self.assertEqual(calls[0][2]["input"]["aspect_ratio"], "9:16")
+
     def test_a_shot_needs_a_sketch(self):
         with self.assertRaises(ValueError):
             t.t_set_storyboard({"session": self.s, "shots": [{"say": "Hi."}]})
@@ -97,6 +161,42 @@ class Storyboard(unittest.TestCase):
         self.assertEqual([("image" in x) for x in d], [False, False, True])
         with self.assertRaises(ValueError):
             t.t_set_storyboard({"session": self.s, "shots": [{"say": "Hi.", "video": "1 Desk/nope.mov"}]})
+
+    def test_variants_keep_their_order_and_survive_a_rewrite(self):
+        g = os.path.join(self.s, "generated")
+        os.makedirs(g)
+        for n in ("a.png", "b.png", "c.mp4"):
+            open(os.path.join(g, n), "wb").write(b"x")
+        shot = {"kind": "SCREEN", "say": "Comment on a frame.", "sketch": "A bubble.",
+                "variants": ["generated/a.png", "generated/b.png"], "video": "generated/b.png"}
+        t.t_set_storyboard({"session": self.s, "shots": [shot]})
+        x = t.read_storyboard(self.s)["shots"][0]
+        self.assertEqual(x["video"], "generated/b.png")
+        self.assertEqual(x["variants"], ["generated/a.png", "generated/b.png"])
+        self.assertEqual(t.storyboard_view(self.s)["list"][0]["variants"], x["variants"])
+        # A rewrite of the lines without variants keeps them.
+        t.t_set_storyboard({"session": self.s, "shots": [{"id": x["id"], "kind": "SCREEN", "say": "New line.",
+                                                           "sketch": "A bubble.", "video": "generated/a.png"}]})
+        x = t.read_storyboard(self.s)["shots"][0]
+        self.assertEqual((x["video"], x["variants"]), ("generated/a.png", ["generated/a.png", "generated/b.png"]))
+        # A video not in the list goes first; no video picks the first.
+        t.t_set_storyboard({"session": self.s, "shots": [{"id": x["id"], "sketch": "A bubble.",
+                                                           "variants": ["generated/a.png"], "video": "generated/c.mp4"}]})
+        x = t.read_storyboard(self.s)["shots"][0]
+        self.assertEqual(x["variants"], ["generated/c.mp4", "generated/a.png"])
+        t.t_set_storyboard({"session": self.s, "shots": [{"id": x["id"], "sketch": "A bubble.",
+                                                           "variants": ["generated/b.png", "generated/a.png"]}]})
+        self.assertEqual(t.read_storyboard(self.s)["shots"][0]["video"], "generated/b.png")
+
+    def test_a_new_clip_keeps_the_old_one_as_a_variant(self):
+        x = {"video": "generated/a.mp4"}
+        t.put_clip(x, "generated/b.mp4")
+        self.assertEqual(x, {"video": "generated/b.mp4", "variants": ["generated/a.mp4", "generated/b.mp4"]})
+        t.put_clip(x, "generated/c.mp4")
+        self.assertEqual(x["variants"], ["generated/a.mp4", "generated/b.mp4", "generated/c.mp4"])
+        y = {}
+        t.put_clip(y, "generated/a.mp4")
+        self.assertEqual(y, {"video": "generated/a.mp4"})
 
 
 if __name__ == "__main__":

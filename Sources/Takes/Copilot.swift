@@ -7,7 +7,7 @@ import SwiftUI
 //
 // <root>/_library/comments/
 //   suggestions/<id>.json   one per suggested comment (written by the takes MCP server and here)
-//   lessons.md              the rules in the user's words; every draft run reads it
+//   (lessons.md moved to _library/rules/comments.md on 2026-10-09, next to the other rules)
 //   runs/                   the output of each agent run, for when something goes wrong
 // The MCP server (mcp/takes_mcp.py, "comment copilot") writes the same format.
 
@@ -167,7 +167,18 @@ final class CopilotStore: ObservableObject {
 
     nonisolated static func folder(_ root: URL) -> URL { root.appending(path: "_library/comments") }
     nonisolated static func suggestions(_ root: URL) -> URL { folder(root).appending(path: "suggestions") }
-    nonisolated static func lessons(_ root: URL) -> URL { folder(root).appending(path: "lessons.md") }
+    /// The copilot's lessons sit with the other rules (2026-10-09; comments/lessons.md before). The
+    /// old file moves over the first time.
+    nonisolated static func lessons(_ root: URL) -> URL {
+        let url = Lessons.folder(root).appending(path: "comments.md")
+        let old = folder(root).appending(path: "lessons.md")
+        let fm = FileManager.default
+        if !fm.fileExists(atPath: url.path) {
+            try? fm.createDirectory(at: Lessons.folder(root), withIntermediateDirectories: true)
+            if fm.fileExists(atPath: old.path) { try? fm.moveItem(at: old, to: url) }
+        }
+        return url
+    }
 
     /// FSEvents names folders: a suggestion shows up as <root>/_library/comments/suggestions.
     static func matters(_ paths: [String], root: URL) -> Bool {
@@ -376,7 +387,7 @@ final class CopilotStore: ObservableObject {
 
     func saveLessons(_ text: String) {
         guard let root else { return }
-        try? FileManager.default.createDirectory(at: Self.folder(root), withIntermediateDirectories: true)
+        try? FileManager.default.createDirectory(at: Lessons.folder(root), withIntermediateDirectories: true)
         try? text.write(to: Self.lessons(root), atomically: true, encoding: .utf8)
     }
 }
@@ -427,10 +438,7 @@ final class CopilotRunner: ObservableObject {
         p.executableURL = URL(fileURLWithPath: claude)
         p.arguments = Self.arguments(system: system)
         p.currentDirectoryURL = ClaudeChat.folder
-        var env = ProcessInfo.processInfo.environment
-        for k in env.keys where k.hasPrefix("CLAUDECODE") || k.hasPrefix("CLAUDE_CODE_") { env[k] = nil }
-        env["PATH"] = ClaudeChat.shellPath
-        p.environment = env
+        p.environment = ClaudeChat.environment()
         let input = Pipe(), output = Pipe()
         p.standardInput = input
         p.standardOutput = output
@@ -500,7 +508,7 @@ final class CopilotRunner: ObservableObject {
         The user gave feedback on LinkedIn comment drafts in his Takes app. Call get_comment_context. \
         For each item in waiting_for_redraft, read the newest draft's variants and feedback note and \
         write 3 new variants that follow it (if the draft has an edit, that is the user's own text: \
-        keep it as variant 1, changed only as the note asks), each a different shape, keeping to lessons.md and the \
+        keep it as variant 1, changed only as the note asks), each a different shape, keeping to his lessons and the \
         style guide it names. Save each with redraft_comment. Do not use the browser. End with one short line.
         """
 }
@@ -569,8 +577,8 @@ enum CopilotAsk {
         The user is talking to you from the Comments board inside his Takes app: his LinkedIn \
         comment copilot. It shows comment drafts from ~/Movies/Takes/_library/comments/suggestions/ \
         and redraws by itself. Use the takes tools get_comment_context, list_comment_suggestions, \
-        add_comment_suggestion, redraft_comment and set_comment_posted; lessons.md in that folder \
-        holds his rules. He reads your replies in a narrow panel: keep them short, no tables, no \
+        add_comment_suggestion, redraft_comment and set_comment_posted; his lessons are \
+        _library/rules/comments.md. He reads your replies in a narrow panel: keep them short, no tables, no \
         headings. He watches while you work: before each step write one short line on what you do \
         next (for example "Reading Justin Welsh's recent posts"). A message that starts with "I \
         interrupted you" steers the task you were on: follow it, then go on with that task.
@@ -580,7 +588,7 @@ enum CopilotAsk {
         draft ("make it shorter", "I like the second one"): write 3 new variants with \
         redraft_comment. About the drafts in general ("all of these", "every draft", his voice, a \
         habit he sees across them): redraft every draft in review with redraft_comment, and if it \
-        is a lasting rule, add it to lessons.md. A question: answer it. Say in one line which you did.
+        is a lasting rule, add it to his lessons (rules/comments.md). A question: answer it. Say in one line which you did.
 
         \(ClaudeChat.browserRules)
 
@@ -600,7 +608,7 @@ enum CopilotAsk {
         how well the author fits, then fresh posts with few comments. Draft only the best ones, up \
         to the number he asked for: a weak post is not worth a draft, even if that means fewer.
         5. For each post you draft: one angle line (what the user can add), then 3 variants of the \
-        comment, following lessons.md and the style guide. Each variant a different shape (a short \
+        comment, following his lessons and the style guide. Each variant a different shape (a short \
         story from his work, a pointed question, a counterpoint, a concrete tip) and length; \
         variant_picks shows which shapes he picks. Save it with add_comment_suggestion: the post's \
         own URL, post_text exactly as the scout returned it (its empty lines too), author_photo from the scout, and source "feed", "list", "search" or "commenters" (the scout that found it). If the slop gate refuses \

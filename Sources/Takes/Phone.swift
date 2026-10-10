@@ -36,6 +36,15 @@ struct PhoneSession: Codable, Hashable {
     /// How far the video got, for the phone's cards: idea, script, board, recorded, edit, posted.
     var stage: String?
     var shots: Int?         // storyboard shots, when there is a storyboard
+    /// Its posts that are ready, scheduled or posted, for the list's dots and times (2026-10-09).
+    var plan: [PhonePlanned]? = nil
+}
+
+/// One post in the posting plan (PostQueue), as the Mac's sidebar shows it on the session's row.
+struct PhonePlanned: Codable, Hashable {
+    var platform: String
+    var status: String
+    var at: Date?
 }
 
 struct PhoneFile: Codable, Hashable {
@@ -50,6 +59,11 @@ struct PhoneFile: Codable, Hashable {
     var duration: Double?
     var shot: String?       // a take filed under a storyboard shot
     var model: String?      // the AI model that made it (generated/), as the Mac's Assets tab shows
+    /// A take's best cut (2026-10-09).
+    var cut: PhoneCut? = nil
+    /// An image: the chat box draft of Change Image…, and the ask of Make Final when it is a GPT Image draft.
+    var change: String? = nil
+    var final: String? = nil
 }
 
 /// The storyboard for the phone's Board tab: the shots in order, with their sketch, takes and comments.
@@ -66,6 +80,12 @@ struct PhoneShot: Codable {
     var comments: [Comment]
     /// Width over height of the frame: the storyboard's format, or the clip's own shape (2026-10-05).
     var ratio: Double?
+    /// Every clip or still tried (A B C…), the one in the video, and Make Final's ask for each
+    /// GPT Image draft among them (2026-10-09). Paths are absolute.
+    var variants: [String]? = nil
+    var video: String? = nil
+    var finals: [String: String]? = nil
+    var generating: Bool? = nil
 }
 
 struct PhonePost: Codable, Hashable {
@@ -78,6 +98,8 @@ struct PhonePost: Codable, Hashable {
     var variants: [PhonePostVariant] = []
     /// Claude's opening options (posts/hooks.json).
     var hooks: [Hook] = []
+    /// Saved versions in posts/history (2026-10-09).
+    var history: Int? = nil
 }
 
 /// The post for one more platform (X, YouTube, Vertical), next to the LinkedIn post (2026-10-05).
@@ -91,6 +113,16 @@ struct PhonePlatformPost: Codable, Hashable {
     var status: String
     var url: String?
     var limit: Int
+    /// Other versions, opening options and saved versions of this post (2026-10-09).
+    var variants: [PhonePostVariant]? = nil
+    var hooks: [Hook]? = nil
+    var history: Int? = nil
+    /// When it goes out, in its own zone, and whether the platform still has an older time or text.
+    var at: Date? = nil
+    var tz: String? = nil
+    var needsUpdate: Bool? = nil
+    /// Vertical: TikTok, Reels, Shorts (VerticalPlace raw values) it goes to.
+    var places: [String]? = nil
 }
 
 /// A post on a side a plugin adds to the Post tab (2026-10-07), for example a launch post.
@@ -135,6 +167,15 @@ struct PhoneChat: Codable {
     var running: Bool
     var messages: [ChatMessage]
     var context: ChatContext?
+    /// Messages waiting for the run to end, as the user wrote them (2026-10-09).
+    var queued: [String] = []
+
+    @MainActor init(_ c: ClaudeChat?) {
+        running = c?.running ?? false
+        messages = c?.messages ?? []
+        context = c?.context
+        queued = (c?.queued ?? []).map(CopilotAsk.shown)
+    }
 }
 
 struct PhoneSessionDetail: Codable {
@@ -153,6 +194,14 @@ struct PhoneSessionDetail: Codable {
     var sides: [PhoneSidePost]?
     /// The style this video is edited in (PhoneStyles.swift).
     var style: PhoneSessionStyle?
+    /// The Script tab's draft bar (2026-10-09): the variants, the favorite draft, how many saved
+    /// versions there are, and the script's hooks.
+    var scriptVariants: [PhonePostVariant]? = nil
+    var scriptFavorite: String? = nil
+    var scriptHistory: Int? = nil
+    var scriptHooks: [Hook]? = nil
+    /// Where it is marked published (Platforms.all names; "" for somewhere else), for the More panel.
+    var publishedOn: [String]? = nil
 }
 
 /// One published post on the phone's performance tab: its latest numbers.
@@ -498,9 +547,12 @@ final class PhoneServer: PhoneHandler, @unchecked Sendable {
             // {"action": "promote", "slug"}: the variant becomes the post that goes out.
             // {"action": "hook", "hook": id, "draft": "main" | slug}: the hook opens that draft.
             // {"action": "save", "slug", "text", "base"}: an edit of a variant.
+            // ?platform= (2026-10-09): X, YouTube and vertical have variants and hooks too. Also
+            // {"action": "new" | "delete" | "rename" | "restore", "slug", "name", "path"}.
             guard let s = session(req.query["id"]) else { return .error(404, "No such session") }
             guard let b = try? JSONDecoder().decode([String: String].self, from: req.body) else { return .error(400, "No action") }
-            let failed = await MainActor.run { Self.postDraft(b, in: s) }
+            let p = req.query["platform"].flatMap(PostPlatform.init(rawValue:)) ?? .linkedin
+            let failed = await MainActor.run { Self.postStoreDraft(b, in: s, p) }
             if let failed { return .error(failed.hasPrefix("It changed") ? 409 : 400, failed) }
             return .encode(["ok": true])
         case ("POST", "/api/side"):
@@ -543,20 +595,33 @@ final class PhoneServer: PhoneHandler, @unchecked Sendable {
             guard let jpg = await Self.thumb(f, width: Int(req.query["w"] ?? "") ?? 480) else { return .error(404, "No picture") }
             return .file(jpg, type: "image/jpeg")
         default:
-            return .error(404, "No such call")
+            return await actions(req) ?? .error(404, "No such call")
         }
     }
 
     /// The author of the phone's LinkedIn previews. The same defaults as the post tab's @AppStorage.
     /// Each platform's post that exists, with its cover: the phone's Post tab switches between them.
-    static func platformPosts(_ s: URL) -> [PhonePlatformPost]? {
+    @MainActor static func platformPosts(_ s: URL) -> [PhonePlatformPost]? {
         let all = Cover.platforms().compactMap { p -> PhonePlatformPost? in
             guard let c = PostFile.read(s, p) else { return nil }
             return PhonePlatformPost(platform: p.rawValue, name: p.name, text: c.text, title: c.title,
                                      media: PostFile.media(c, in: s, p)?.path, cover: Cover.current(s, p)?.path,
-                                     status: c.status.rawValue, url: c.meta["url"], limit: p.limit)
+                                     status: c.status.rawValue, url: c.meta["url"], limit: p.limit,
+                                     variants: PostFile.variants(s, p).map { PhonePostVariant(slug: $0.slug, name: $0.name, author: $0.author, note: $0.note, text: $0.text) },
+                                     hooks: HookStore.read(file: PostFile.hooksURL(s, p)).hooks,
+                                     history: PostFile.versionCount(s, p),
+                                     at: c.at, tz: c.at == nil ? nil : c.tz.identifier, needsUpdate: c.needsUpdate,
+                                     places: p == .vertical ? c.places.map(\.rawValue) : nil)
         }
-        return all.isEmpty ? nil : all
+        // The blog article (Features.blog): the phone shows it as the blog does (2026-10-09).
+        var withArticle = all
+        if Features.blog, let c = PostFile.read(s, .article) {
+            withArticle.append(PhonePlatformPost(platform: "article", name: PostPlatform.article.name, text: c.text, title: c.title,
+                                                 media: nil, cover: nil, status: c.status.rawValue, url: c.meta["url"],
+                                                 limit: PostPlatform.article.limit, history: PostFile.versionCount(s, .article),
+                                                 at: c.at, tz: c.at == nil ? nil : c.tz.identifier, needsUpdate: c.needsUpdate))
+        }
+        return withArticle.isEmpty ? nil : withArticle
     }
 
     /// Width over height of a clip's picture, turned the way it plays. Nil if it has no video.
@@ -602,56 +667,10 @@ final class PhoneServer: PhoneHandler, @unchecked Sendable {
         return true
     }
 
-    /// Variants and hooks of the LinkedIn post, as the Mac's post tab does them. Nil when done,
-    /// or what went wrong.
+    /// Variants and hooks of the LinkedIn post, through the Mac post tab's own PostStore. Nil when
+    /// done, or what went wrong.
     @MainActor static func postDraft(_ b: [String: String], in s: URL) -> String? {
-        let variants = PostFile.variants(s)
-        switch b["action"] {
-        case "promote":
-            guard let v = variants.first(where: { $0.slug == b["slug"] }) else { return "No such variant" }
-            var c = PostFile.read(s) ?? PostFile.Content(text: "")
-            PostFile.snapshot(s, draft: "main", text: c.text, note: "Before using “\(v.name)” as main")
-            c.text = v.text
-            PostFile.write(c, to: s)
-            PostFile.snapshot(s, draft: "main", text: v.text, author: v.author.isEmpty ? "user" : v.author,
-                              note: "Used “\(v.name)” as main, on the phone")
-            PostFile.snapshot(s, draft: v.slug, text: v.text, note: "Before deleting the variant")
-            try? FileManager.default.trashItem(at: PostFile.variantURL(v.slug, in: s), resultingItemURL: nil)
-            return nil
-        case "hook":
-            let u = PostFile.hooksURL(s)
-            var f = HookStore.read(file: u)
-            guard let h = f.hooks.first(where: { $0.id == b["hook"] }) else { return "No such hook" }
-            let known = f.hooks.map(\.text)
-            let draft = b["draft"] ?? "main"
-            if draft == "main" {
-                var c = PostFile.read(s) ?? PostFile.Content(text: "")
-                PostFile.snapshot(s, draft: "main", text: c.text, note: "Before a new hook")
-                c.text = HookStore.apply(h.text, to: c.text, known: known)
-                PostFile.write(c, to: s)
-            } else {
-                guard var v = variants.first(where: { $0.slug == draft }) else { return "No such variant" }
-                PostFile.snapshot(s, draft: v.slug, text: v.text, note: "Before a new hook")
-                v.text = HookStore.apply(h.text, to: v.text, known: known)
-                PostFile.writeVariant(v, in: s)
-            }
-            f.chosen = h.id
-            if let data = try? JSONEncoder().encode(f) { try? data.write(to: u) }
-            return nil
-        case "save":
-            guard var v = variants.first(where: { $0.slug == b["slug"] }), let text = b["text"] else { return "No such variant" }
-            if let base = b["base"], v.text != base, v.text != text {
-                return "It changed on the Mac while you edited. Pull to reload, then edit again."
-            }
-            guard v.text != text else { return nil }
-            PostFile.snapshot(s, draft: v.slug, text: v.text, note: "Before the phone edit")
-            v.text = text
-            PostFile.writeVariant(v, in: s)
-            PostFile.snapshot(s, draft: v.slug, text: text, note: "Edited on the phone")
-            return nil
-        default:
-            return "Unknown action"
-        }
+        postStoreDraft(b, in: s, .linkedin)
     }
 
     /// The script, its variants, and the posts. Not media: those need a time and a frame.
@@ -766,7 +785,25 @@ final class PhoneServer: PhoneHandler, @unchecked Sendable {
                             running: state?.0 ?? false, unread: state?.1 ?? false, notice: state?.2 ?? false,
                             published: !(meta.published ?? []).isEmpty, archived: meta.archived == true,
                             preview: Self.preview(s, meta: meta)?.path,
-                            stage: Self.stage(s, meta: meta, shots: shots), shots: shots)
+                            stage: Self.stage(s, meta: meta, shots: shots), shots: shots,
+                            plan: Self.plan(s))
+    }
+
+    /// The session's posts that are not drafts: what the Mac's sidebar reads from PostQueue.
+    static func plan(_ s: URL) -> [PhonePlanned]? {
+        let all = PostPlatform.allCases.compactMap { p -> PhonePlanned? in
+            guard let c = PostFile.read(s, p), c.status != .draft else { return nil }
+            return PhonePlanned(platform: p.rawValue, status: c.status.rawValue, at: c.at)
+        }
+        return all.isEmpty ? nil : all
+    }
+
+    /// The phone's row for one session, after a rename or a move gave it a new folder.
+    @MainActor func phoneSession(_ s: URL) -> PhoneSession {
+        let root = libraryRoot
+        let meta = Store.readMeta(s) ?? SessionMeta(title: s.lastPathComponent, createdAt: Date())
+        let c = appModel?.chats.existing(s)
+        return summary(s, meta: meta, root: root, state: c.map { ($0.running, $0.unread, false) })
     }
 
     /// The furthest step the session reached: posted, an edit, a take, a storyboard, a script.
@@ -803,15 +840,16 @@ final class PhoneServer: PhoneHandler, @unchecked Sendable {
             c?.heal(force: true)
             let notice = self.app?.notices.contains { $0.session == s } ?? false
             return ((c?.running ?? false, c?.unread ?? false, notice),
-                    PhoneChat(running: c?.running ?? false, messages: c?.messages ?? [], context: c?.context))
+                    PhoneChat(c))
         }
         var files: [PhoneFile] = []
+        let cuts = Self.cuts(s)
         for t in meta.takes {
             let u = s.appending(path: t.file)
             let a = Self.attributes(u)
             files.append(PhoneFile(path: u.path, name: t.name ?? "Take \(t.number)", folder: "takes", kind: "video",
                                    size: a.size, modified: a.modified ?? t.startedAt, take: t.number,
-                                   keeper: t.keeper, duration: t.duration, shot: t.shot))
+                                   keeper: t.keeper, duration: t.duration, shot: t.shot, cut: cuts[t.number]))
         }
         let fm = FileManager.default
         // Every folder the Mac's Assets tab shows (generated/ and others too, 2026-10-07), not a fixed list.
@@ -820,9 +858,13 @@ final class PhoneServer: PhoneHandler, @unchecked Sendable {
             for u in (try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil, options: .skipsHiddenFiles)) ?? []
             where !u.hasDirectoryPath && !u.lastPathComponent.hasSuffix(".json") {
                 let a = Self.attributes(u)
+                let kind = Self.kind(u)
+                let rel = "\(folder)/\(u.lastPathComponent)"
                 files.append(PhoneFile(path: u.standardizedFileURL.path, name: u.lastPathComponent, folder: folder,
-                                       kind: Self.kind(u), size: a.size, modified: a.modified ?? Date(),
-                                       model: folder == "generated" ? MadeWith.label(for: u) : nil))
+                                       kind: kind, size: a.size, modified: a.modified ?? Date(),
+                                       model: folder == "generated" ? MadeWith.label(for: u) : nil,
+                                       change: kind == "image" ? Higgsfield.imageDraft(rel) : nil,
+                                       final: kind == "image" && Higgsfield.isDraft(u) ? Higgsfield.finalAsk(rel) : nil))
             }
         }
         files.sort { $0.modified > $1.modified }
@@ -838,7 +880,14 @@ final class PhoneServer: PhoneHandler, @unchecked Sendable {
         if var p = post {
             p.variants = drafts.0
             p.hooks = drafts.1
+            p.history = await MainActor.run { PostFile.versionCount(s) }
             post = p
+        }
+        let platforms = await MainActor.run { Self.platformPosts(s) }
+        let script = await MainActor.run { () -> ([PhonePostVariant], String?, Int, [Hook]) in
+            let d = self.doc(s)
+            return ((d?.variants ?? []).map { PhonePostVariant(slug: $0.slug, name: $0.name, author: $0.author, note: $0.note, text: $0.text) },
+                    d?.meta.favorite, d?.historyCount ?? 0, HookStore.read(s).hooks)
         }
         let sides = await MainActor.run { Plugins.postSides.flatMap { $0.phone?(s) ?? [] } }
         let allComments = CommentStore.read(s).comments
@@ -854,7 +903,11 @@ final class PhoneServer: PhoneHandler, @unchecked Sendable {
                 shots.append(PhoneShot(id: x.id, section: x.section.rawValue, kind: x.kind, say: x.say, how: x.how, seconds: x.length,
                           start: start, image: x.video.map { s.appending(path: $0).path } ?? x.image.map { Storyboard.folder(s).appending(path: $0).path },
                           error: x.error,
-                          comments: allComments.filter { $0.shot == x.id }, ratio: ratio))
+                          comments: allComments.filter { $0.shot == x.id }, ratio: ratio,
+                          variants: x.variants.isEmpty ? nil : Self.shotVariants(x, in: s).all,
+                          video: x.video.map { s.appending(path: $0).path },
+                          finals: Self.shotVariants(x, in: s).finals.nilIfEmpty,
+                          generating: x.generating == nil ? nil : true))
             }
             board = shots
         }
@@ -862,15 +915,18 @@ final class PhoneServer: PhoneHandler, @unchecked Sendable {
                                   script: (try? String(contentsOf: s.appending(path: "script.md"), encoding: .utf8)) ?? "",
                                   files: files, post: post, chat: chat, openComments: open, profile: profile,
                                   storyboard: board?.isEmpty == false ? board : nil,
-                                  posts: Self.platformPosts(s), sides: sides.isEmpty ? nil : sides,
-                                  style: Self.sessionStyle(s, meta: meta, root: root))
+                                  posts: platforms, sides: sides.isEmpty ? nil : sides,
+                                  style: Self.sessionStyle(s, meta: meta, root: root),
+                                  scriptVariants: script.0, scriptFavorite: script.1, scriptHistory: script.2,
+                                  scriptHooks: script.3.isEmpty ? nil : script.3,
+                                  publishedOn: (meta.published ?? []).map { $0.platform ?? "" })
     }
 
     private func chat(_ s: URL) async -> PhoneChat {
         await MainActor.run {
             let c = self.app?.chats.chat(s)
             c?.heal(force: true)
-            return PhoneChat(running: c?.running ?? false, messages: c?.messages ?? [], context: c?.context)
+            return PhoneChat(c)
         }
     }
 
@@ -908,8 +964,9 @@ final class PhoneServer: PhoneHandler, @unchecked Sendable {
         let title = meta?.title ?? s.lastPathComponent
         let ok: Bool = await MainActor.run {
             guard let c = self.app?.chats.chat(s) else { return false }
+            // While Takes works the message waits in the queue, as on the Mac (2026-10-09: the phone
+            // could not queue; the Mac said "still replying").
             c.heal(force: true)
-            if c.running { return false }
             // A new session from the phone's + starts empty and untitled: the first message is the idea.
             let first = c.messages.isEmpty && meta?.named == false
             let comments = !tokens || mentions
@@ -918,7 +975,7 @@ final class PhoneServer: PhoneHandler, @unchecked Sendable {
             c.send(said, title: title, onStage: nil, origin: origin)
             return true
         }
-        return ok ? .encode(["ok": true]) : .error(409, "Takes is still replying. Wait, or stop it.")
+        return ok ? .encode(["ok": true]) : .error(404, "No chat for this session")
     }
 
     /// For the style routes (PhoneStyles.swift).
@@ -1030,7 +1087,7 @@ final class PhoneServer: PhoneHandler, @unchecked Sendable {
                 let c = self.boardChat(lane)
                 // The phone asks: a chat that says it runs with no live process settles now.
                 c?.heal(force: true)
-                return PhoneChat(running: c?.running ?? false, messages: c?.messages ?? [], context: c?.context)
+                return PhoneChat(c)
             })
         case ("POST", "/api/chat"):
             let b = (try? JSONDecoder().decode([String: String].self, from: req.body)) ?? [:]
@@ -1421,4 +1478,8 @@ struct PhoneComment: Decodable {
     var end: Double?
     var rect: [Double]?
     var shot: String?
+}
+
+extension Dictionary {
+    var nilIfEmpty: Self? { isEmpty ? nil : self }
 }

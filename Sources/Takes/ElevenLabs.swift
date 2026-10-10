@@ -33,14 +33,16 @@ final class ElevenLabs {
     static let keys = URL(string: "https://elevenlabs.io/app/settings/api-keys")!
     static let clone = URL(string: "https://elevenlabs.io/app/voice-lab")!
 
-    /// Runs one MCP tool off the main thread. `input` goes on stdin (the key).
-    nonisolated static func call(_ tool: String, _ args: [String: Any] = [:], input: String? = nil) async -> [String: Any] {
+    /// Runs one MCP tool off the main thread. `input` goes on stdin (the key). `flag` picks the
+    /// plugin's entry in takes_mcp.py (Replicate uses this too).
+    nonisolated static func call(_ tool: String, _ args: [String: Any] = [:], input: String? = nil,
+                                 flag: String = "--eleven") async -> [String: Any] {
         guard let script = Bundle.main.url(forResource: "takes_mcp", withExtension: "py") else { return ["error": "The takes server is missing."] }
         let json = String(decoding: (try? JSONSerialization.data(withJSONObject: args)) ?? Data("{}".utf8), as: UTF8.self)
         return await Task.detached(priority: .userInitiated) {
             let p = Process()
             p.executableURL = URL(filePath: "/usr/bin/python3")
-            p.arguments = [script.path, "--eleven", tool, json]
+            p.arguments = [script.path, flag, tool, json]
             var env = ProcessInfo.processInfo.environment
             env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:\(Setup.localBin):" + (env["PATH"] ?? "/usr/bin:/bin")
             if let root = UserDefaults.standard.string(forKey: "root") { env["TAKES_ROOT"] = root }

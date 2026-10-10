@@ -46,21 +46,13 @@ class Music(unittest.TestCase):
         self.assertEqual([x["group"] for x in t.t_list_music({"group": "sfx"})["sounds"]], ["SFX"])
         self.assertEqual(len(t.t_list_music({"query": "chasing"})["sounds"]), 1)
 
-    def test_pick_a_song_for_a_session(self):
-        t.t_list_music({})
-        t.t_set_music({"session": self.s, "file": "Music/26428_Chasing the Truth.mp3", "start": 12.5})
-        with open(os.path.join(self.s, "session.json")) as f:
-            self.assertEqual(json.load(f)["music"],
-                             {"file": "Music/26428_Chasing the Truth.mp3", "start": 12.5, "volume": 0.35})
-        m = t.t_get_session({"session": self.s})["music"]
-        self.assertTrue(m["exists"])
-        self.assertEqual(m["title"], "Chasing the Truth")
-        with open(os.path.join(self.s, "SESSION.md")) as f:
-            self.assertIn("Music: `_library/audio/Music/26428_Chasing the Truth.mp3` from 0:12", f.read())
-        with self.assertRaises(ValueError):
-            t.t_set_music({"session": self.s, "file": "Music/nope.mp3"})
-        t.t_set_music({"session": self.s})
-        self.assertIsNone(t.t_get_session({"session": self.s})["music"])
+    def test_no_song_picks(self):
+        """The app never plays a song over the video: no set_music, and get_session shows no pick."""
+        names = [x[0] for x in t.TOOLS]
+        self.assertNotIn("set_music", names)
+        self.assertNotIn("set_sfx", names)
+        self.assertNotIn("music", t.t_get_session({"session": self.s}))
+        self.assertNotIn("sfx", t.t_get_session({"session": self.s}))
 
 
 if __name__ == "__main__":

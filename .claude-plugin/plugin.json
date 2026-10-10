@@ -1,0 +1,9 @@
+{
+  "name": "takes",
+  "description": "Skills for the Takes Mac app (gettakes.app): storyboard a talking-head video, then edit the take you keep. Takes adds its MCP server to Claude Code on first launch.",
+  "author": { "name": "Marvin Aziz", "url": "https://github.com/marvtub" },
+  "homepage": "https://gettakes.app",
+  "repository": "https://github.com/marvtub/takes-public",
+  "license": "MIT",
+  "keywords": ["video", "teleprompter", "talking-head", "video-editing", "linkedin", "macos"]
+}

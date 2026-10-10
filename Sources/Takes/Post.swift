@@ -994,7 +994,7 @@ struct PlatformPostPane: View {
         } else if let id = focused, let i = postComments.firstIndex(where: { $0.id == id }) {
             let c = postComments[i]
             CommentCard(comment: c, number: i + 1,
-                        onReply: { comments.reply(id, $0) },
+                        onEdit: { comments.setText(id, $0) },
                         onResolve: { comments.setResolved(id, c.open) },
                         onDelete: { comments.delete(id); focused = nil },
                         onClose: { withAnimation(Theme.motion) { focused = nil } },

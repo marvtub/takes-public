@@ -293,6 +293,8 @@ final class ClaudeChat {
     private(set) var file: URL
     private(set) var archive: URL
     private(set) var messages: [ChatMessage] = [] { didSet { settle() } }
+    /// Counts the messages sent: the panel scrolls to the bottom on each one.
+    private(set) var sent = 0
     private(set) var running = false { didSet { settle() } }
     /// What the mascot does, and whether there is a conversation. Stored, and set only when they
     /// change: a view that shows just these does not redraw for each streamed word (2026-10-02).
@@ -429,6 +431,21 @@ final class ClaudeChat {
         """
     /// "bypassPermissions" (full access, like his terminal) or "acceptEdits".
     static var access: String { UserDefaults.standard.string(forKey: "claudeAccess") ?? "bypassPermissions" }
+
+    /// Takes chats compact their conversation at this share of the context window, not near the end
+    /// (2026-10-09: long chats grew slow and costly). Only Takes' own Claude processes get it: his
+    /// terminal and other apps keep their own setting.
+    nonisolated static let compactAt = 30
+
+    /// The environment of a chat's Claude process: no variables from a Claude that started Takes,
+    /// the login shell's PATH, and the early compaction.
+    nonisolated static func environment() -> [String: String] {
+        var env = ProcessInfo.processInfo.environment
+        for k in env.keys where k.hasPrefix("CLAUDECODE") || k.hasPrefix("CLAUDE_CODE_") { env[k] = nil }
+        env["PATH"] = shellPath
+        env["CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"] = String(compactAt)
+        return env
+    }
 
     /// The login shell's PATH, so Claude finds ffmpeg, python and the rest. Read once.
     nonisolated static let shellPath: String = {
@@ -570,9 +587,11 @@ final class ClaudeChat {
 
     /// `now`: stop the run and go on with this message (steer). Otherwise it waits its turn.
     /// `origin`: where on his phone the user sent it from (Phone.origin); nil from the Mac.
-    func send(_ text: String, title: String, onStage: URL?, now: Bool = false, origin: String? = nil) {
+    /// `shown`: what the panel shows for a button's ask; Claude gets `text`, the instructions.
+    func send(_ text: String, title: String, onStage: URL?, now: Bool = false, origin: String? = nil, shown: String? = nil) {
         let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
+        sent += 1
         // The newest message decides: a steer or queued message from the Mac clears the phone's note.
         self.origin = origin
         if text != Self.goOnDropped { cancelResume(); resumes = 0 }
@@ -599,7 +618,7 @@ final class ClaudeChat {
             append(ChatMessage(role: .error, text: "Nothing to compact yet."))
             return
         }
-        append(ChatMessage(role: .user, text: text))
+        append(ChatMessage(role: .user, text: shown ?? text))
         run(text, claude: claude, title: title, onStage: onStage, recap: nil)
     }
 
@@ -639,7 +658,9 @@ final class ClaudeChat {
             posts/linkedin.md has a cover: field, start every new edit with that image for \
             0.1 s (see the takes-video-edit skill) and set cover_video to the new file. When he \
             brainstorms a video idea or asks for a storyboard, use the takes-storyboard skill: script \
-            first, then set_storyboard (it shows on the Storyboard tab).
+            first, then set_storyboard (it shows on the Storyboard tab). Before you edit, write or \
+            design, read get_rules for that step (what you learned from his comments) and follow them; run \
+            check_edit on a new edit before you show it; resolve each comment with a lesson.
             """
             if Features.blog {
                 context += " A blog post or article is posts/article.md (set_post platform=article: markdown with " +
@@ -697,10 +718,7 @@ final class ClaudeChat {
                        "--permission-mode", Self.access, "--append-system-prompt", context]
             + (log.started ? ["--resume", log.conversation] : ["--session-id", log.conversation])
         p.currentDirectoryURL = Self.folder
-        var env = ProcessInfo.processInfo.environment
-        for k in env.keys where k.hasPrefix("CLAUDECODE") || k.hasPrefix("CLAUDE_CODE_") { env[k] = nil }
-        env["PATH"] = Self.shellPath
-        p.environment = env
+        p.environment = Self.environment()
         let input = Pipe(), output = Pipe(), errors = Pipe()
         p.standardInput = input
         p.standardOutput = output
@@ -1110,6 +1128,10 @@ final class ChatHub {
     var docked = UserDefaults.standard.object(forKey: "chatDocked") as? Bool ?? true {
         didSet { UserDefaults.standard.set(docked, forKey: "chatDocked") }
     }
+    /// Record keeps the script in its right column. The chat button there, or a button that asks
+    /// from Record (React to a video), puts the chat in that column instead (2026-10-09). Off
+    /// when it closes there or you leave Record.
+    var onRecord = false
     private var chats: [URL: ClaudeChat] = [:]
     /// The Performance board's chat. Not tied to a session.
     let board = ClaudeChat(session: nil)
@@ -1220,6 +1242,8 @@ struct ChatSlot<Content: View>: View {
     var replace = false
     var active = true
     @ViewBuilder var content: Content
+    /// The docked chat's share of the window: drag its left edge (2026-10-09). Kept for every slot.
+    @AppStorage("chat.dockRatio") private var ratio = 0.42
 
     init(hub: ChatHub, target: ChatTarget?, replace: Bool = false, active: Bool = true,
          @ViewBuilder content: () -> Content) {
@@ -1244,7 +1268,7 @@ struct ChatSlot<Content: View>: View {
         let docked = hub.open && hub.docked && target != nil
         let show = docked && active
         return GeometryReader { g in
-            let width = max(360, g.size.width * 0.42)
+            let width = min(max(360, g.size.width * ratio), max(360, g.size.width - 420))
             // The content takes its new width at once; only the chat slides. Squeezed frame
             // by frame, a grid of tiles or a video reflows on every step (2026-10-02).
             content
@@ -1254,7 +1278,17 @@ struct ChatSlot<Content: View>: View {
                 .overlay(alignment: .trailing) {
                     if docked, let target {
                         HStack(spacing: 0) {
-                            if !replace { Rectangle().fill(Theme.border).frame(width: 1) }
+                            if !replace {
+                                Rectangle().fill(Theme.border).frame(width: 1)
+                                    .overlay {
+                                        Color.clear.frame(width: 10).contentShape(Rectangle())
+                                            .onHover { inside in if inside { NSCursor.resizeLeftRight.push() } else { NSCursor.pop() } }
+                                            .gesture(DragGesture(minimumDistance: 1, coordinateSpace: .named("chatSlot"))
+                                                .onChanged { v in ratio = min(max(1 - v.location.x / g.size.width, 0.25), 0.7) })
+                                            .onTapGesture(count: 2) { ratio = 0.42 }
+                                            .help("Drag to resize the chat. Double-click for the default width.")
+                                    }
+                            }
                             DockedChat(hub: hub, target: target)
                                 .frame(width: replace ? nil : width)
                                 .environment(\.chatLive, show)
@@ -1265,6 +1299,7 @@ struct ChatSlot<Content: View>: View {
                     }
                 }
         }
+        .coordinateSpace(name: "chatSlot")
         .animation(Theme.spring, value: docked)
     }
 }
@@ -1291,8 +1326,8 @@ private struct ChatCornerBody: View {
         self.hub = hub; self.chat = target.chat; self.target = target; self.away = away
     }
 
-    /// The chat shows here, open.
-    private var open: Bool { hub.open && !away }
+    /// The chat shows here, open: on Record only when it took the right column.
+    private var open: Bool { hub.open && (!away || hub.onRecord) }
     @State private var openComments = 0
 
     var body: some View {
@@ -1344,7 +1379,7 @@ private struct ChatCornerBody: View {
 
     private var button: some View {
         Button {
-            if away { SessionMode.set(.write); hub.open = true } else { hub.open.toggle() }
+            if away { hub.onRecord = true; hub.open = true } else { hub.open.toggle() }
         } label: {
             ZStack {
                 Rectangle().fill(open ? Theme.ink : Theme.accent)
@@ -1377,7 +1412,7 @@ private struct ChatCornerBody: View {
         }
         .buttonStyle(.plain)
         .onHover { hover = $0 }
-        .help(away ? "Talk to Takes on the Script tab" : open ? "Close the chat (⇧⌘L)" : "Talk to Takes about this session (⇧⌘L)")
+        .help(away ? "Talk to Takes (⇧⌘L)" : open ? "Close the chat (⇧⌘L)" : "Talk to Takes about this session (⇧⌘L)")
     }
 }
 
@@ -1483,7 +1518,8 @@ private struct ChatPanel: View {
                 .buttonStyle(IconButtonStyle())
                 .help(docked ? "Float the chat in the corner" : "Half screen")
                 if docked {
-                    Button { hub.open = false } label: {
+                    // On Record the script comes back; elsewhere the chat stays open.
+                    Button { if hub.onRecord { hub.onRecord = false } else { hub.open = false } } label: {
                         Image(systemName: "xmark").font(.system(size: 12, weight: .semibold)).frame(width: 26, height: 26)
                     }
                     .buttonStyle(IconButtonStyle())
@@ -1587,19 +1623,34 @@ private struct ChatPanel: View {
     /// stack (it builds and drops rows while it lays them out) again and again. A chat is short
     /// enough to lay out in full. It stays at the bottom by itself as the reply streams in,
     /// without an animated scroll per word.
+    /// A message you send scrolls to the very bottom, also when you had scrolled up: your
+    /// message and the working mascot under it are in sight (2026-10-09).
     private var messages: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 10) {
-                if !chat.hasMessages { empty }
-                ChatRows(chat: chat)
+        ScrollViewReader { proxy in
+            ScrollView {
+                VStack(alignment: .leading, spacing: 10) {
+                    if !chat.hasMessages { empty }
+                    ChatRows(chat: chat)
+                    Color.clear.frame(height: 1).id(Self.end)
+                }
+                .padding(16)
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .padding(16)
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .environment(\.openURL, ChatReply.links(app))
+            .defaultScrollAnchor(.bottom, for: .initialOffset)
+            .defaultScrollAnchor(.bottom, for: .sizeChanges)
+            .onChange(of: chat.sent) { _, _ in
+                // Once now, once after the new row and the mascot are laid out.
+                withAnimation(Theme.motion) { proxy.scrollTo(Self.end, anchor: .bottom) }
+                Task { @MainActor in
+                    try? await Task.sleep(for: .milliseconds(150))
+                    withAnimation(Theme.motion) { proxy.scrollTo(Self.end, anchor: .bottom) }
+                }
+            }
         }
-        .environment(\.openURL, ChatReply.links(app))
-        .defaultScrollAnchor(.bottom, for: .initialOffset)
-        .defaultScrollAnchor(.bottom, for: .sizeChanges)
     }
+
+    private static let end = "chat-end"
 
     private var empty: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -1613,7 +1664,7 @@ private struct ChatPanel: View {
                     .font(Theme.sans(12.5)).foregroundStyle(Theme.muted)
                 VStack(alignment: .leading, spacing: 6) {
                     suggestion(CopilotAsk.find(5), "Find 5 posts to comment on")
-                    suggestion("What did my last decisions teach you? Suggest new lines for lessons.md.", "What did you learn?")
+                    suggestion("What did my last decisions teach you? Suggest new lessons.", "What did you learn?")
                 }
             } else if chat.boardName == "styles" {
                 Text("Your styles.").font(Theme.display(22)).foregroundStyle(Theme.ink)
@@ -1877,11 +1928,14 @@ struct ChatField: View {
                     editor.insertNewlineIgnoringFieldEditor(nil)
                     return .handled
                 }
+                .fixedSize(horizontal: false, vertical: true)
+                .wrapsAtItsWidth(focused.wrappedValue)
                 .padding(.vertical, 7)
+            // The voice note is the mic button itself, the same size (2026-10-09): the wide pill
+            // took half the box, and the box changing width left wrapped lines cut off at the top.
             if dictation.active {
-                VoiceNote(dictation: dictation, done: { Task { await dictation.stop() } },
-                          cancel: { dictation.cancel() })
-                    .padding(.bottom, 1)
+                MicListening(dictation: dictation) { Task { await dictation.stop() } }
+                    .transition(.opacity)
             } else {
                 Button { startDictation() } label: {
                     Image(systemName: "mic").font(.system(size: 13, weight: .medium)).frame(width: 28, height: 28)
@@ -1930,6 +1984,32 @@ struct ChatField: View {
         Task {
             await dictation.stop()
             if canSend { send() }
+        }
+    }
+}
+
+extension View {
+    /// SwiftUI's many-line TextField keeps wrapping at the width it had when you clicked in it: when
+    /// the box got wider (the chat panel opening or resized), the words broke at half the box and the
+    /// field, sized for the real width, cut the top line off (2026-10-09, ChatFieldTests). The editor's
+    /// text area now follows the editor's width.
+    func wrapsAtItsWidth(_ focused: Bool) -> some View {
+        onGeometryChange(for: CGFloat.self) { $0.size.width } action: { _ in FieldWidth.follow() }
+            .onChange(of: focused) { _, on in if on { FieldWidth.follow() } }
+    }
+}
+
+@MainActor
+enum FieldWidth {
+    /// After AppKit has given the editor its new frame.
+    static func follow() {
+        RunLoop.main.perform {
+            for window in NSApp.windows {
+                guard let editor = window.firstResponder as? NSTextView, editor.isFieldEditor,
+                      let area = editor.textContainer else { continue }
+                area.widthTracksTextView = true
+                area.size = NSSize(width: editor.bounds.width - 2 * editor.textContainerInset.width, height: area.size.height)
+            }
         }
     }
 }

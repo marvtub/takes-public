@@ -84,6 +84,8 @@ def detail():
          "openComments": len(state["comments"]), "profile": None, "storyboard": None}
     if state.get("sides"):
         d["sides"] = state["sides"]
+    if state.get("parity"):
+        d.update(PARITY_DETAIL())
     if state.get("styles"):
         d["style"] = state["video_style"]
         d["post"] = {"text": "Four days and 75 updates.\n\nThis is the body of the post.", "status": "draft",
@@ -91,6 +93,40 @@ def detail():
                      "hooks": [{"id": "h1", "text": "Four days and 75 updates.", "note": "Numbers first"},
                                {"id": "h2", "text": "I shipped 75 updates in four days."}]}
     return d
+
+
+VERSIONS = [
+    {"path": "/tmp/h/1-main.md", "created": NOW, "author": "claude", "note": "Wrote the hook", "draft": "main", "draftName": "Main",
+     "text": "An older first line.\n\nThe second paragraph."},
+    {"path": "/tmp/h/2-main.md", "created": "2026-10-02T09:00:00Z", "author": "user", "note": "Edited on the phone", "draft": "main",
+     "draftName": "Main", "text": "The very first draft."}]
+
+
+def PARITY_DETAIL():
+    """GET /test/parity turns these on: takes, script variants, history, hooks and posts (2026-10-09)."""
+    takes = [dict(file("takes", "Take %d" % n, "video"), path="%s/take-0%d-camera.mov" % (FOLDER, n), take=n,
+                  keeper=n == 1, duration=12.0, shot="s1",
+                  cut={"state": "done", "start": 1.2, "end": 9.8, "clean": True, "why": "No stumbles", "by": "agent" if n == 1 else "gemini"})
+             for n in (1, 2)]
+    gen = [dict(file("generated", "desk-v1.png", "image", "GPT Image 2.5"), change="Change generated/desk-v1.png with make_image: ",
+                final="Make the final of generated/desk-v1.png with make_image (from=generated/desk-v1.png).")]
+    a, b = FOLDER + "/storyboard/s1.png", FOLDER + "/generated/desk-v1.png"
+    board = [{"id": "s1", "section": "hook", "kind": "SHOT", "say": "Four days and 75 updates.", "how": "Close up at the desk.",
+              "seconds": 4, "start": 0, "image": state.get("shot_video", a), "comments": [], "ratio": 0.8,
+              "variants": [a, b], "video": state.get("shot_video", a), "finals": {b: "Make the final of generated/desk-v1.png for shot s1."}}]
+    return {"files": takes + gen + files(), "storyboard": board, "scriptVariants": state["script_variants"], "scriptFavorite": "main",
+            "scriptHistory": 2, "scriptHooks": [{"id": "h1", "text": "The first line of the script.", "note": "Plain"},
+                                                {"id": "h2", "text": "What if the script wrote itself?"}],
+            "publishedOn": ["LinkedIn"],
+            "post": {"text": "Four days and 75 updates.\n\nThis is the body of the post.", "status": state["post_status"],
+                     "history": 2, "firstComment": state.get("first_comment"),
+                     "variants": [{"slug": "short", "name": "Short", "author": "claude", "note": "Tighter", "text": "Short one"}],
+                     "hooks": []},
+            "posts": [dict(platform="linkedin", name="LinkedIn", text="Four days and 75 updates.", title="", status=state["post_status"],
+                           limit=3000, history=2, variants=[], hooks=[], at=state.get("post_at"), tz=state.get("post_at") and "America/Los_Angeles"),
+                      dict(platform="x", name="X", text="Four days. 75 updates.", title="", status="draft", limit=280, history=1,
+                           variants=[{"slug": "thread", "name": "Thread", "author": "claude", "note": "As a thread", "text": "One\n\nTwo"}],
+                           hooks=[{"id": "x1", "text": "Four days. 75 updates.", "note": "Short"}, {"id": "x2", "text": "75 updates in 4 days."}])]}
 
 
 class H(BaseHTTPRequestHandler):
@@ -165,6 +201,91 @@ class H(BaseHTTPRequestHandler):
             state["styles"] = True
             state["video_style"] = {"own": None, "project": "Magazine", "names": ["Bold", "Magazine"]}
             return self.send({"ok": True})
+        if p == "/test/parity":
+            state["parity"] = True
+            m = [message(300, "Cut the intro to ten seconds", role="user"), message(301, "Done. The new edit is in edits/."),
+                 dict(message(302, "Compacted the conversation · 120k → 18k tokens", role="tool"), done=True)]
+            for x in m:
+                x["done"] = True
+            state["chat"] = {"running": False, "messages": m, "context": {"used": 142000, "window": 200000}}
+            state["script_variants"] = [{"slug": "short", "name": "Short", "author": "claude", "note": "Tighter, one idea", "text": "Short script."}]
+            state["post_status"] = "draft"
+            return self.send({"ok": True})
+        if p == "/api/schedule" and method == "POST":
+            j = json.loads(self.body() or b"{}")
+            state["log"].append({p: j, "platform": q.get("platform")})
+            a = j.get("action")
+            if a == "set":
+                state["post_at"], state["post_status"] = j.get("at"), "ready" if state["post_status"] == "draft" else state["post_status"]
+            elif a == "ready":
+                state["post_status"] = "ready"
+            elif a == "clear":
+                state["post_at"] = None
+            elif a == "draft":
+                state["post_status"], state["post_at"] = "draft", None
+            return self.send({"ok": True})
+        if p in ("/api/trash", "/api/rename", "/api/move", "/api/published", "/api/script/draft", "/api/post/draft") and method == "POST":
+            j = json.loads(self.body() or b"{}")
+            state["log"].append({p: j})
+            if p == "/api/script/draft" and j.get("action") == "new":
+                state["script_variants"].append({"slug": "variant-2", "name": "Variant 2", "author": "user", "note": "", "text": state["script"]})
+            if p == "/api/post/draft" and j.get("action") == "status":
+                state["post_status"] = j.get("status", "draft")
+                state["post_at"] = j.get("at") or None
+            if p in ("/api/rename", "/api/move") and j.get("what") != "take" and j.get("what") != "project":
+                session["title"] = j.get("name") or session["title"]
+                return self.send(session)
+            if p == "/api/trash" and j.get("what") == "unstarred":
+                return self.send({"trashed": 1})
+            return self.send({"ok": True})
+        if p == "/api/shot" and method == "POST":
+            j = json.loads(self.body() or b"{}")
+            state["log"].append({p: j})
+            if j.get("action") == "pick":
+                state["shot_video"] = j.get("path")
+            return self.send({"ok": True})
+        if p == "/api/broll":
+            if method == "POST":
+                j = json.loads(self.body() or b"{}")
+                state["log"].append({p: j})
+                if j.get("action") in ("add", "remove"):
+                    state["broll_added"] = j["action"] == "add"
+                return self.send({"ok": True})
+            return self.send([{"folder": "1 Desk work", "name": "Desk work", "clips": [
+                {"path": "/tmp/lib/broll/1 Desk work/2023-11 Typing (V).mov", "title": "Typing", "vertical": True, "added": bool(state.get("broll_added"))},
+                {"path": "/tmp/lib/broll/1 Desk work/2023-10 Coffee (H).mov", "title": "Coffee", "vertical": False, "added": False}]},
+                {"folder": "2 City", "name": "City", "clips": [{"path": "/tmp/lib/broll/2 City/Street.mov", "title": "Street", "added": False}]}])
+        if p == "/api/sounds":
+            if method == "POST":
+                state["log"].append({p: json.loads(self.body() or b"{}")})
+                return self.send({"ok": True})
+            return self.send({"sounds": [
+                {"rel": "Music/1_Chasing the Truth.mp3", "title": "Chasing the Truth", "group": "Music", "path": "/tmp/lib/audio/Music/1_Chasing the Truth.mp3"},
+                {"rel": "Music/2_Morning.mp3", "title": "Morning", "group": "Music", "path": "/tmp/lib/audio/Music/2_Morning.mp3"},
+                {"rel": "SFX/3_Whoosh.mp3", "title": "Whoosh", "group": "SFX", "path": "/tmp/lib/audio/SFX/3_Whoosh.mp3"}]})
+        if p == "/api/search":
+            state["log"].append({p: q})
+            if not q.get("q"):
+                return self.send({"hits": [], "status": "Ready. 812 files indexed."})
+            hits = [{"kind": "session", "path": FOLDER, "start": 0, "text": "Tests", "title": "Offline video", "session": SID},
+                    {"kind": "board", "path": "/tmp", "start": 0, "title": "Styles", "board": "styles"},
+                    {"kind": "video", "path": FOLDER + "/take-01-camera.mov", "start": 0, "session": SID},
+                    {"kind": "speech", "path": FOLDER + "/edits/hook-v2.mp4", "start": 12.5, "text": "hands typing on the keyboard", "session": SID}]
+            if q.get("filter", "all") != "all":
+                hits = [h for h in hits if h["kind"] in ("video", "speech")]
+            return self.send({"hits": hits, "status": "Ready. 812 files indexed."})
+        if p == "/api/projects":
+            return self.send(["Tests", "Later"])
+        if p in ("/api/script/history", "/api/post/history"):
+            return self.send(VERSIONS)
+        if p == "/api/voice":
+            if method == "POST":
+                j = json.loads(self.body() or b"{}")
+                state["log"].append({"voice": j})
+                state["voice"] = "done"
+            return self.send({"state": state.get("voice", "none"), "on": True, "strength": 0.8, "quiet": False,
+                              "summary": "echo -17 → -27 dB · noise removed · -14 LUFS", "estimate": 20,
+                              "file": FOLDER + "/voice/take-01-camera.wav" if state.get("voice") else None})
         if p == "/api/styles":
             return self.send(STYLES)
         if p == "/api/style":
@@ -234,6 +355,8 @@ class H(BaseHTTPRequestHandler):
                 n = dict(session, id="%s/new-%d" % (j.get("project") or "Inbox", len(state["log"])), title="")
                 state["log"].append({"new": n["id"]})
                 return self.send(n)
+            if state.get("parity") and state.get("post_status", "draft") != "draft":
+                return self.send([dict(session, plan=[{"platform": "linkedin", "status": state["post_status"], "at": state.get("post_at")}])])
             return self.send([session])
         if p == "/api/session":
             return self.send(detail())
@@ -249,6 +372,18 @@ class H(BaseHTTPRequestHandler):
                     state["chat_revision"] += 1
                 return self.send({})
             return self.send(detail()["chat"])
+        if p == "/api/chat/new" and method == "POST":
+            state["log"].append({p: True})
+            state["past"] = True
+            state["chat"] = {"running": False, "messages": []}
+            return self.send(state["chat"])
+        if p == "/api/chat/history":
+            if method == "POST":
+                j = json.loads(self.body() or b"{}")
+                state["log"].append({p: j})
+                return self.send(state["chat"])
+            return self.send([{"file": "c1.json", "title": "Cut the intro to ten seconds", "date": NOW, "count": 1},
+                              {"file": "c0.json", "title": "Write the hook", "date": "2026-10-02T09:00:00Z", "count": 4}])
         if p == "/api/chat/read":
             return self.send({})
         if p == "/api/script" and method == "POST":

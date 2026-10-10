@@ -13,6 +13,19 @@ struct PrompterFollowTests {
         f.hear(ScriptFollower.tokens(text))
     }
 
+    /// The notch text size is kept, stays in range, and the panel grows to fit the same lines.
+    @MainActor @Test func notchFontSize() {
+        let d = UserDefaults.standard
+        defer { d.removeObject(forKey: NotchPanel.fontKey) }
+        d.removeObject(forKey: NotchPanel.fontKey)
+        #expect(NotchPanel.fontSize == 21)
+        let small = NotchPanel.body(lines: 3)
+        d.set(29.0, forKey: NotchPanel.fontKey)
+        #expect(NotchPanel.fontSize == 29 && NotchPanel.body(lines: 3) > small)
+        d.set(99.0, forKey: NotchPanel.fontKey)
+        #expect(NotchPanel.fontSize == NotchPanel.fontSizes.upperBound)
+    }
+
     @Test func followsWordByWord() {
         var f = ScriptFollower("Most people never record a second take. Here is why that matters.")
         #expect(heard(&f, "most people"))
@@ -268,17 +281,15 @@ struct PrompterShots {
         guard let dir = ProcessInfo.processInfo.environment["TAKES_SNAPSHOT"] else { return }
         let l = NotchLayout.make(screen: CGRect(x: 0, y: 0, width: 1512, height: 982), visibleTop: 950,
                                  notch: CGSize(width: 185, height: 32), body: NotchPanel.body(lines: 3))
-        let shape = NotchShape(band: l.band, notchWidth: l.notchWidth)
         let v = ZStack(alignment: .top) {
             Color(white: 0.93)
             ZStack(alignment: .top) {
-                ZStack {
-                    shape.fill(Theme.accent).blur(radius: 22).opacity(0.7)
-                    shape.stroke(Theme.accent, lineWidth: 3).blur(radius: 6)
-                }
-                shape.fill(.black)
+                NotchGlow(size: l.frame.size)
+                NotchShape().fill(NotchView.fill(band: l.band, height: l.frame.height)).frame(width: l.frame.width, height: l.frame.height)
+                // The screen's notch over the panel's top middle.
+                UnevenRoundedRectangle(cornerRadii: .init(bottomLeading: 8, bottomTrailing: 8))
+                    .fill(.black).frame(width: 185, height: 32)
             }
-            .frame(width: l.frame.width, height: l.frame.height)
         }
         .frame(width: l.frame.width + 2 * NotchView.margin + 40, height: l.frame.height + NotchView.margin + 20)
         let r = ImageRenderer(content: v)

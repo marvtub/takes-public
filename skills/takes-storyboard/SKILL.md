@@ -10,9 +10,17 @@ who is in the frame, where the camera is, and what moves. They are not the final
 
 ## Before you start
 
-- The sketches use Nano Banana 2.1 (`GEMINI_API_KEY` or `GOOGLE_AI_API_KEY`), with GPT Image 2.5
-  Flare (`OPENAI_API_KEY`) as the fallback, in the environment or in `~/.claude/.env`. Without either, the shots still save, but each shows an error instead of a
-  drawing. Tell the user in one line if that happens.
+- The sketches use Nano Banana 2.1 (`GEMINI_API_KEY` or `GOOGLE_AI_API_KEY`), then GPT Image 2.5
+  Flare (`OPENAI_API_KEY`), then Nano Banana on Replicate (the Replicate plugin's token), from the
+  environment, `~/.claude/.env` or the Keychain.
+- **No image key:** `set_storyboard` still saves the shots, draws nothing, and its answer has
+  `no_sketches` and a note. Then do one of these:
+  - If you can make images yourself, draw each sketch (the marker style below) and call
+    `set_storyboard` again with each shot's `image` set to your PNG or JPG.
+  - Else ask the user for a Gemini key (Takes › Settings › Gemini, from aistudio.google.com/apikey)
+    or an OpenAI key. When they have added it, call `set_storyboard` again, or tell them to click
+    **Draw** on the Storyboard tab.
+  Do not look for keys or logins anywhere else on the Mac.
 - All work goes through the `takes` MCP. Never write `session.json` or `storyboard/` by hand.
 
 ## Steps
@@ -49,6 +57,7 @@ who is in the frame, where the camera is, and what moves. They are not the final
 | `video` | Optional. A real clip shown instead of a drawing: a file from `list_broll` (the MCP adds it to the session's `broll/`), or a path in the session such as `edits/x.mp4`. |
 | `seconds` | Leave it out. The app counts from the words in `say`. Give it only for a shot with no words. |
 | `redraw` | `true` draws the same sketch text again (for a bad drawing). |
+| `image` | Optional. A sketch you made yourself (PNG or JPG path), used instead of a drawing. For when Takes has no image key. |
 
 For a `B-ROLL` shot, look for footage first: `search_media` with what the shot shows ("hands
 typing, close-up", kinds `["video"]`) searches every clip by its picture, and `list_broll` lists the

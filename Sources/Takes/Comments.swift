@@ -48,6 +48,10 @@ struct Comment: Codable, Identifiable, Hashable {
     var replies: [Reply]?
     /// A comment on a storyboard shot: its id (file is storyboard/storyboard.json).
     var shot: String?
+    /// What the agent learned when it resolved the comment: a rule id or "one-off" (Feedback.swift).
+    var lesson: String? = nil
+    /// The rule was there before the comment: the same mistake again.
+    var `repeat`: Bool? = nil
 
     var open: Bool { status != "resolved" }
     var area: CGRect? {
@@ -196,10 +200,12 @@ final class CommentStore: ObservableObject {
         return c
     }
 
-    func reply(_ id: String, _ text: String) {
+    /// The user changes his own comment in place (2026-10-09: he wants to edit, not reply).
+    /// A changed comment is a new ask, so it opens again.
+    func setText(_ id: String, _ text: String) {
         edit { f in
-            guard let i = f.comments.firstIndex(where: { $0.id == id }) else { return }
-            f.comments[i].replies = (f.comments[i].replies ?? []) + [Reply(by: "user", text: text, at: Self.now())]
+            guard let i = f.comments.firstIndex(where: { $0.id == id }), f.comments[i].text != text else { return }
+            f.comments[i].text = text
             f.comments[i].status = "open"
         }
     }
@@ -405,6 +411,11 @@ struct ReviewPlayer: View {
     @State private var chrome = true
     @State private var hideChrome: Task<Void, Never>?
     @State private var scrubbing = false
+    /// The video's width, for the bar under it: narrow, it drops the time label.
+    @State private var videoWidth: CGFloat = 600
+    /// The bar sits under the video, never on it (2026-10-09): over the picture it hid captions
+    /// and titles the user was reviewing. Its height plus the gap above it.
+    static let barSpace: CGFloat = 54
     /// The vertical apps' safe zone over a tall video: pinned with its button, shown while the
     /// pointer is on the button.
     @AppStorage("safeZone") private var safePinned = false
@@ -448,15 +459,14 @@ struct ReviewPlayer: View {
         let _ = Perf.body("ReviewPlayer")
         Group {
             if embedded {
-                videoBox(width: nil).aspectRatio(ratio, contentMode: .fit)
+                videoBox(width: nil)
             } else {
                 // The video in its own shape, as big as fits, clear of the pills on top.
                 GeometryReader { geo in
-                    let room = CGSize(width: max(0, geo.size.width - 40), height: max(0, geo.size.height - 76))
+                    let room = CGSize(width: max(0, geo.size.width - 40), height: max(0, geo.size.height - 76 - Self.barSpace))
                     let box = Self.fit(clock.size == .zero ? CGSize(width: 16, height: 9) : clock.size, in: room).size
                     videoBox(width: box.width)
-                        .frame(width: box.width, height: box.height)
-                        .shadow(color: .black.opacity(0.35), radius: 24, y: 10)
+                        .frame(width: max(box.width, 360), height: box.height + Self.barSpace)
                         .frame(width: geo.size.width, height: geo.size.height)
                         .offset(y: 18)
                         // Hidden until the video's shape is known: else a 16:9 box shows first
@@ -494,15 +504,45 @@ struct ReviewPlayer: View {
         .onExitCommand { cancel() }
     }
 
-    /// The video, its comment layers, the big play button and the floating controls.
+    /// The video with its comment layers and big play button, and the controls under it.
     private func videoBox(width: CGFloat?) -> some View {
+        VStack(spacing: embedded ? 0 : Self.barSpace - 44) {
+            Group {
+                if embedded { video.aspectRatio(ratio, contentMode: .fit) } else { video.frame(width: width) }
+            }
+                .shadow(color: .black.opacity(embedded ? 0 : 0.35), radius: 24, y: 10)
+                .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { videoWidth = $0 }
+            ReviewBar(clock: clock, head: clock.head, url: url, comments: comments, draft: $draft, focused: focused,
+                      commentMode: modeBinding, embedded: embedded, compact: videoWidth < 440,
+                      scrubbing: $scrubbing,
+                      onRange: { s, e in
+                          clock.player.pause()
+                          focused = nil
+                          draft = Draft(start: s, end: e, rect: draft?.rect)
+                      },
+                      voice: voice.mix,
+                      safeZone: vertical ? $safePinned : nil,
+                      onSafePeek: { safePeek = $0 },
+                      onFocus: { focus($0) },
+                      onComment: { mode.toggle() })
+                .frame(height: 44)
+                .padding(embedded ? 8 : 0)
+        }
+    }
+
+    private var video: some View {
         GeometryReader { geo in
             let frame = Self.fit(clock.size, in: geo.size)
             ZStack(alignment: .topLeading) {
                 Color.black
-                PlayerLayerView(player: clock.player)
-                    .contentShape(Rectangle())
-                    .onTapGesture { releaseKeys(); clock.toggle(); wake() }
+                // The AVPlayerView keeps every click, so a clear layer on top takes it: a click
+                // on the picture plays or pauses. Off while commenting: that click draws an area.
+                PlayerLayerView(player: clock.player).allowsHitTesting(false)
+                if !mode {
+                    Color.clear
+                        .contentShape(Rectangle())
+                        .onTapGesture { releaseKeys(); clock.toggle(); wake() }
+                }
                 TimedAreas(head: clock.head, comments: comments, frame: frame, focused: focused,
                            hidden: draft != nil || mode, onFocus: focus)
                 if showSafe { SafeZoneOverlay(frame: frame).transition(.opacity) }
@@ -510,25 +550,6 @@ struct ReviewPlayer: View {
                 if mode { drawLayer(frame) }
             }
             .overlay { bigPlay }
-            .overlay(alignment: .bottom) {
-                if showChrome {
-                    ReviewBar(clock: clock, head: clock.head, url: url, comments: comments, draft: $draft, focused: focused,
-                              commentMode: modeBinding, embedded: embedded, compact: geo.size.width < 440,
-                              scrubbing: $scrubbing,
-                              onRange: { s, e in
-                                  clock.player.pause()
-                                  focused = nil
-                                  draft = Draft(start: s, end: e, rect: draft?.rect)
-                              },
-                              voice: voice.mix,
-                              safeZone: vertical ? $safePinned : nil,
-                              onSafePeek: { safePeek = $0 },
-                              onFocus: { focus($0) },
-                              onComment: { mode.toggle() })
-                        .padding(geo.size.width < 440 ? 8 : 12)
-                        .transition(.opacity.combined(with: .offset(y: 8)))
-                }
-            }
             .overlay(alignment: .top) {
                 // The file name, with the controls (the post preview shows its own).
                 if showChrome && !embedded && !mode {
@@ -545,7 +566,7 @@ struct ReviewPlayer: View {
             }
             .clipShape(RoundedRectangle(cornerRadius: embedded ? 0 : 14, style: .continuous))
         }
-        .overlay(alignment: .bottomLeading) { card.padding(12).padding(.bottom, 58) }
+        .overlay(alignment: .bottomLeading) { card.padding(12) }
         .onContinuousHover { phase in
             if case .active = phase { wake() } else { sleepSoon(after: 0.6) }
         }
@@ -666,7 +687,7 @@ struct ReviewPlayer: View {
                 .transition(.opacity.combined(with: .move(edge: .bottom)))
         } else if let id = focused, let i = comments.firstIndex(where: { $0.id == id }) {
             CommentCard(comment: comments[i], number: i + 1,
-                        onReply: { store.reply(id, $0) },
+                        onEdit: { store.setText(id, $0) },
                         onResolve: { store.setResolved(id, comments[i].open) },
                         onDelete: { store.delete(id); focused = nil },
                         onClose: { focused = nil },
@@ -798,7 +819,8 @@ struct ReviewBar: View {
 
     var body: some View {
         HStack(spacing: compact ? 8 : 12) {
-            Button { clock.toggle() } label: {
+            // Takes the keys back from the chat box too, so Space plays after this click.
+            Button { releaseKeys(); clock.toggle() } label: {
                 Image(systemName: clock.playing ? "pause.fill" : "play.fill")
                     .font(.system(size: 14, weight: .semibold))
                     .contentTransition(.symbolEffect(.replace))
@@ -1109,12 +1131,13 @@ struct Composer: View {
 struct CommentCard: View {
     let comment: Comment
     let number: Int
-    let onReply: (String) -> Void
+    let onEdit: (String) -> Void
     let onResolve: () -> Void
     let onDelete: () -> Void
     let onClose: () -> Void
     var onJump: ((String, Double?) -> Void)? = nil
-    @State private var reply = ""
+    @State private var text = ""
+    @FocusState private var editing: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -1138,9 +1161,20 @@ struct CommentCard: View {
                     .lineLimit(3).padding(.leading, 8)
                     .overlay(alignment: .leading) { Rectangle().fill(Theme.accent).frame(width: 2) }
             }
-            Text(comment.text).font(Theme.sans(13.5)).foregroundStyle(.white.opacity(comment.open ? 0.95 : 0.55))
-                .fixedSize(horizontal: false, vertical: true)
-                .textSelection(.enabled)
+            // Click the text to change it: Return or clicking away saves, Esc puts it back.
+            TextField("What should change?", text: $text, axis: .vertical)
+                .textFieldStyle(.plain).font(Theme.sans(13.5))
+                .foregroundStyle(.white.opacity(comment.open || editing ? 0.95 : 0.55))
+                .lineLimit(1...8)
+                .focused($editing)
+                .padding(.horizontal, 5).padding(.vertical, 3)
+                .background(.white.opacity(editing ? 0.08 : 0), in: RoundedRectangle(cornerRadius: 5))
+                .padding(.horizontal, -5).padding(.vertical, -3)
+                .onSubmit(save)
+                .onExitCommand { text = comment.text; editing = false; onClose() }
+                .onChange(of: editing) { _, now in if !now { save() } }
+                .onChange(of: comment.text, initial: true) { _, t in if !editing { text = t } }
+                .help("Click to edit")
             ForEach(Array((comment.replies ?? []).enumerated()), id: \.offset) { _, r in
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
                     Text(r.by == "user" ? "you" : r.by).font(Theme.mono(10, .medium))
@@ -1164,16 +1198,14 @@ struct CommentCard: View {
                 }
                 .padding(.leading, 22)
             }
-            TextField("Reply…", text: $reply)
-                .textFieldStyle(.plain).font(Theme.sans(12.5)).foregroundStyle(.white)
-                .padding(.leading, 22)
-                .onSubmit {
-                    let t = reply.trimmingCharacters(in: .whitespacesAndNewlines)
-                    if !t.isEmpty { onReply(t); reply = "" }
-                }
-                .onExitCommand(perform: onClose)
         }
         .modifier(CardStyle())
+    }
+
+    private func save() {
+        let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if t.isEmpty { text = comment.text } else if t != comment.text { onEdit(t) }
+        editing = false
     }
 
     private func icon(_ name: String, _ help: String, _ action: @escaping () -> Void) -> some View {
@@ -1267,7 +1299,7 @@ struct StillReview: View {
                      onArea: { app.commentMode = true })
         } else if let id = focused, let i = comments.firstIndex(where: { $0.id == id }) {
             CommentCard(comment: comments[i], number: i + 1,
-                        onReply: { store.reply(id, $0) },
+                        onEdit: { store.setText(id, $0) },
                         onResolve: { store.setResolved(id, comments[i].open) },
                         onDelete: { store.delete(id); focused = nil },
                         onClose: { focused = nil },
@@ -1350,9 +1382,8 @@ struct GlassPlayer: View {
         GeometryReader { geo in
             ZStack {
                 Color.black
-                PlayerLayerView(player: clock.player)
-                    .contentShape(Rectangle())
-                    .onTapGesture { clock.toggle(); wake() }
+                PlayerLayerView(player: clock.player).allowsHitTesting(false)
+                Color.clear.contentShape(Rectangle()).onTapGesture { clock.toggle(); wake() }
                 if !clock.playing && clock.duration > 0 {
                     Button { clock.toggle() } label: { GlassPlayButton(size: geo.size.width < 260 ? 48 : 60) }
                         .buttonStyle(PressScale())
