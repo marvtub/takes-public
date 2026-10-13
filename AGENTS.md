@@ -72,14 +72,22 @@ docs here. To add or change a tool, read `mcp/AGENTS.md`.
 
 ## Skills
 
-Takes ships two skills. The app copies them to `~/.claude/skills` at launch (`AgentSetup.swift`):
+Takes ships three skills. The app copies them to `~/.claude/skills` and `~/.agents/skills` at
+launch, each with a `.takes-skill` marker (`AgentSetup.swift`):
 
 - `takes-storyboard`: an idea becomes a script and a sketch storyboard (`set_storyboard`).
-- `takes-video-edit`: edit a take with ffmpeg and Whisper, write versions to `edits/`, answer
-  review comments.
+- `takes-video-edit`: edit a take (cuts, recipes, HyperFrames layers), write versions to `edits/`,
+  answer review comments.
+- `takes-image-prompt`: prompts for `make_image`, from a collection it downloads at run time.
 
 Their source is `skills/`. Update a skill when you change the tools or the
 workflow it describes.
+
+Takes also downloads the **HyperFrames** skills (HeyGen, Apache-2.0, `SkillPack.hyperframes` in
+`Plugins/Skills.swift`) from their GitHub repo at first launch, never bundled. The Skills plugin
+(Plugins › Skills, public since 2026-10-13) switches each skill and pack on or off
+(`skillsOff` in UserDefaults: launch skips those), updates the pack, and adds any skill from a
+GitHub link or a folder. Takes updates and removes only skills with its marker.
 
 ## How to work here
 

@@ -103,8 +103,30 @@ final class NotchPanel {
     /// Record opened it, not you: it closes again when you leave Record.
     private(set) var autoOpened = false
 
+    /// The notch and its tour wait for the first Record press (2026-10-12: on the first launch it
+    /// opened by itself over the welcome and the demo, and new users found it all too much).
+    /// Someone who took the tour, or opened the notch, has it armed already.
+    static let armedKey = "notchArmed"
+    static var armed: Bool {
+        let d = UserDefaults.standard
+        return d.bool(forKey: armedKey) || d.integer(forKey: NotchView.introKey) > 0
+    }
+
+    /// The first Record press with a script: the notch opens with its tour, and the take waits.
+    /// The tour ends on ●. True when it opened.
+    func firstRecord(_ app: AppModel) -> Bool {
+        guard !Self.armed, Self.auto, !shown, !AppModel.testing,
+              UserDefaults.standard.string(forKey: "rightTab") == SessionMode.record.rawValue,
+              !app.promptText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return false }
+        UserDefaults.standard.set(true, forKey: Self.armedKey)
+        show(app)
+        autoOpened = true
+        return true
+    }
+
     /// The menu item and the bar button: what you pick is what Record does next time.
     func toggle(_ app: AppModel) {
+        UserDefaults.standard.set(true, forKey: Self.armedKey)
         UserDefaults.standard.set(!shown, forKey: Self.autoKey)
         shown ? hide() : show(app)
     }
@@ -122,7 +144,7 @@ final class NotchPanel {
     /// with its own prompter.
     func follow(record on: Bool, _ app: AppModel) {
         if on {
-            guard Self.auto, !shown || fading, !AppModel.testing else { return }
+            guard Self.auto, Self.armed, !shown || fading, !AppModel.testing else { return }
             show(app)
             autoOpened = true
         } else if shown, !fading, !app.isRecording {

@@ -29,6 +29,18 @@ final class Onboarding {
         guard !shown, !d.bool(forKey: Self.doneKey) else { return }
         if !library.projects.isEmpty { d.set(true, forKey: Self.doneKey); return }
         show()
+        Self.fillScreen()
+    }
+
+    /// The first launch goes full screen (2026-10-12: in the small window the welcome, the app
+    /// and the notch felt noisy to new users). Only then: after that, macOS keeps what they pick.
+    static func fillScreen() {
+        guard !AppModel.testing else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+            guard let w = NSApp.windows.first(where: { $0.isVisible && !($0 is NSPanel) && $0.styleMask.contains(.titled) }),
+                  !w.styleMask.contains(.fullScreen) else { return }
+            w.toggleFullScreen(nil)
+        }
     }
 
     func show() { page = 0; forward = true; shown = true }

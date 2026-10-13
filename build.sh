@@ -85,11 +85,11 @@ if [[ -d styles ]]; then
   mkdir -p "$APP/Contents/Resources/styles"
   rsync -a --exclude 'snapshots/' --exclude 'renders/' --exclude 'footage.mp4' --exclude 'node_modules/' styles/ "$APP/Contents/Resources/styles/"
 fi
-# The skills the Skills plugin offers (private for now): Takes' own and those in plugins/skills.
-if [[ -d plugins/skills ]]; then
-  mkdir -p "$APP/Contents/Resources/plugin-skills"
-  for d in scripts/public/skills/*/ plugins/skills/*/; do [[ -f "$d/SKILL.md" ]] && cp -R "${d%/}" "$APP/Contents/Resources/plugin-skills/"; done
-fi
+# The skills the Skills plugin lists: Takes' own (scripts/public/skills, or skills/ in the public copy).
+mkdir -p "$APP/Contents/Resources/plugin-skills"
+for d in skills/*/ scripts/public/skills/*/; do
+  if [[ -f "$d/SKILL.md" ]]; then cp -R "${d%/}" "$APP/Contents/Resources/plugin-skills/"; fi  # if, not &&: a glob with no match ends the loop non-zero under set -e
+done
 # The stamp tells a running Takes that a staged build is new; the changes go in the Update tooltip.
 INSTALLED="$HOME/Applications/Takes.app"
 STAMP="$(git rev-parse --short HEAD)$(git diff --quiet HEAD -- Sources Package.swift 2>/dev/null || echo +) $(date '+%b %-d %H:%M')"

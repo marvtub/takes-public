@@ -39,6 +39,9 @@ struct TakesApp: App {
                 .onOpenURL { app.handle(url: $0) }
         }
         .handlesExternalEvents(matching: ["*"])
+        // With no saved frame (the first launch), the window takes the whole screen: out of full
+        // screen it stays big, not the 960-wide minimum.
+        .defaultWindowPlacement { _, context in WindowPlacement(size: context.defaultDisplay.visibleRect.size) }
         .windowStyle(.hiddenTitleBar)
         .commands {
             CommandGroup(replacing: .appInfo) {
@@ -246,7 +249,7 @@ struct ContentView: View {
                     .opacity(0.4 + 0.6 * drawer)
                     .frame(width: sidebarWidth * drawer, alignment: .trailing)
                     .clipped()
-                    .allowsHitTesting(showsSidebar)
+                    .liveLayer(showsSidebar)
                     // Drag the list's right edge to make it wider or narrower.
                     .overlay(alignment: .trailing) {
                         Color.clear.frame(width: 8).contentShape(Rectangle())
@@ -1028,6 +1031,7 @@ struct DetailView: View {
     /// Record with one session open, a script in it, and no welcome card over it: the notch opens
     /// by itself. No script, no notch (2026-10-08): an empty black panel over the camera only
     /// got in the way. Write one and it opens; clear it and the notch it opened goes again.
+    /// Not before the first Record press opened it once (NotchPanel.armed).
     private var notchRecord: Bool {
         recordOnly && library.current != nil && !(library.selectedSessions.count > 1) && !Onboarding.shared.shown
             && !app.promptText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -1078,7 +1082,7 @@ struct DetailView: View {
                 // while the camera stops or starts deadlocks AVFoundation.
                 split
                     .pageFade(cover == nil)
-                    .allowsHitTesting(cover == nil)
+                    .liveLayer(cover == nil)
                     .accessibilityHidden(cover != nil)
                 // A tab stays mounted once opened, hidden under the others: going back to it is
                 // instant, with no rebuild, no rescan and no fade (2026-10-02). A new session
@@ -1107,7 +1111,7 @@ struct DetailView: View {
                     }
                     .id(doc.url)
                     .animation(.page) { $0.opacity(cover == nil ? 0 : 1) }
-                    .allowsHitTesting(cover != nil)
+                    .liveLayer(cover != nil)
                     .accessibilityHidden(cover == nil)
                 }
             }
@@ -1153,7 +1157,7 @@ struct DetailView: View {
         }
         .background(Theme.canvas)
         .pageFade(k == cover)
-        .allowsHitTesting(k == cover)
+        .liveLayer(k == cover)
         .accessibilityHidden(k != cover)
         .environment(\.paneShown, k == cover)
     }

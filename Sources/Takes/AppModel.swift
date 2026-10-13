@@ -584,7 +584,10 @@ final class AppModel {
 
     func toggleRecord() {
         switch phase {
-        case .idle: recordTask = Task { await start() }
+        case .idle:
+            // The first press opens the notch and its tour instead; the next one records.
+            if NotchPanel.shared.firstRecord(self) { return }
+            recordTask = Task { await start() }
         case .warming, .countdown: recordTask?.cancel(); phase = .idle; endShot()
         case .recording: Task { await stop() }
         case .starting: camera.cancelStart(); screen.cancelStart()

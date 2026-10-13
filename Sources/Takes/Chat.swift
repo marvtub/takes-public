@@ -1396,7 +1396,7 @@ struct ChatSlot<Content: View>: View {
                                 .environment(\.chatLive, show)
                         }
                         .opacity(show ? 1 : 0)
-                        .allowsHitTesting(show)
+                        .liveLayer(show)
                         .transition(replace ? .opacity.combined(with: .offset(x: 16)) : .move(edge: .trailing).combined(with: .opacity))
                     }
                 }
@@ -1447,7 +1447,7 @@ private struct ChatCornerBody: View {
             }
         }
         .opacity(open && hub.docked ? 0 : 1)
-        .allowsHitTesting(!(open && hub.docked))
+        .liveLayer(!(open && hub.docked))
         .animation(Theme.spring, value: hub.open)
         .animation(Theme.spring, value: hub.docked)
         .animation(Theme.spring, value: hover)

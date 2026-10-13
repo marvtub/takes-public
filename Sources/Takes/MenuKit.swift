@@ -712,7 +712,7 @@ final class ContextMenus {
 }
 
 private struct MenuRegion: NSViewRepresentable {
-    let content: () -> [MenuItem]
+    let content: (() -> [MenuItem])?
     let app: AppModel?
     func makeNSView(context: Context) -> MenuRegionView {
         let v = MenuRegionView()
@@ -729,8 +729,28 @@ private struct MenuRegion: NSViewRepresentable {
 private struct ContextHost: ViewModifier {
     let content: () -> [MenuItem]
     @Environment(AppModel.self) private var app: AppModel?
+    @Environment(\.menusLive) private var live
     func body(content body: Content) -> some View {
-        body.background(MenuRegion(content: content, app: app))
+        body.background(MenuRegion(content: live ? content : nil, app: app))
+    }
+}
+
+private struct MenusLiveKey: EnvironmentKey { static let defaultValue = true }
+
+extension EnvironmentValues {
+    /// False in a layer kept under another one: its right-click menus are off.
+    var menusLive: Bool {
+        get { self[MenusLiveKey.self] }
+        set { self[MenusLiveKey.self] = newValue }
+    }
+}
+
+extension View {
+    /// allowsHitTesting for a layer that stays mounted under another one, with its right-click
+    /// menus off too. 2026-10-13: the Record screen kept under Assets answered right-clicks on the
+    /// asset tiles (the smallest menu region won), so a tile had no menu and could not be trashed.
+    func liveLayer(_ on: Bool) -> some View {
+        allowsHitTesting(on).transformEnvironment(\.menusLive) { $0 = $0 && on }
     }
 }
 

@@ -100,7 +100,7 @@ struct PostSide: Identifiable {
 
 enum Plugins {
     /// Every plugin this build has, on or off: the public ones, then the user's.
-    static var available: [TakesPlugin] { [Feedback.plugin, Consistency.plugin, ReplicatePage.plugin, HiggsfieldPage.plugin, VoicesPage.plugin] + PrivatePlugins.list }
+    static var available: [TakesPlugin] { [Feedback.plugin, Consistency.plugin, ReplicatePage.plugin, HiggsfieldPage.plugin, VoicesPage.plugin, SkillsPlugin.plugin] + PrivatePlugins.list }
     /// The plugin the Plugins board shows.
     static let pickedKey = "pluginsPicked"
     /// The installed ones. Read from UserDefaults (not an observed model), so the phone server can

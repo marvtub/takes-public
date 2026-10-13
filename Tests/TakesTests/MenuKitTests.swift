@@ -110,4 +110,36 @@ struct MenuKitTests {
             try data.write(to: URL(fileURLWithPath: dir).appending(path: "menukit-\(name).png"))
         }
     }
+
+    /// A layer kept under another one (Record under Assets) must not take the right-click: its
+    /// smaller menu region won, and the asset tile on top had no menu (2026-10-13).
+    @Test func aHiddenLayerTakesNoRightClick() async {
+        @MenuBuilder func top() -> [MenuItem] { MenuButton("Move to Trash", icon: "trash", danger: true) {} }
+        @MenuBuilder func under() -> [MenuItem] { MenuButton("Take row") {} }
+        func view(hidden: Bool) -> some View {
+            ZStack {
+                Color.clear.frame(width: 40, height: 40).takesContextMenu { under() }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity).liveLayer(!hidden)
+                Color.clear.frame(width: 200, height: 200).takesContextMenu { top() }
+            }
+            .frame(width: 300, height: 300)
+        }
+        for hidden in [false, true] {
+            let h = NSHostingView(rootView: AnyView(view(hidden: hidden)))
+            h.frame = NSRect(x: 0, y: 0, width: 300, height: 300)
+            let w = NSWindow(contentRect: NSRect(x: -6000, y: -6000, width: 300, height: 300), styleMask: [.borderless],
+                             backing: .buffered, defer: false)
+            w.isReleasedWhenClosed = false
+            w.contentView = h
+            w.orderFrontRegardless()
+            h.layoutSubtreeIfNeeded()
+            try? await Task.sleep(for: .milliseconds(100))
+            let e = NSEvent.mouseEvent(with: .rightMouseDown, location: NSPoint(x: 150, y: 150), modifierFlags: [],
+                                       timestamp: 0, windowNumber: w.windowNumber, context: nil,
+                                       eventNumber: 0, clickCount: 1, pressure: 1)!
+            let title = ContextMenus.shared.region(for: e)?.content?().first?.title
+            #expect(title == (hidden ? "Move to Trash" : "Take row"))
+            w.orderOut(nil)
+        }
+    }
 }

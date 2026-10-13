@@ -80,9 +80,10 @@ class Jobs(unittest.TestCase):
         return json.load(open(t.job_path(s or self.s, job)))
 
     def test_run_returns_at_once_and_ends_done(self):
-        t0 = time.time()
-        r = self.run_job("sleep 0.3; printf x > edits/a-v1.mp4", ["edits/a-v1.mp4"])
-        self.assertLess(time.time() - t0, 1)
+        # Returned before the command ended: its file is not there yet. Not a stopwatch, which
+        # failed at load 77 with eight test processes (2026-10-13).
+        r = self.run_job("sleep 1.5; printf x > edits/a-v1.mp4", ["edits/a-v1.mp4"])
+        self.assertFalse(os.path.exists(os.path.join(self.s, "edits/a-v1.mp4")))
         self.assertEqual(r["status"], "starting")
         self.assertRegex(r["job"], r"^job-[0-9a-f]{6}$")
         out = self.wait(r["job"])

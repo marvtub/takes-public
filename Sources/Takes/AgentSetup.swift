@@ -7,6 +7,9 @@ import Foundation
 /// app moved. The skills the build ships in Resources/skills go to ~/.claude/skills (Claude Code,
 /// Cursor) and ~/.agents/skills (Codex, pi, opencode, Gemini CLI). It touches only the `takes`
 /// server and the skill folders it ships. In the background, once per launch.
+/// Since 2026-10-13 each copied skill carries Takes' marker (so Plugins › Skills shows it as
+/// Takes'), a skill the user switched off there stays off, and the HyperFrames pack is downloaded
+/// once, unless the user has it already or switched it off.
 enum AgentSetup {
     static func run() {
         let resources = Bundle.main.bundleURL.appending(path: "Contents/Resources")
@@ -17,20 +20,29 @@ enum AgentSetup {
             guard shell("/usr/bin/xcode-select", ["-p"]).0 else { return }
             _ = shell("/usr/bin/python3", [server, "--setup", "--once"])
             let skills = resources.appending(path: "skills")
-            copySkills(from: skills)
-            copySkills(from: skills, to: FileManager.default.homeDirectoryForCurrentUser.appending(path: ".agents/skills"))
+            let off = SkillShelf.off
+            copySkills(from: skills, skipping: off)
+            copySkills(from: skills, to: SkillShelf.agentsHome, skipping: off)
+            for pack in packsToFetch(SkillPack.all, off: off) { _ = try? await SkillShelf.install(pack, also: [SkillShelf.agentsHome]) }
         }
     }
 
-    /// Copies each shipped skill folder over the user's copy of the same name. Only these names.
-    nonisolated static func copySkills(from dir: URL, to target: URL = FileManager.default.homeDirectoryForCurrentUser.appending(path: ".claude/skills")) {
+    /// The packs to download at launch: not switched off, and not on this Mac in any form.
+    nonisolated static func packsToFetch(_ packs: [SkillPack], off: Set<String>, home: URL = SkillShelf.home) -> [SkillPack] {
+        packs.filter { !off.contains($0.id) && SkillShelf.status(of: $0, in: home) == .missing }
+    }
+
+    /// Copies each shipped skill folder over the user's copy of the same name, with Takes' marker.
+    /// Only these names, and none the user switched off.
+    nonisolated static func copySkills(from dir: URL, to target: URL = FileManager.default.homeDirectoryForCurrentUser.appending(path: ".claude/skills"), skipping off: Set<String> = []) {
         let fm = FileManager.default
         guard let skills = try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) else { return }
         try? fm.createDirectory(at: target, withIntermediateDirectories: true)
-        for s in skills where fm.fileExists(atPath: s.appending(path: "SKILL.md").path) {
+        for s in skills where fm.fileExists(atPath: s.appending(path: "SKILL.md").path) && !off.contains(s.lastPathComponent) {
             let dest = target.appending(path: s.lastPathComponent)
             try? fm.removeItem(at: dest)
             try? fm.copyItem(at: s, to: dest)
+            try? SkillShelf.fromTakes.write(to: dest.appending(path: SkillShelf.marker), atomically: true, encoding: .utf8)
         }
     }
 

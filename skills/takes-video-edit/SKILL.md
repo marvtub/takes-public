@@ -1,14 +1,14 @@
 ---
 name: takes-video-edit
-description: Edit a video recorded in Takes, starting from the Takes session (takes MCP): rough_cut and cut_take for the cuts, render_edit and publish_edit to build and save each version from its recipe. Use when the user asks to edit, cut, trim, caption, reframe (for example to 9:16), clean up the audio of, fix the words said in, add a voice-over to, or make a thumbnail for a take or a video in Takes, or asks for a new version of an edit after review comments.
+description: Edit a video recorded in Takes, starting from the Takes session (takes MCP): rough_cut and cut_take for the cuts, render_edit and publish_edit to build and save each version from its recipe, HyperFrames for the motion graphics over it. Start here for any video in Takes, also when the HyperFrames skills are installed. Use when the user asks to edit, cut, trim, caption, reframe (for example to 9:16), clean up the audio of, fix the words said in, add a voice-over to, or make a thumbnail for a take or a video in Takes, or asks for a new version of an edit after review comments.
 ---
 
 # Takes video edit
 
 Takes cuts the takes (`rough_cut`, `cut_take`) and builds each version of the edit from a recipe
 (`render_edit`, `publish_edit`). `ffmpeg`/`ffprobe` are for stills and picture layers. Exact commands
-are in `references/ffmpeg-recipes.md`. Other tools (for example HyperFrames for motion graphics) are
-optional. Use them only if the user has them and asks for that kind of work.
+are in `references/ffmpeg-recipes.md`. Title cards, lower thirds, animated captions and other motion
+graphics are HyperFrames compositions: see [Motion graphics](#motion-graphics-hyperframes).
 
 ## The one rule
 
@@ -147,6 +147,28 @@ left for you:
    `-af aresample=async=1:first_pts=0`. Plain `-vn` drops the take's audio offset and puts the
    voice 5 frames early. A cleaned voice with `voice.starts_at_s` in `get_session` starts that much
    after the video: delay it by that much.
+
+## Motion graphics (HyperFrames)
+
+Takes installs the HyperFrames skills (HeyGen, Apache-2.0) with this one: Plugins › Skills ›
+HyperFrames. A composition is an HTML file that HyperFrames renders to video, frame-exact. This
+skill owns the edit; HyperFrames makes only the layers that go over it.
+
+- **Not installed** (no `hyperframes` skill): tell the user to switch on HyperFrames in Takes ›
+  Plugins › Skills, then go on with plain ffmpeg text for now. Rendering needs Node.js (`npx`).
+- **Style first:** `get_library session=<session>` gives the style's tokens (colours, fonts) and its
+  saved parts (title cards, lower thirds, captions). Start from a saved part when one fits. Write
+  new ones in the style's tokens.
+- **Where:** the composition goes in `_edit/<name>/`. Read the `hyperframes-core` skill before you
+  write its HTML. For captions, read the word times from `_edit/<name>/words.json`.
+- **Render with alpha** so the footage shows through: `npx hyperframes render --format mov
+  --quality looks --output <file>.mov` (or `--format webm`). Put that command in the recipe's
+  `steps` (`{run: [argv], cwd: "_edit/<name>", makes: [file]}`) and the file in `over`
+  (`{file, at, alpha: true}`). `render_edit` runs the step and lays the layer over the cut.
+- **Never open the user's screen:** `npx hyperframes preview --background --no-open`. Look at
+  stills of the render, not at the Studio.
+- **Keep what works:** after the user likes a part, `save_to_library` with the render, a one-line
+  `note` and `source_dir` (the composition), so the next video starts from it.
 
 ## Reframe, grade, captions
 
