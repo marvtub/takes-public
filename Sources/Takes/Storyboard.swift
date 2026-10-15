@@ -592,6 +592,9 @@ private struct ShotThumb: View {
     var ns: Namespace.ID
     @State private var hover = false
     @State private var poster: NSImage?
+    /// The clip storyboard.json names is not on disk (2026-10-13: two MG clips went to the Trash
+    /// and their cards showed a spinner for good).
+    @State private var missing = false
 
     private var stack: Int { shot.options.count }
 
@@ -601,6 +604,11 @@ private struct ShotThumb: View {
             shape.fill(Theme.paper)
             if let img = image ?? poster ?? shot.video.flatMap({ StoryShot.cachedPoster(doc.url.appending(path: $0)) }) {
                 Image(nsImage: img).resizable().scaledToFill()
+            } else if missing {
+                // Calm, not an alarm (2026-10-13): a faint film in a dashed frame.
+                RoundedRectangle(cornerRadius: 5).strokeBorder(Theme.border, style: StrokeStyle(lineWidth: 1, dash: [3, 3]))
+                    .padding(6)
+                Image(systemName: "film").font(.system(size: 13, weight: .light)).foregroundStyle(Theme.faint)
             } else if shot.error != nil {
                 Image(systemName: "exclamationmark.triangle").font(.system(size: 11)).foregroundStyle(Theme.warn)
             } else {
@@ -656,10 +664,13 @@ private struct ShotThumb: View {
         .animation(Theme.spring, value: on)
         .animation(Theme.motion, value: hover)
         .onHover { hover = $0 }
-        .help((shot.say.isEmpty ? shot.kind : "“\(shot.say)”") + (stack > 1 ? "\n\(stack) variants" : ""))
+        .help((shot.say.isEmpty ? shot.kind : "“\(shot.say)”") + (stack > 1 ? "\n\(stack) variants" : "")
+            + (missing ? "\nThis clip isn't here anymore: \(shot.video ?? "")" : ""))
         .task(id: shot.video) {
-            guard let v = shot.video else { poster = nil; return }
-            poster = await StoryShot.poster(doc.url.appending(path: v))
+            guard let v = shot.video else { poster = nil; missing = false; return }
+            let url = doc.url.appending(path: v)
+            missing = !FileManager.default.fileExists(atPath: url.path)
+            poster = missing ? nil : await StoryShot.poster(url)
         }
     }
 }
@@ -731,7 +742,9 @@ private struct ShotDetail: View {
     private var isDraft: Bool { media.map { StoryShot.isStill($0.path) && Higgsfield.isDraft($0) } ?? false }
     private var media: URL? { shownPath.map { doc.url.appending(path: $0) } }
     /// A clip plays; a still only shows.
-    private var clip: URL? { media.flatMap { StoryShot.isStill($0.path) ? nil : $0 } }
+    private var clip: URL? { media.flatMap { StoryShot.isStill($0.path) || missing ? nil : $0 } }
+    /// storyboard.json names a file that is gone (moved to the Trash, say).
+    private var missing: Bool { media.map { !FileManager.default.fileExists(atPath: $0.path) } ?? false }
 
     static let rowHeight: CGFloat = 72
 
@@ -867,7 +880,21 @@ private struct ShotDetail: View {
             .overlay {
                 ZStack {
                     shape.fill(Theme.paper)
-                    if let media {
+                    if let media, missing {
+                        ZStack {
+                            RoundedRectangle(cornerRadius: 12)
+                                .strokeBorder(Theme.border, style: StrokeStyle(lineWidth: 1.5, dash: [6, 6]))
+                                .padding(14)
+                            VStack(spacing: 8) {
+                                Image(systemName: "film").font(.system(size: 24, weight: .light)).foregroundStyle(Theme.faint)
+                                Text("This clip isn't here anymore").font(Theme.sans(13, .medium)).foregroundStyle(Theme.muted)
+                                Text("Look for \(media.lastPathComponent) in the Trash, or ask Takes to make it again.")
+                                    .font(Theme.sans(11.5)).foregroundStyle(Theme.faint)
+                                    .multilineTextAlignment(.center).fixedSize(horizontal: false, vertical: true)
+                            }
+                            .padding(36)
+                        }
+                    } else if let media {
                         // The clip plays on its own, muted and looping, while the tab shows (2026-10-04).
                         // A still (a new angle not animated yet) just shows (2026-10-09).
                         Theme.stage
@@ -1260,10 +1287,12 @@ extension TakeThumb {
     var help: String {
         var s = "\(take.name ?? "Take \(take.number)")\(take.duration.map { " · \(Storyboard.clock($0))" } ?? "")"
         switch cut?.state {
-        case "running": s += "\nGemini is finding the best cut…"
+        case "running": s += "\nFinding the best cut…"
         case "failed": s += "\nNo best cut: \(cut?.error ?? "it failed")"
         case "done":
-            let who = cut?.by == "agent" ? "Best cut, checked by Takes" : "Gemini's first suggestion (Takes checks it before cutting)"
+            let who = cut?.by == "agent" ? "Best cut, checked by Takes"
+                : cut?.by == "transcript" ? "First suggestion from the transcript (Takes checks it before cutting)"
+                : "Gemini's first suggestion (Takes checks it before cutting)"
             if let r = cut?.range { s += "\n\(who): \(r)\(cut?.clean == false ? " (not every word clean)" : "")" }
             if let w = cut?.why { s += ": \(w)" }
         default: break
@@ -1273,7 +1302,7 @@ extension TakeThumb {
 }
 
 /// The clean delivery in a shot's take (<session>/cuts.json, keyed by take number). Gemini's
-/// --take-cut run writes a first suggestion (by "gemini"); the editing agent checks it and writes
+/// --take-cut run writes a first suggestion (by "gemini", or "transcript" without a key); the editing agent checks it and writes
 /// the range it uses with set_best_cut (by "agent").
 struct TakeCut: Decodable, Equatable {
     var state: String
@@ -1290,7 +1319,7 @@ struct TakeCut: Decodable, Equatable {
         (try? Data(contentsOf: file(session))).flatMap { try? JSONDecoder().decode([String: TakeCut].self, from: $0) } ?? [:]
     }
 
-    /// Starts the pick in the background (Gemini, about a minute).
+    /// Starts the pick in the background (Gemini, about a minute; the transcript without a key).
     static func start(_ session: URL, take: Int) {
         _ = Voice.launch(["--take-cut", session.path, String(take)])
     }

@@ -19,6 +19,10 @@ struct ChatTurn {
     var access: String
     /// A chat without a session: its board.
     var board: String?
+    /// Claude Code: the file with the only MCP servers to load (ChatMCP). Nil loads every server.
+    var mcpConfig: String? = nil
+    /// Claude Code: the process stays open and reads message after message (ChatWarm).
+    var warm = false
 }
 
 protocol ChatAdapter: AgentAdapter {
@@ -47,6 +51,8 @@ extension ClaudeAdapter: ChatAdapter {
         // Print mode loads Claude in Chrome only with --chrome (the terminal enables it by itself).
         ["-p", "--chrome", "--output-format", "stream-json", "--verbose", "--include-partial-messages",
          "--permission-mode", t.access, "--model", t.model, "--append-system-prompt", t.context]
+            + (t.mcpConfig.map { ["--strict-mcp-config", "--mcp-config", $0] } ?? [])
+            + (t.warm ? ["--input-format", "stream-json"] : [])
             + (t.started ? ["--resume", t.conversation] : ["--session-id", t.conversation])
     }
 
@@ -120,6 +126,19 @@ extension ClaudeAdapter: ChatAdapter {
             // The window size comes only here. Subagents may run on smaller models: take the largest.
             let windows = (o["modelUsage"] as? [String: [String: Any]] ?? [:]).values.compactMap { $0["contextWindow"] as? Int }
             if let w = windows.max(), w > 0 { p.context = ChatContext(used: p.context?.used ?? 0, window: w) }
+            // The turn's tokens, subagents included: modelUsage holds every model's total.
+            let models = (o["modelUsage"] as? [String: [String: Any]] ?? [:]).values
+            if !models.isEmpty {
+                for m in models {
+                    let out = m["outputTokens"] as? Int ?? 0
+                    p.spent += out + ["inputTokens", "cacheReadInputTokens", "cacheCreationInputTokens"].reduce(0) { $0 + (m[$1] as? Int ?? 0) }
+                    p.spentOut += out
+                }
+            } else if let u = o["usage"] as? [String: Any] {
+                let out = u["output_tokens"] as? Int ?? 0
+                p.spent += out + ["input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"].reduce(0) { $0 + (u[$1] as? Int ?? 0) }
+                p.spentOut += out
+            }
             if o["is_error"] as? Bool == true || (o["subtype"] as? String).map({ $0 != "success" }) == true {
                 let r = o["result"] as? String ?? ""
                 p.messages.append(ChatMessage(role: .error, text: r.isEmpty ? "The chat stopped with an error." : r))
@@ -219,6 +238,8 @@ extension CodexAdapter: ChatAdapter {
             if let u = o["usage"] as? [String: Any] {
                 let used = (u["input_tokens"] as? Int ?? 0) + (u["output_tokens"] as? Int ?? 0)
                 p.context = ChatContext(used: used, window: 272_000)
+                p.spent += used
+                p.spentOut += u["output_tokens"] as? Int ?? 0
             }
         case "turn.failed":
             p.finished = true
@@ -311,7 +332,10 @@ extension PiAdapter: ChatAdapter {
         case "message_end":
             guard let m = o["message"] as? [String: Any], m["role"] as? String == "assistant" else { return }
             if let u = m["usage"] as? [String: Any] {
-                p.setUsed(["input", "cacheRead", "cacheWrite", "output"].reduce(0) { $0 + (u[$1] as? Int ?? 0) })
+                let used = ["input", "cacheRead", "cacheWrite", "output"].reduce(0) { $0 + (u[$1] as? Int ?? 0) }
+                p.setUsed(used)
+                p.spent += used
+                p.spentOut += u["output"] as? Int ?? 0
             }
             // The text came with text_end; a message with none (a provider that does not stream) shows here.
             let text = (m["content"] as? [[String: Any]] ?? []).filter { $0["type"] as? String == "text" }

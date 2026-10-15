@@ -3,8 +3,11 @@ import AVFoundation
 import SwiftUI
 
 enum Mode: String, CaseIterable, Identifiable {
-    case camera = "Camera", cameraScreen = "Camera + Screen"
+    /// `screen`: the screen alone, with the mic in its file (the screen pill, 2026-10-13).
+    case camera = "Camera", cameraScreen = "Camera + Screen", screen = "Screen"
     var id: String { rawValue }
+    var hasCamera: Bool { self != .screen }
+    var hasScreen: Bool { self != .camera }
 }
 
 enum Phase: Equatable {
@@ -188,8 +191,8 @@ final class AppModel {
     private struct Pending {
         let doc: SessionDoc
         let number: Int
-        let cam: URL
-        let camStart: Date
+        let cam: URL?
+        let camStart: Date?
         let screen: URL?
         let screenStart: Date?
         let script: String?
@@ -258,6 +261,10 @@ final class AppModel {
         || ProcessInfo.processInfo.arguments.contains { $0.hasSuffix(".xctest") || $0.contains("PackageTests") }
 
     init() {
+        // The screen is recorded only from the pill (2026-10-14), and the pill starts closed.
+        if UserDefaults.standard.string(forKey: "mode") != Mode.camera.rawValue, UserDefaults.standard.string(forKey: "mode") != nil {
+            UserDefaults.standard.set(Mode.camera.rawValue, forKey: "mode")
+        }
         // The Styles tab of a session became the Styles board (2026-10-02).
         if UserDefaults.standard.string(forKey: "rightTab") == "library" {
             UserDefaults.standard.set(SessionMode.record.rawValue, forKey: "rightTab")
@@ -363,6 +370,7 @@ final class AppModel {
         if !Self.testing {
             chats.resume()
             if Features.socialBoards { scout.start(chats) }
+            for p in Plugins.all { p.start?(self) }
         }
         // The camera runs only while you can see it.
         for name in [NSWindow.didChangeOcclusionStateNotification, NSApplication.didHideNotification,
@@ -537,6 +545,7 @@ final class AppModel {
     /// Recording, and the countdown before it, always keep it on.
     func holdCamera() {
         let seen = (NSApp?.windows ?? []).contains { $0.isVisible && $0.canBecomeMain && $0.occlusionState.contains(.visible) }
+            || ScreenPill.shared.bubbleShown
         camera.hold(Self.holdsCamera(idle: phase == .idle, preview: preview != nil || postView || stageCovered || board != nil, seen: seen))
     }
 
@@ -608,7 +617,8 @@ final class AppModel {
         // was still dark through "3, 2, 1", and a start that timed out threw him back to the board).
         warmedUp = false
         phase = .warming
-        let woke = await camera.resume()
+        let rec = mode
+        let woke = rec.hasCamera ? await camera.resume() : false
         warmedUp = true
         if Task.isCancelled || phase != .warming { return }
         if woke && countdownOn {
@@ -627,20 +637,21 @@ final class AppModel {
         Store.markRecording(library.root, true)
         let n = doc.nextTakeNumber
         let nn = String(format: "%02d", n)
-        let camURL = doc.url.appending(path: "take-\(nn)-camera.mov")
-        let screenURL = mode == .cameraScreen ? doc.url.appending(path: "take-\(nn)-screen.mov") : nil
+        let camURL = rec.hasCamera ? doc.url.appending(path: "take-\(nn)-camera.mov") : nil
+        let screenURL = rec.hasScreen ? doc.url.appending(path: "take-\(nn)-screen.mov") : nil
         let micID = camera.audioID
         do {
-            async let camStart = camera.startRecording(to: camURL)
+            async let camStart = startCamera(camURL)
             var screenStart: Date?
             if let screenURL { screenStart = try await screen.startRecording(to: screenURL, micID: micID) }
             let cs = try await camStart
+            guard let started = cs ?? screenStart else { throw RecorderError("Nothing to record.") }
             pending = Pending(doc: doc, number: n, cam: camURL, camStart: cs, screen: screenURL, screenStart: screenStart,
                               script: doc.activeDraft == "main" ? nil : doc.draftName(doc.activeDraft),
                               hook: shot == nil ? HookStore.current(doc.activeText, HookStore.read(doc.url).hooks)?.text : nil,
                               shot: shot?.id)
             phase = .recording(Date())
-            for h in Plugins.recordHooks { h.take(TakeMoment(session: doc.url, number: n, started: cs)) }
+            for h in Plugins.recordHooks { h.take(TakeMoment(session: doc.url, number: n, started: started)) }
             if autoScroll && Plugins.recordStage(doc.url) == nil { scrolling = true }
         } catch {
             self.error = error is CancellationError ? nil : error.localizedDescription
@@ -652,6 +663,31 @@ final class AppModel {
             phase = .idle
             // A failed shot stays on Record with the error and the shot's lines: Record tries again.
         }
+    }
+
+    /// Start over (the screen pill): the take so far goes away, files and all, and the count runs again.
+    func restartTake() {
+        guard case .recording = phase, let p = pending else { return }
+        recordTask = Task {
+            phase = .finishing
+            scrolling = false
+            async let a: Void = camera.stopRecording()
+            async let b: Void = screen.stopRecording()
+            _ = await (a, b)
+            for u in [p.cam, p.screen].compactMap({ $0 }) { try? FileManager.default.removeItem(at: u) }
+            pending = nil
+            library.isRecording = false
+            Store.markRecording(library.root, false)
+            for h in Plugins.recordHooks { h.take(TakeMoment(session: p.doc.url, number: p.number, started: nil)) }
+            phase = .warming
+            await start()
+        }
+    }
+
+    /// The camera file of a take, or none for a screen-only take.
+    private func startCamera(_ url: URL?) async throws -> Date? {
+        guard let url else { return nil }
+        return try await camera.startRecording(to: url)
     }
 
     /// The camera runs while the phase is .warming: the stage says "Get ready".
@@ -677,8 +713,11 @@ final class AppModel {
         Store.markRecording(library.root, false)
         for h in Plugins.recordHooks { h.take(TakeMoment(session: p.doc.url, number: p.number, started: nil)) }
 
-        var takes = [Take(number: p.number, kind: .camera, file: p.cam.lastPathComponent,
-                          startedAt: p.camStart, duration: await Self.duration(p.cam), script: p.script, hook: p.hook, shot: p.shot)]
+        var takes: [Take] = []
+        if let c = p.cam, let cs = p.camStart {
+            takes.append(Take(number: p.number, kind: .camera, file: c.lastPathComponent,
+                              startedAt: cs, duration: await Self.duration(c), script: p.script, hook: p.hook, shot: p.shot))
+        }
         if let s = p.screen, let ss = p.screenStart {
             takes.append(Take(number: p.number, kind: .screen, file: s.lastPathComponent,
                               startedAt: ss, duration: await Self.duration(s), script: p.script, hook: p.hook, shot: p.shot))

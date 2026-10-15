@@ -5,11 +5,18 @@ import ScreenCaptureKit
 /// The Takes window itself is excluded, so the script never shows up in the screen file.
 final class ScreenRecorder: NSObject, ObservableObject, SCStreamDelegate, SCRecordingOutputDelegate {
     struct Display: Identifiable, Hashable { let id: CGDirectDisplayID; let name: String }
+    /// One app window to record instead of a whole display (the screen pill, 2026-10-14).
+    struct Window: Identifiable, Hashable { let id: CGWindowID; let app: String; let title: String }
 
     @Published var displays: [Display] = []
     @Published var displayID: CGDirectDisplayID? {
         didSet { UserDefaults.standard.set(displayID.map { Int($0) }, forKey: "display") }
     }
+
+    /// The windows you can pick, newest list from `refreshWindows`.
+    @Published var windows: [Window] = []
+    /// Record this window alone; nil records the display. Not saved: windows come and go.
+    @Published var windowID: CGWindowID?
 
     private var stream: SCStream?
     private var startCont: CheckedContinuation<Date, Error>?
@@ -33,12 +40,37 @@ final class ScreenRecorder: NSObject, ObservableObject, SCStreamDelegate, SCReco
         if !displays.contains(where: { $0.id == displayID }) { displayID = displays.first?.id }
     }
 
+    /// The app windows on screen, for the pill's menu. Takes' own windows are left out.
+    @MainActor
+    func refreshWindows() async {
+        guard let content = try? await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: true) else { return }
+        let found = Self.pickable(content.windows).map {
+            Window(id: $0.windowID, app: $0.owningApplication?.applicationName ?? "", title: $0.title ?? "")
+        }
+        if found != windows { windows = found }
+        if let w = windowID, !found.contains(where: { $0.id == w }) { windowID = nil }
+    }
+
+    /// Normal windows of other apps, big enough to show, with a name to pick them by.
+    static func pickable(_ all: [SCWindow]) -> [SCWindow] {
+        all.filter { w in
+            w.windowLayer == 0 && w.frame.width >= 200 && w.frame.height >= 150
+                && w.owningApplication?.bundleIdentifier != Bundle.main.bundleIdentifier
+                && !(w.owningApplication?.applicationName ?? "").isEmpty
+        }
+    }
+
     func startRecording(to url: URL, micID: String?) async throws -> Date {
         let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
-        guard let display = content.displays.first(where: { $0.displayID == displayID }) ?? content.displays.first
-        else { throw RecorderError("No display found.") }
-        let me = content.applications.filter { $0.bundleIdentifier == Bundle.main.bundleIdentifier }
-        let filter = SCContentFilter(display: display, excludingApplications: me, exceptingWindows: [])
+        let filter: SCContentFilter
+        if let id = windowID, let window = content.windows.first(where: { $0.windowID == id }) {
+            filter = SCContentFilter(desktopIndependentWindow: window)
+        } else {
+            guard let display = content.displays.first(where: { $0.displayID == displayID }) ?? content.displays.first
+            else { throw RecorderError("No display found.") }
+            let me = content.applications.filter { $0.bundleIdentifier == Bundle.main.bundleIdentifier }
+            filter = SCContentFilter(display: display, excludingApplications: me, exceptingWindows: [])
+        }
 
         let config = SCStreamConfiguration()
         let scale = CGFloat(filter.pointPixelScale)

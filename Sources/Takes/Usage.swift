@@ -10,11 +10,12 @@ import SwiftUI
 @MainActor @Observable
 final class Usage {
     static let shared = Usage()
-    static let answerKey = "usageAnswer"   // "yes", "no", or nothing: not asked yet
+    nonisolated static let answerKey = "usageAnswer"   // "yes", "no", or nothing: not asked yet
     static let idKey = "usageID"
     static let firstKey = "usageFirstSeen"
     static let sentKey = "usageSent"       // the UTC day of the last report, YYYY-MM-DD
     static let reportKey = "usageLastReport"
+    nonisolated static let tokensKey = "usageTokens"   // {"YYYY-MM-DD": [all, written]}: token totals per day, nothing else
     static var endpoint = URL(string: "https://gettakes.app/ping")!
     static let askAfter: TimeInterval = 20 * 60
 
@@ -33,6 +34,13 @@ final class Usage {
         var posts_ready = 0, posts_scheduled = 0, posts_posted = 0, published = 0
         /// 1 when an iPhone used Takes on this Mac in the last 7 days.
         var phone = 0
+        /// The last 7 days (2026-10-13): messages sent to the chat, takes recorded and their
+        /// minutes, edits made, and times Takes crashed. Counts only: never what a message says.
+        var chats_7d = 0, takes_7d = 0, record_min_7d = 0, edits_7d = 0, crashes_7d = 0
+        /// Days since this Mac first opened a release of Takes.
+        var age_days = 0
+        /// Thousands of tokens the chat used in the last 7 days: all of them, and the ones the agent wrote.
+        var tokens_7d = 0, out_tokens_7d = 0
     }
 
     /// Everything one report holds. Numbers, versions and plugin ids: nothing a person wrote.
@@ -42,6 +50,8 @@ final class Usage {
         var os: String
         var counts: Counts
         var plugins: [String]
+        /// The agent the chat starts on: "claude", "codex" or "pi".
+        var agent: String
     }
 
     func start(_ library: Library) {
@@ -109,6 +119,22 @@ final class Usage {
         }
     }
 
+    /// Adds a chat run's tokens to today's total. Only while usage counts are on: off, nothing is kept.
+    nonisolated static func addTokens(_ all: Int, out: Int, on: Bool = UserDefaults.standard.string(forKey: answerKey) == "yes",
+                                      defaults: UserDefaults = .standard, now: Date = Date()) {
+        guard on, all > 0 || out > 0 else { return }
+        var days = tokens(defaults)
+        let today = today(now), oldest = Self.today(now.addingTimeInterval(-14 * 86_400))
+        let t = days[today] ?? [0, 0]
+        days[today] = [t[0] + max(0, all), t[1] + max(0, out)]
+        days = days.filter { $0.key >= oldest }
+        defaults.set(try? JSONEncoder().encode(days), forKey: tokensKey)
+    }
+
+    nonisolated static func tokens(_ defaults: UserDefaults = .standard) -> [String: [Int]] {
+        defaults.data(forKey: tokensKey).flatMap { try? JSONDecoder().decode([String: [Int]].self, from: $0) } ?? [:]
+    }
+
     static func encode(_ r: Report) throws -> Data {
         let e = JSONEncoder()
         e.outputFormatting = [.prettyPrinted, .sortedKeys]
@@ -127,24 +153,60 @@ final class Usage {
         let v = ProcessInfo.processInfo.operatingSystemVersion
         let id = Self.id, version = Self.release ?? "source", root = library.root, projects = library.projects.count
         let plugins = Plugins.all.map(\.id), phone = PhoneServer.usedRecently()
+        let agent = ChatAgent.current.rawValue
+        let first = UserDefaults.standard.object(forKey: Self.firstKey) as? Date
+        let tokens = Self.tokens()
         return {
             Self.report(id: id, version: version, os: "\(v.majorVersion).\(v.minorVersion)", root: root, projects: projects,
-                        sessions: sessions, plugins: plugins, phone: phone)
+                        sessions: sessions, plugins: plugins, phone: phone, agent: agent, firstSeen: first, tokens: tokens)
         }
+    }
+
+    /// Where Takes keeps the chats of its boards, and where macOS writes crash reports.
+    nonisolated static var boardChats: URL { ClaudeChat.boardFolder }
+    nonisolated static var crashReports: URL {
+        FileManager.default.homeDirectoryForCurrentUser.appending(path: "Library/Logs/DiagnosticReports")
     }
 
     nonisolated static func report(id: String, version: String, os: String, root: URL, projects: Int,
                                    sessions: [(url: URL, takes: Int, published: Bool)],
-                                   plugins: [String], phone: Bool) -> Report {
+                                   plugins: [String], phone: Bool, agent: String = "claude", firstSeen: Date? = nil, tokens: [String: [Int]] = [:],
+                                   boards: URL = boardChats, crashes: URL = crashReports, now: Date = Date()) -> Report {
         let fm = FileManager.default
+        let week = now.addingTimeInterval(-7 * 86_400)
         var c = Counts(projects: projects, sessions: sessions.count)
+        var chatFiles: [URL] = []
+        var seconds = 0.0
         for s in sessions {
             c.takes += s.takes
             if s.published { c.published += 1 }
-            let edits = (try? fm.contentsOfDirectory(atPath: s.url.appending(path: "edits").path)) ?? []
-            c.edits += edits.filter { ["mp4", "mov", "m4v"].contains(($0 as NSString).pathExtension.lowercased()) }.count
+            let edits = files(s.url.appending(path: "edits")).filter { ["mp4", "mov", "m4v"].contains($0.pathExtension.lowercased()) }
+            c.edits += edits.count
+            c.edits_7d += edits.filter { modified($0) > week }.count
             if fm.fileExists(atPath: Storyboard.file(s.url).path) { c.storyboards += 1 }
+            for t in Store.readMeta(s.url)?.takes ?? [] where t.startedAt > week {
+                c.takes_7d += 1
+                seconds += t.duration ?? 0
+            }
+            chatFiles.append(ClaudeChat.file(s.url))
+            chatFiles += files(s.url.appending(path: ".claude-chats"))
         }
+        c.record_min_7d = Int((seconds / 60).rounded())
+        for f in files(boards) {
+            if f.lastPathComponent.hasSuffix("-chat.json") { chatFiles.append(f) }
+            if f.lastPathComponent.hasSuffix("-chats") { chatFiles += files(f) }
+        }
+        for f in chatFiles where f.pathExtension == "json" && modified(f) > week {
+            c.chats_7d += ClaudeChat.load(f)?.messages.filter { $0.role == .user && ($0.at ?? .distantPast) > week }.count ?? 0
+        }
+        c.crashes_7d = files(crashes).filter {
+            $0.lastPathComponent.hasPrefix("Takes-") && ["ips", "crash"].contains($0.pathExtension) && modified($0) > week
+        }.count
+        let since = today(now.addingTimeInterval(-6 * 86_400))
+        let week7 = tokens.filter { $0.key >= since && $0.value.count == 2 }.values
+        c.tokens_7d = Int((Double(week7.reduce(0) { $0 + $1[0] }) / 1000).rounded())
+        c.out_tokens_7d = Int((Double(week7.reduce(0) { $0 + $1[1] }) / 1000).rounded())
+        if let firstSeen { c.age_days = max(0, Int(now.timeIntervalSince(firstSeen) / 86_400)) }
         for p in PostQueue.read(root) {
             switch p.content.status {
             case .ready: c.posts_ready += 1
@@ -154,7 +216,16 @@ final class Usage {
             }
         }
         c.phone = phone ? 1 : 0
-        return Report(id: id, v: version, os: os, counts: c, plugins: plugins.sorted())
+        let agents = ["claude", "codex", "pi"]
+        return Report(id: id, v: version, os: os, counts: c, plugins: plugins.sorted(), agent: agents.contains(agent) ? agent : "")
+    }
+
+    private nonisolated static func files(_ dir: URL) -> [URL] {
+        (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.contentModificationDateKey])) ?? []
+    }
+
+    private nonisolated static func modified(_ url: URL) -> Date {
+        (try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
     }
 }
 
@@ -166,6 +237,9 @@ enum UsageCopy {
     static let neverDetail = "No chat history, prompts or replies. No scripts, video titles, file names, post text or keys. They stay on your Mac."
     static let sent: [(icon: String, text: String)] = [
         ("number", "How many takes, edits and storyboards"),
+        ("calendar", "This week: how many takes, minutes, edits and chat messages"),
+        ("cpu", "The agent the chat uses, and how often Takes crashed"),
+        ("gauge", "How many tokens the chat used this week (a number, never the words)"),
         ("paperplane", "How many posts are ready, scheduled or posted"),
         ("puzzlepiece.extension", "Which plugins are on"),
         ("iphone", "If you use Takes on an iPhone"),
@@ -262,6 +336,7 @@ struct UsageAskLayer: View {
             }
         }
         .animation(Theme.spring, value: usage.asking)
+        .allowsHitTesting(usage.asking)  // on its way out it takes no clicks, like OnboardingLayer
     }
 }
 

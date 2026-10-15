@@ -280,10 +280,7 @@ struct FileRefCard: View {
 
     @MainActor private static func look(_ url: URL) -> (asset: Asset, session: String?) {
         if let k = known[url], Date().timeIntervalSince(k.at) < 3 { return (k.asset, k.session) }
-        let attrs = try? FileManager.default.attributesOfItem(atPath: url.path)
-        let asset = Asset(url: url, group: "", name: url.lastPathComponent,
-                          size: (attrs?[.size] as? NSNumber)?.int64Value ?? 0,
-                          modified: attrs?[.modificationDate] as? Date ?? .distantPast)
+        let asset = Asset.at(url)
         // The session folder above the file, for its title.
         var session: String?
         var dir = url.deletingLastPathComponent()
@@ -314,8 +311,10 @@ struct FileRefCard: View {
             }
             let a = asset
             image = Thumbs.shared.cached(a)
-            if image == nil { image = await Thumbs.shared.image(a) }
-            if a.kind == .video || a.kind == .audio { duration = await Thumbs.shared.duration(a) }
+            if image == nil {
+                image = a.kind == .video ? await Thumbs.shared.frame(waitingFor: url) : await Thumbs.shared.image(a)
+            }
+            if a.kind == .video || a.kind == .audio { duration = await Thumbs.shared.duration(Asset.at(url)) }
         }
     }
 

@@ -1,4 +1,6 @@
+import AppKit
 import Foundation
+import SwiftUI
 import Testing
 @testable import Takes
 
@@ -45,6 +47,71 @@ extension ChatRunTests {
             flow.startIfNew(app.library)
             #expect(!flow.shown)
             #expect(UserDefaults.standard.bool(forKey: Onboarding.doneKey))
+        }
+
+        /// Skip, Esc and "Look around first" all end in finish(): from any page it closes, and stays
+        /// closed at the next launch.
+        @Test func skipClosesFromEveryPageForGood() throws {
+            defer { cleanup() }
+            let app = try fresh()
+            for page in 0..<Onboarding.pages {
+                UserDefaults.standard.removeObject(forKey: Onboarding.doneKey)
+                flow.show(); flow.go(page)
+                flow.finish()
+                #expect(!flow.shown, "page \(page)")
+                flow.startIfNew(app.library)
+                #expect(!flow.shown && UserDefaults.standard.bool(forKey: Onboarding.doneKey), "page \(page)")
+            }
+        }
+
+        /// 2026-10-15 (Product Hunt, newest macOS): Skip "did nothing" and after Write my script the
+        /// welcome would not go, so the app had to be quit. A welcome on its way out kept taking every
+        /// click until its exit animation ended; an exit that never ends left the window dead.
+        @Test func aClosingWelcomeLetsClicksThrough() async throws {
+            defer { cleanup() }
+            let app = try fresh()
+            final class Taps { var n = 0 }
+            let taps = Taps()
+            let w = NSWindow(contentRect: NSRect(x: -6000, y: -6000, width: 960, height: 700), styleMask: [.borderless],
+                             backing: .buffered, defer: false)
+            w.isReleasedWhenClosed = false
+            w.contentView = NSHostingView(rootView: ZStack {
+                Button { taps.n += 1 } label: { Color.gray.frame(maxWidth: .infinity, maxHeight: .infinity).contentShape(Rectangle()) }
+                    .buttonStyle(.plain)
+                OnboardingLayer()
+            }.environment(app))
+            w.orderFrontRegardless()
+            defer { w.orderOut(nil) }
+            func click() {
+                for t in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
+                    w.sendEvent(NSEvent.mouseEvent(with: t, location: NSPoint(x: 30, y: 30), modifierFlags: [],
+                                                   timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: w.windowNumber,
+                                                   context: nil, eventNumber: 0, clickCount: 1, pressure: t == .leftMouseDown ? 1 : 0)!)
+                }
+            }
+            flow.show()
+            try await Task.sleep(for: .milliseconds(600))
+            click()
+            try await Task.sleep(for: .milliseconds(50))
+            #expect(taps.n == 0, "the open welcome keeps the window out of reach")
+            flow.finish()
+            try await Task.sleep(for: .milliseconds(50))
+            click()
+            try await Task.sleep(for: .milliseconds(50))
+            #expect(taps.n == 1, "the window answers at once, before the fade ends")
+        }
+
+        /// The shade over the window while the notch's tour runs: its Skip must not depend on the
+        /// notch panel, which may be off screen (another Space, full screen).
+        @Test func skippingTheNotchTourClearsTheShade() {
+            let d = UserDefaults.standard
+            defer { d.removeObject(forKey: NotchView.introKey) }
+            d.set(0, forKey: NotchView.introKey)
+            let app = AppModel()
+            app.notchTour = true
+            NotchTourShade.skip(app)
+            #expect(!app.notchTour)
+            #expect(d.integer(forKey: NotchView.introKey) == NotchView.intro.count)
         }
 
         @Test func pagesStopAtBothEnds() throws {

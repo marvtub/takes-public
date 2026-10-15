@@ -1,7 +1,7 @@
-<p align="center"><img src="docs/gallery/1-main.jpg" alt="Takes for Mac: record talking-head videos, Claude Code does the edit" width="100%"></p>
+<p align="center"><img src="docs/gallery/1-main.jpg" alt="Takes for Mac: record talking-head videos, your agent does the edit" width="100%"></p>
 
 <p align="center">
-  Record on your Mac or iPhone. <a href="https://claude.com/claude-code">Claude Code</a> writes the script,<br>
+  Record on your Mac or iPhone. Your agent (<a href="https://claude.com/claude-code">Claude Code</a>, Codex or pi) writes the script,<br>
   cuts the edit and drafts the posts.<br>
   <a href="https://gettakes.app"><b>gettakes.app</b></a>
 </p>
@@ -10,11 +10,11 @@
   <img alt="macOS 15+" src="https://img.shields.io/badge/macOS-15%2B-0b1530">
   <img alt="iOS 18+" src="https://img.shields.io/badge/iPhone-iOS%2018%2B-0b1530">
   <img alt="Swift" src="https://img.shields.io/badge/Swift-SwiftUI-3b82f6">
-  <img alt="MCP" src="https://img.shields.io/badge/Claude%20Code-MCP%20server-d97757">
+  <img alt="MCP" src="https://img.shields.io/badge/MCP%20server-Claude%20Code%20%C2%B7%20Codex%20%C2%B7%20pi-d97757">
   <img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-22c55e">
 </p>
 
-Takes shows each post the way LinkedIn, X, YouTube or Shorts will show it, so you review the real thing. No coding needed, no account, no usage data: your videos stay in folders on your Mac.
+Takes shows each post the way LinkedIn, X, YouTube or Shorts will show it, so you review the real thing. No coding needed and no account. Your videos, scripts and chats stay in folders on your Mac. Takes only checks for updates, and sends usage counts if you say yes ([privacy](https://gettakes.app/privacy)).
 
 ## Install
 
@@ -36,7 +36,7 @@ It installs Takes, ffmpeg and Apple's developer tools, then opens Takes. Takes w
 
 ## How a video goes
 
-1. **Storyboard.** Ask *"storyboard my next video"*. Claude writes the script and sketches each shot.
+1. **Storyboard.** Ask *"storyboard my next video"*. Your agent writes the script and sketches each shot.
 2. **Record.** Read off a teleprompter that follows your voice. Camera and screen record as two synced files. Star the take you keep.
 3. **Post.** Ask *"cut my last take"* and *"write the posts"*. Review each draft as the platform shows it, leave comments on a frame or a line, and schedule it.
 
@@ -44,7 +44,7 @@ It installs Takes, ffmpeg and Apple's developer tools, then opens Takes. Takes w
 
 <p align="center"><img src="docs/gallery/2-record.jpg" alt="A teleprompter that follows your voice, camera and screen in one take" width="100%"></p>
 
-<p align="center"><img src="docs/gallery/4-edit.jpg" alt="No timeline: Claude Code cuts the take and makes the vertical version" width="100%"></p>
+<p align="center"><img src="docs/gallery/4-edit.jpg" alt="No timeline: your agent cuts the take and makes the vertical version" width="100%"></p>
 
 <p align="center"><img src="docs/gallery/5-comment.jpg" alt="Notes on the frame become a new version of the edit" width="100%"></p>
 
@@ -52,7 +52,7 @@ It installs Takes, ffmpeg and Apple's developer tools, then opens Takes. Takes w
 
 <p align="center"><img src="docs/gallery/7-posts.jpg" alt="The posts for LinkedIn, X, YouTube and Shorts, previewed as the real post" width="100%"></p>
 
-<p align="center"><img src="docs/gallery/8-rules.jpg" alt="A note given once becomes a rule Claude reads before every edit" width="100%"></p>
+<p align="center"><img src="docs/gallery/8-rules.jpg" alt="A note given once becomes a rule your agent reads before every edit" width="100%"></p>
 
 ## On your iPhone
 
@@ -85,9 +85,9 @@ flowchart LR
 
 ## Good to know
 
-- **Needs:** a Mac with Apple silicon, macOS 15+ and a Claude plan.
+- **Needs:** a Mac with Apple silicon, macOS 15+, and Claude Code, Codex or pi on your own plan.
 - **Optional:** `whisper` for transcripts. A Gemini key for storyboard sketches, B-roll names and best cuts: Settings › Gemini says what it adds and saves it.
-- **Questions and ideas:** [Discussions](https://github.com/marvtub/takes-public/discussions). Takes does not take pull requests, so one person keeps it consistent. Forks are welcome.
+- **Questions and ideas:** [Discussions](https://github.com/marvtub/takes-public/discussions). Takes does not take pull requests, so one person keeps it consistent. Forks are welcome. More in [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md).
 - The pictures are the real app on a made-up library.
 
 ## Support

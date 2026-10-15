@@ -10,6 +10,8 @@ import unittest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import takes_mcp as t  # noqa: E402
 
+os.environ["TAKES_NO_REVIEW"] = "1"  # never let a real Gemini key watch a test edit
+
 
 class Lessons(unittest.TestCase):
     def setUp(self):

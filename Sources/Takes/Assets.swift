@@ -176,6 +176,16 @@ enum FrameGrabber {
 
 // MARK: - Thumbnails
 
+extension Asset {
+    /// A file as it is on disk now: its size and date, so a file written again gets a new cache key.
+    static func at(_ url: URL) -> Asset {
+        let attrs = try? FileManager.default.attributesOfItem(atPath: url.path)
+        return Asset(url: url, group: "", name: url.lastPathComponent,
+                     size: (attrs?[.size] as? NSNumber)?.int64Value ?? 0,
+                     modified: attrs?[.modificationDate] as? Date ?? .distantPast)
+    }
+}
+
 @MainActor
 final class Thumbs {
     static let shared = Thumbs()
@@ -211,6 +221,21 @@ final class Thumbs {
         let at = CMTime(seconds: secs.isFinite && secs > 0 ? min(3, secs * 0.2) : 0, preferredTimescale: 600)
         guard let cg = try? await gen.image(at: at).image else { return nil }
         return NSImage(cgImage: cg, size: NSSize(width: cg.width, height: cg.height))
+    }
+
+    /// The frame of a video that may still be written. An agent can name an edit while ffmpeg
+    /// still writes it, and a half-written file has no frame: a new user's first edit showed a grey
+    /// card for good (2026-10-13, a Codex chat). Looks again, with the file's new date, until a
+    /// frame comes or it gives up.
+    func frame(waitingFor url: URL, tries: Int = 90, every: Duration = .seconds(2)) async -> NSImage? {
+        for n in 0..<tries {
+            if n > 0 {
+                try? await Task.sleep(for: every)
+                if Task.isCancelled { return nil }
+            }
+            if let image = await image(Asset.at(url)) { return image }
+        }
+        return nil
     }
 
     func duration(_ a: Asset) async -> Double? {

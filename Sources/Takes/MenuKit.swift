@@ -428,7 +428,9 @@ final class MenuPanel {
         let p = Panel(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         p.isFloatingPanel = true
         p.level = .popUpMenu
-        p.hidesOnDeactivate = true
+        // From the screen pill Takes is not the active app: the menu must stay up all the same.
+        p.hidesOnDeactivate = NSApp.isActive
+        p.collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary]
         p.becomesKeyOnlyIfNeeded = true
         p.backgroundColor = .clear
         p.isOpaque = false
@@ -447,7 +449,9 @@ final class MenuPanel {
         let frame = self.frame(for: size)
         p.setFrame(frame.offsetBy(dx: 0, dy: upward ? -4 : 4), display: false)
         p.alphaValue = 0
-        if let parent = NSApp.keyWindow ?? NSApp.mainWindow, parent !== p { parent.addChildWindow(p, ordered: .above) }
+        // Only on a window you can see: the pill puts the Takes window away, and a menu on it
+        // went away with it (2026-10-14: the pill's camera and mic menus never showed).
+        if let parent = NSApp.keyWindow ?? NSApp.mainWindow, parent !== p, parent.isVisible { parent.addChildWindow(p, ordered: .above) }
         p.orderFront(nil)
         NSAnimationContext.runAnimationGroup { c in
             c.duration = 0.18

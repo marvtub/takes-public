@@ -218,14 +218,20 @@ enum Lessons {
 
     /// You approve Takes' merge: the other rule gets the merged text and this rule's comments, and
     /// this rule turns off. The other rule stays yours or Takes'. Nothing happens when the merge no
-    /// longer fits (mergeTarget).
-    nonisolated static func merge(_ root: URL, _ id: String) {
+    /// longer fits (mergeTarget). With `text`, you saw both rules as they are now and approved these
+    /// words: the merge goes in even if the other rule changed since, and changed words make it yours.
+    nonisolated static func merge(_ root: URL, _ id: String, text: String? = nil) {
         change(root) { f in
             guard let i = f.rules.firstIndex(where: { $0.id == id }), let m = f.rules[i].merge,
-                  mergeTarget(f.rules[i], in: f.rules) != nil,
                   let j = f.rules.firstIndex(where: { $0.id == m.into }) else { return }
+            if let text {
+                guard f.rules[j].isOn, f.rules[j].mergedInto == nil, !text.isEmpty else { return }
+                if text != m.text { f.rules[j].by = "you" }
+            } else if mergeTarget(f.rules[i], in: f.rules) == nil {
+                return
+            }
             let source = f.rules[i]
-            f.rules[j].text = m.text
+            f.rules[j].text = text ?? m.text
             var from = f.rules[j].from ?? []
             for r in source.from ?? [] where !from.contains(r) { from.append(r) }
             f.rules[j].from = from
@@ -238,6 +244,66 @@ enum Lessons {
             f.rules[i].merge = nil
             f.rules[i].changed = now()
         }
+    }
+
+    /// Puts back a rule you just deleted (Undo), before the rule that followed it.
+    nonisolated static func restore(_ root: URL, _ rule: LearnedRule, before: String?) {
+        change(root) { f in
+            guard !f.rules.contains(where: { $0.id == rule.id }) else { return }
+            if let before, let i = f.rules.firstIndex(where: { $0.id == before }) {
+                f.rules.insert(rule, at: i)
+            } else {
+                f.rules.append(rule)
+            }
+        }
+    }
+
+    /// Moves a rule to another area, with a new id there. Nothing happens when that area is full.
+    nonisolated static func move(_ root: URL, _ id: String, to area: String) {
+        change(root) { f in
+            guard let i = f.rules.firstIndex(where: { $0.id == id }), f.rules[i].area != area,
+                  f.rules.filter({ $0.area == area && $0.counts }).count < Feedback.areaMax else { return }
+            let n = (f.rules.compactMap { r -> Int? in
+                guard r.id.hasPrefix(area + "-") else { return nil }
+                return Int(r.id.dropFirst(area.count + 1))
+            }.max() ?? 0) + 1
+            let new = "\(area)-\(n)"
+            for j in f.rules.indices {
+                if f.rules[j].merge?.into == id { f.rules[j].merge?.into = new }
+                if f.rules[j].mergedInto == id { f.rules[j].mergedInto = new }
+            }
+            f.rules[i].id = new
+            f.rules[i].area = area
+            f.rules[i].by = "you"
+            f.rules[i].changed = now()
+        }
+    }
+
+    enum DiffKind { case same, added, removed }
+
+    /// Word by word, what changes from `old` to `new`: runs of kept, added and removed words.
+    nonisolated static func wordDiff(_ old: String, _ new: String) -> [(kind: DiffKind, words: String)] {
+        let a = old.split(whereSeparator: \.isWhitespace).map(String.init)
+        let b = new.split(whereSeparator: \.isWhitespace).map(String.init)
+        let key = { (w: String) in w.lowercased().trimmingCharacters(in: .punctuationCharacters) }
+        var l = Array(repeating: Array(repeating: 0, count: b.count + 1), count: a.count + 1)
+        for i in stride(from: a.count - 1, through: 0, by: -1) {
+            for j in stride(from: b.count - 1, through: 0, by: -1) {
+                l[i][j] = key(a[i]) == key(b[j]) ? l[i + 1][j + 1] + 1 : max(l[i + 1][j], l[i][j + 1])
+            }
+        }
+        var out: [(kind: DiffKind, words: String)] = []
+        func put(_ k: DiffKind, _ w: String) {
+            if let last = out.last, last.kind == k { out[out.count - 1].words += " " + w } else { out.append((k, w)) }
+        }
+        var i = 0, j = 0
+        while i < a.count || j < b.count {
+            if i < a.count, j < b.count, key(a[i]) == key(b[j]) { put(.same, b[j]); i += 1; j += 1 }
+            // What goes reads before what comes in its place.
+            else if i < a.count, j == b.count || l[i + 1][j] >= l[i][j + 1] { put(.removed, a[i]); i += 1 }
+            else { put(.added, b[j]); j += 1 }
+        }
+        return out
     }
 
     /// You keep both rules: the suggestion goes, the rule stays as it is.
@@ -711,92 +777,160 @@ private struct FeedbackWeekCard: View {
 
 // MARK: - Rules
 
-/// The rules Takes follows, by area. Chips at the top pick an area; each rule has its own switch.
+/// The rules Takes follows, in two views (2026-10-14, picked on the design canvas): Rules, one area
+/// at a time as a plain numbered list you can search, and Merges, the merges Takes suggests, one at
+/// a time. Every area at once was 80 rows; a merge under a rule far down the list was never seen.
 struct RulesCard: View {
+    enum Mode: Hashable { case rules, merges }
     let store: FeedbackStore
     let root: URL
-    /// nil: every area.
-    @State private var area: String?
+    /// The area he looked at last.
+    @AppStorage("rules.area") private var picked = ""
     @State private var adding: Bool
+    @State private var mode: Mode
+    @State private var search: String
+    /// The rule you just deleted, while Undo shows.
+    @State private var removed: (rule: LearnedRule, before: String?)?
+    @FocusState private var searching: Bool
 
-    /// `adding` only for a snapshot.
-    init(store: FeedbackStore, root: URL, adding: Bool = false) {
+    /// `adding`, `area`, `merges` and `search` only for a snapshot.
+    init(store: FeedbackStore, root: URL, adding: Bool = false, area: String? = nil, merges: Bool = false, search: String = "") {
         self.store = store
         self.root = root
         _adding = State(initialValue: adding)
+        _mode = State(initialValue: merges ? .merges : .rules)
+        _search = State(initialValue: search)
+        if let area { UserDefaults.standard.set(area, forKey: "rules.area") }
     }
 
     var body: some View {
         let rules = Lessons.shown(store.rules)
-        let shown = area.map { a in rules.filter { $0.area == a } } ?? rules
-        let waiting = rules.filter { $0.merge != nil }.count
-        return VStack(alignment: .leading, spacing: 14) {
-            HStack(alignment: .center, spacing: 12) {
+        let waiting = rules.filter { $0.merge != nil }
+        let areas = Feedback.areas.filter { a in rules.contains { $0.area == a.id } }
+        let area = areas.contains { $0.id == picked } ? picked : areas.first?.id ?? "cut"
+        let query = search.trimmingCharacters(in: .whitespacesAndNewlines)
+        return VStack(alignment: .leading, spacing: 16) {
+            header(waiting: waiting.count, empty: rules.isEmpty)
+            if mode == .merges {
+                MergeQueue(waiting: waiting, store: store, root: root)
+                    .transition(.opacity)
+            } else {
+                if adding {
+                    RuleComposer(store: store, root: root, area: area) { withAnimation(.page) { adding = false } }
+                        .transition(.opacity.combined(with: .offset(y: -6)))
+                }
+                if rules.isEmpty && !adding {
+                    empty
+                } else if !query.isEmpty {
+                    SearchResults(query: query, rules: rules, store: store, root: root,
+                                  delete: delete, openMerges: openMerges)
+                } else if !rules.isEmpty {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 6) {
+                            ForEach(areas, id: \.id) { a in
+                                AreaChip(title: a.title, count: rules.filter { $0.area == a.id && $0.counts }.count,
+                                         on: a.id == area) { picked = a.id }
+                            }
+                        }
+                        .padding(1)
+                    }
+                    AreaRules(rules: rules.filter { $0.area == area }, store: store, root: root,
+                              delete: delete, openMerges: openMerges)
+                        .id(area)
+                        .transition(.opacity)
+                }
+            }
+            if let removed { undo(removed.rule) }
+        }
+        .card(padding: 16)
+        .animation(.page, value: mode)
+        .animation(.page, value: area)
+        .animation(.page, value: rules.map(\.id))
+        .animation(.page, value: query.isEmpty)
+        .animation(.page, value: removed?.rule.id)
+        .task(id: removed?.rule.id) {
+            guard removed != nil else { return }
+            try? await Task.sleep(for: .seconds(8))
+            if !Task.isCancelled { removed = nil }
+        }
+    }
+
+    private func header(waiting: Int, empty: Bool) -> some View {
+        HStack(alignment: .center, spacing: 10) {
+            if empty {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Rules").font(Theme.sans(13, .semibold)).foregroundStyle(Theme.ink)
                     Text("Takes reads these before every edit.").font(Theme.sans(12)).foregroundStyle(Theme.muted)
                 }
-                Spacer()
+            } else {
+                ModeSwitch(mode: $mode, waiting: waiting)
+            }
+            Spacer(minLength: 8)
+            if mode == .rules {
                 if store.stats.unlabeled > 0 {
                     MetaTag(text: "\(store.stats.unlabeled) resolved without a lesson", icon: "exclamationmark.circle", tint: Theme.warn)
                         .help("Comments resolved after the first rule, with nothing learned. Resolving one in the app gives none.")
                 }
-                if waiting > 0 {
-                    MetaTag(text: "\(waiting) merge\(waiting == 1 ? "" : "s") to check", icon: "arrow.triangle.merge", tint: Theme.accentInk)
-                        .help("Takes wants to merge rules in a full area. Find the box under the rule.")
-                }
-                if !adding && !rules.isEmpty {
+                if !empty { searchField }
+                if !adding && !empty {
                     Button { withAnimation(.page) { adding = true } } label: {
                         Label("Add a rule", systemImage: "plus").font(Theme.sans(12, .medium))
                     }
                     .buttonStyle(BracketButtonStyle())
                 }
             }
-            if !rules.isEmpty {
-                areaChips(rules)
-            }
-            if adding {
-                RuleComposer(store: store, root: root, area: area ?? "cut") { withAnimation(.page) { adding = false } }
-                    .transition(.opacity.combined(with: .offset(y: -6)))
-            }
-            if rules.isEmpty && !adding {
-                empty
-            } else if area == nil {
-                ForEach(Feedback.areas, id: \.id) { a in
-                    let mine = rules.filter { $0.area == a.id }
-                    if !mine.isEmpty {
-                        VStack(alignment: .leading, spacing: 2) {
-                            AreaHeader(title: a.title, rules: mine)
-                                .padding(.horizontal, 10).padding(.top, 6).padding(.bottom, 2)
-                            ForEach(mine) { RuleRow(rule: $0, store: store, root: root) }
-                        }
-                    }
-                }
-            } else {
-                VStack(alignment: .leading, spacing: 2) {
-                    ForEach(shown) { RuleRow(rule: $0, store: store, root: root) }
-                }
-            }
         }
-        .card(padding: 16)
-        .animation(.page, value: area)
-        .animation(.page, value: rules.map(\.id))
-        .animation(.page, value: rules.map { $0.merge == nil })
     }
 
-    private func areaChips(_ rules: [LearnedRule]) -> some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 6) {
-                AreaChip(title: "All", count: rules.count, on: area == nil) { area = nil }
-                ForEach(Feedback.areas, id: \.id) { a in
-                    let n = rules.filter { $0.area == a.id }.count
-                    if n > 0 || area == a.id {
-                        AreaChip(title: a.title, icon: a.icon, count: n, on: area == a.id) { area = a.id }
-                    }
+    private var searchField: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "magnifyingglass").font(.system(size: 11, weight: .medium)).foregroundStyle(Theme.faint)
+            TextField("", text: $search, prompt: Text("Search \(Lessons.shown(store.rules).filter(\.counts).count) rules").foregroundStyle(Theme.faint))
+                .textFieldStyle(.plain).font(Theme.sans(12.5)).foregroundStyle(Theme.ink)
+                .focused($searching)
+                .onExitCommand { search = ""; searching = false }
+            if !search.isEmpty {
+                Button { search = "" } label: {
+                    Image(systemName: "xmark.circle.fill").font(.system(size: 11)).foregroundStyle(Theme.faint)
                 }
-                .padding(1)
+                .buttonStyle(.plain)
+                .help("Clear the search")
             }
         }
+        .padding(.horizontal, 10).frame(width: 220, height: 28)
+        .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Theme.surface))
+        .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous)
+            .strokeBorder(searching ? Theme.accent.opacity(0.6) : Theme.border, lineWidth: searching ? 1.5 : 1))
+        .animation(Theme.motion, value: searching)
+    }
+
+    private func openMerges() { withAnimation(.page) { mode = .merges } }
+
+    /// Deletes at once and shows Undo, the way a take goes to the Trash.
+    private func delete(_ rule: LearnedRule) {
+        let list = store.rules
+        let before = list.firstIndex { $0.id == rule.id }.flatMap { i in list.dropFirst(i + 1).first { $0.area == rule.area }?.id }
+        removed = (rule, before)
+        let id = rule.id, root = root
+        store.change(root) { Lessons.delete(root, id) }
+    }
+
+    private func undo(_ rule: LearnedRule) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: "trash").font(.system(size: 11)).foregroundStyle(Theme.faint)
+            Text("Deleted: \(rule.text)").font(Theme.sans(12)).foregroundStyle(Theme.muted).lineLimit(1)
+            Spacer(minLength: 8)
+            Button("Undo") {
+                guard let r = removed else { return }
+                removed = nil
+                let root = root
+                store.change(root) { Lessons.restore(root, r.rule, before: r.before) }
+            }
+            .buttonStyle(BracketButtonStyle())
+        }
+        .padding(.horizontal, 12).padding(.vertical, 8)
+        .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Theme.canvas))
+        .transition(.opacity.combined(with: .offset(y: 6)))
     }
 
     private var empty: some View {
@@ -817,24 +951,128 @@ struct RulesCard: View {
     }
 }
 
-/// An area's name over its rules: how many are on, and the merges that wait for you.
-private struct AreaHeader: View {
-    let title: String
-    let rules: [LearnedRule]
+/// Rules | Merges, with how many merges wait. The TakesSwitch look, plus the count.
+private struct ModeSwitch: View {
+    @Binding var mode: RulesCard.Mode
+    let waiting: Int
+    @Namespace private var ns
+    @State private var hover: RulesCard.Mode?
 
     var body: some View {
-        let on = rules.filter(\.isOn).count
-        let waiting = rules.filter { $0.merge != nil }.count
-        HStack(spacing: 6) {
-            Text(title).font(Theme.sans(11.5, .semibold)).foregroundStyle(Theme.muted)
-            HStack(spacing: 0) {
-                Text("\(on) rule\(on == 1 ? "" : "s")").foregroundStyle(on > Feedback.areaMax ? Theme.warn : Theme.faint)
-                if waiting > 0 {
-                    Text(" · \(waiting) merge\(waiting == 1 ? "" : "s") wait\(waiting == 1 ? "s" : "")").foregroundStyle(Theme.warn)
+        HStack(spacing: 2) {
+            option(.rules, "Rules")
+            option(.merges, "Merges")
+        }
+        .padding(2)
+        .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Theme.surface))
+        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(Theme.border))
+        .fixedSize()
+    }
+
+    private func option(_ value: RulesCard.Mode, _ title: String) -> some View {
+        let on = value == mode
+        return Button { withAnimation(Theme.motion) { mode = value } } label: {
+            HStack(spacing: 6) {
+                Text(title).font(Theme.sans(12.5, on ? .semibold : .medium))
+                if value == .merges && waiting > 0 {
+                    Text("\(waiting)").font(Theme.sans(10.5, .bold)).monospacedDigit()
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 6).frame(minWidth: 18, minHeight: 16)
+                        .background(Capsule().fill(Theme.accent))
                 }
             }
-            .font(Theme.sans(11))
-            .help(on > Feedback.areaMax ? "More than \(Feedback.areaMax) rules here. Turn off or delete one you need less." : "")
+            .foregroundStyle(on || hover == value ? Theme.ink : Theme.muted)
+            .padding(.horizontal, 12).frame(minHeight: 28)
+            .background {
+                if on {
+                    RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Theme.raised)
+                        .shadow(color: .black.opacity(0.18), radius: 1, y: 1)
+                        .matchedGeometryEffect(id: "on", in: ns)
+                }
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hover = $0 ? value : (hover == value ? nil : hover) }
+        .help(value == .merges ? (waiting == 0 ? "No merges to check" : "Merges Takes suggests: \(waiting)") : "Every rule, one area at a time")
+    }
+}
+
+/// One area's rules, numbered: those Takes follows, then the ones you turned off, under a fold.
+private struct AreaRules: View {
+    let rules: [LearnedRule]
+    let store: FeedbackStore
+    let root: URL
+    let delete: (LearnedRule) -> Void
+    let openMerges: () -> Void
+    @State private var showOff = false
+
+    var body: some View {
+        let on = rules.filter { $0.isOn }
+        let off = rules.filter { !$0.isOn }
+        let n = rules.filter(\.counts).count
+        VStack(alignment: .leading, spacing: 0) {
+            Rule()
+            ForEach(Array(on.enumerated()), id: \.element.id) { i, r in
+                RuleRow(rule: r, number: i + 1, store: store, root: root, delete: delete, openMerges: openMerges)
+                Rule()
+            }
+            HStack(spacing: 12) {
+                if !off.isEmpty {
+                    Button { withAnimation(.page) { showOff.toggle() } } label: {
+                        HStack(spacing: 5) {
+                            Image(systemName: "chevron.right").font(.system(size: 9, weight: .bold))
+                                .rotationEffect(.degrees(showOff ? 90 : 0))
+                            Text("\(off.count) turned off")
+                        }
+                        .font(Theme.sans(11.5, .medium)).foregroundStyle(Theme.faint)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(PressStyle())
+                }
+                Spacer()
+                if n > Feedback.areaMax {
+                    Text("\(n) of \(Feedback.areaMax): turn off or delete one you need less")
+                        .font(Theme.sans(11.5)).foregroundStyle(Theme.warn)
+                }
+            }
+            .padding(.horizontal, 10).padding(.top, 10)
+            if showOff {
+                VStack(alignment: .leading, spacing: 0) {
+                    ForEach(off) { RuleRow(rule: $0, number: nil, store: store, root: root, delete: delete, openMerges: openMerges) }
+                }
+                .padding(.top, 4)
+            }
+        }
+    }
+}
+
+/// What a search finds, in every area, under each area's name.
+private struct SearchResults: View {
+    let query: String
+    let rules: [LearnedRule]
+    let store: FeedbackStore
+    let root: URL
+    let delete: (LearnedRule) -> Void
+    let openMerges: () -> Void
+
+    var body: some View {
+        let hits = rules.filter { $0.text.localizedCaseInsensitiveContains(query) || ($0.details ?? "").localizedCaseInsensitiveContains(query) }
+        VStack(alignment: .leading, spacing: 14) {
+            if hits.isEmpty {
+                Text("No rule says “\(query)”.").font(Theme.sans(12.5)).foregroundStyle(Theme.muted)
+                    .padding(.horizontal, 10)
+            }
+            ForEach(Feedback.areas.filter { a in hits.contains { $0.area == a.id } }, id: \.id) { a in
+                VStack(alignment: .leading, spacing: 0) {
+                    SectionLabel(text: a.title).padding(.horizontal, 10).padding(.bottom, 6)
+                    Rule()
+                    ForEach(hits.filter { $0.area == a.id }) { r in
+                        RuleRow(rule: r, number: nil, store: store, root: root, delete: delete, openMerges: openMerges)
+                        Rule()
+                    }
+                }
+            }
         }
     }
 }
@@ -977,10 +1215,15 @@ struct MetaTag: View {
     }
 }
 
+/// One rule as a plain line: its number, its words, and on hover a pencil and a … menu. Click the
+/// words to change them in place.
 private struct RuleRow: View {
     let rule: LearnedRule
+    let number: Int?
     let store: FeedbackStore
     let root: URL
+    let delete: (LearnedRule) -> Void
+    let openMerges: () -> Void
     @State private var editing = false
     @State private var draft = ""
     @State private var editingDetails = false
@@ -989,32 +1232,21 @@ private struct RuleRow: View {
     @FocusState private var focused: Bool
     @FocusState private var detailsFocused: Bool
 
-    private var icon: String { Feedback.areas.first { $0.id == rule.area }?.icon ?? "circle" }
-
     var body: some View {
-        HStack(alignment: .top, spacing: 12) {
-            Image(systemName: icon).font(.system(size: 11, weight: .medium))
-                .foregroundStyle(rule.isOn ? Theme.accentInk : Theme.faint)
-                .frame(width: 26, height: 26)
-                .background(RoundedRectangle(cornerRadius: 7, style: .continuous).fill(rule.isOn ? Theme.accentSoft : Theme.hover))
-            VStack(alignment: .leading, spacing: 6) {
+        HStack(alignment: .firstTextBaseline, spacing: 12) {
+            Text(number.map(String.init) ?? "")
+                .font(Theme.sans(12)).monospacedDigit().foregroundStyle(editing ? Theme.accentInk : Theme.faint)
+                .frame(width: 20, alignment: .trailing)
+            VStack(alignment: .leading, spacing: 5) {
                 if editing {
-                    TextField("", text: $draft, axis: .vertical)
-                        .textFieldStyle(.plain).font(Theme.sans(13)).foregroundStyle(Theme.ink)
-                        .focused($focused)
-                        .onSubmit(save)
-                        .onExitCommand { editing = false }
-                        .onChange(of: focused) { _, f in if !f && editing { save() } }
-                        .padding(.horizontal, 8).padding(.vertical, 5)
-                        .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Theme.paper))
-                        .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(Theme.accent.opacity(0.6), lineWidth: 1.5))
-                        .padding(.horizontal, -8).padding(.vertical, -5)
+                    editor
                 } else {
-                    Text(rule.text).font(Theme.sans(13)).foregroundStyle(rule.isOn ? Theme.ink : Theme.faint)
+                    Text(rule.text).font(Theme.sans(13.5)).foregroundStyle(rule.isOn ? Theme.ink : Theme.faint)
+                        .lineSpacing(2)
                         .fixedSize(horizontal: false, vertical: true)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .contentShape(Rectangle())
-                        .onTapGesture { draft = rule.text; editing = true; focused = true }
+                        .onTapGesture(perform: startEditing)
                         .help("Click to change it")
                 }
                 if editingDetails {
@@ -1028,7 +1260,7 @@ private struct RuleRow: View {
                         .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Theme.paper))
                         .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(Theme.accent.opacity(0.6), lineWidth: 1.5))
                         .padding(.horizontal, -8).padding(.vertical, -5)
-                } else if let details = rule.details, !details.isEmpty {
+                } else if let details = rule.details, !details.isEmpty, !editing {
                     Text(details).font(Theme.sans(12)).foregroundStyle(Theme.muted)
                         .lineLimit(3)
                         .fixedSize(horizontal: false, vertical: true)
@@ -1037,55 +1269,83 @@ private struct RuleRow: View {
                         .onTapGesture { detailsDraft = details; editingDetails = true; detailsFocused = true }
                         .help("More about this rule. Click to change it.")
                 }
-                HStack(spacing: 6) {
-                    if rule.yours {
-                        MetaTag(text: "Yours", icon: "person.fill", tint: Theme.accentInk)
-                            .help("You wrote or changed this rule. Takes will not change it back.")
-                    }
-                    if let c = rule.check {
-                        MetaTag(text: c.label, icon: "checkmark.seal.fill", tint: Theme.live)
-                            .help("Takes measures this on every new edit, before you see it.")
-                    }
-                    if let n = rule.repeats?.count, n > 0 {
-                        MetaTag(text: "Came back \(n)×", icon: "arrow.uturn.backward", tint: Theme.warn)
-                            .help(rule.check == nil ? "The same mistake came back. A check would catch it." : "The same mistake came back.")
-                    }
-                    Text(meta).font(Theme.sans(11)).foregroundStyle(Theme.faint).lineLimit(1)
+            }
+            if rule.merge != nil && !editing {
+                Button(action: openMerges) {
+                    Text("Merge waiting").font(Theme.sans(11, .semibold)).foregroundStyle(Theme.accentInk)
+                        .padding(.horizontal, 8).padding(.vertical, 3)
+                        .background(Capsule().fill(Theme.accentSoft))
                 }
-                if rule.merge != nil {
-                    MergeSuggestion(rule: rule, store: store, root: root)
-                        .transition(.opacity.combined(with: .offset(y: -6)))
-                }
+                .buttonStyle(PressStyle())
+                .help("Takes wants to merge this rule with another one. Open Merges.")
             }
-            Button {
-                let id = rule.id, root = root
-                store.change(root) { Lessons.delete(root, id) }
-            } label: {
-                Image(systemName: "trash").font(.system(size: 11.5)).frame(width: 24, height: 24).contentShape(Rectangle())
-            }
-            .buttonStyle(IconButtonStyle())
-            .opacity(hover && !editing ? 1 : 0)
-            .help("Delete this rule")
-            RuleSwitch(on: rule.isOn) {
-                let id = rule.id, root = root, v = !rule.isOn
-                store.change(root) { Lessons.edit(root, id) { $0.on = v } }
-            }
-            .padding(.top, 4)
-            .help(rule.isOn ? "On: Takes follows it" : "Off: kept, not followed")
+            if !editing { tools.opacity(hover ? 1 : 0) }
         }
         .padding(.horizontal, 10).padding(.vertical, 10)
-        .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(hover && !editing ? Theme.hover.opacity(0.6) : .clear))
+        .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(hover && !editing ? Theme.hover.opacity(0.6) : .clear))
         .onHover { hover = $0 }
         .animation(Theme.motion, value: hover)
+        .animation(Theme.motion, value: editing)
     }
 
-    private var meta: String {
-        var parts: [String] = []
-        let n = rule.from?.count ?? 0
-        if n > 0 { parts.append("from \(n) comment\(n == 1 ? "" : "s")") }
-        if let d = rule.made.flatMap(FeedbackStats.dateOf) { parts.append(d.formatted(.dateTime.day().month(.abbreviated))) }
-        return parts.joined(separator: " · ")
+    private var editor: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            TextField("", text: $draft, axis: .vertical)
+                .textFieldStyle(.plain).font(Theme.sans(13.5)).foregroundStyle(Theme.ink)
+                .lineLimit(1...5)
+                .focused($focused)
+                .onSubmit(save)
+                .onExitCommand { editing = false }
+                .padding(.horizontal, 10).padding(.vertical, 7)
+                .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Theme.paper))
+                .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(Theme.accent.opacity(0.6), lineWidth: 1.5))
+                .padding(.horizontal, -10)
+            HStack(spacing: 8) {
+                Button("Save", action: save).buttonStyle(AccentButtonStyle(kind: .accent))
+                    .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                Button("Cancel") { editing = false }.buttonStyle(BracketButtonStyle())
+                Spacer()
+                Text("Return saves · Esc cancels").font(Theme.sans(11)).foregroundStyle(Theme.faint)
+            }
+        }
     }
+
+    private var tools: some View {
+        HStack(spacing: 2) {
+            Button(action: startEditing) {
+                Image(systemName: "pencil").font(.system(size: 11.5)).frame(width: 26, height: 26).contentShape(Rectangle())
+            }
+            .buttonStyle(IconButtonStyle())
+            .help("Change the words")
+            TakesMenuButton(width: 210, help: "More") {
+                Image(systemName: "ellipsis").font(.system(size: 11.5, weight: .semibold)).foregroundStyle(Theme.muted)
+                    .frame(width: 26, height: 26).contentShape(Rectangle())
+            } content: {
+                MenuButton("Edit", icon: "pencil", action: startEditing)
+                MenuButton("Add more words", icon: "text.append") {
+                    detailsDraft = rule.details ?? ""; editingDetails = true; detailsFocused = true
+                }
+                MenuGroup("Move to area", icon: "arrow.right") {
+                    for a in Feedback.areas where a.id != rule.area {
+                        let full = store.rules.filter { $0.area == a.id && $0.counts }.count >= Feedback.areaMax
+                        MenuButton(a.title, detail: full ? "full" : nil, enabled: !full) {
+                            let id = rule.id, root = root, to = a.id
+                            store.change(root) { Lessons.move(root, id, to: to) }
+                        }
+                    }
+                }
+                MenuButton(rule.isOn ? "Turn off" : "Turn on", icon: rule.isOn ? "pause.circle" : "play.circle") {
+                    let id = rule.id, root = root, v = !rule.isOn
+                    store.change(root) { Lessons.edit(root, id) { $0.on = v } }
+                }
+                MenuDivider()
+                MenuButton("Delete", icon: "trash", danger: true) { delete(rule) }
+            }
+        }
+        .padding(.top, -4)
+    }
+
+    private func startEditing() { draft = rule.text; editing = true; focused = true }
 
     private func save() {
         editing = false
@@ -1104,53 +1364,163 @@ private struct RuleRow: View {
     }
 }
 
-/// Takes' suggestion under a new rule in a full area: the other rule, the merged sentence, and your
-/// choice. No ids: the board shows rules by their words.
-private struct MergeSuggestion: View {
+/// The Merges view: the merges Takes suggests, one at a time. The other rule as it would read
+/// after the merge, with what the new rule adds marked and what goes struck through. When the
+/// other rule changed after Takes wrote the sentence, you still decide (2026-10-14: the old box
+/// offered only Keep both, so the merge could never happen).
+private struct MergeQueue: View {
+    let waiting: [LearnedRule]
+    let store: FeedbackStore
+    let root: URL
+    @State private var index = 0
+
+    var body: some View {
+        if waiting.isEmpty {
+            VStack(spacing: 8) {
+                Image(systemName: "checkmark").font(.system(size: 15, weight: .semibold)).foregroundStyle(Theme.live)
+                    .frame(width: 36, height: 36).background(Circle().fill(Theme.liveSoft))
+                Text("Nothing to check").font(Theme.sans(13, .semibold)).foregroundStyle(Theme.ink)
+                Text("When an area is full, Takes suggests a merge here.").font(Theme.sans(12)).foregroundStyle(Theme.muted)
+            }
+            .frame(maxWidth: .infinity).padding(.vertical, 36)
+        } else {
+            let i = min(index, waiting.count - 1)
+            VStack(spacing: 14) {
+                HStack(spacing: 10) {
+                    if waiting.count > 1 {
+                        Button { index = max(0, i - 1) } label: { Image(systemName: "chevron.left").frame(width: 24, height: 24) }
+                            .buttonStyle(IconButtonStyle()).disabled(i == 0).help("Previous merge")
+                    }
+                    Text("\(i + 1) of \(waiting.count) · \(Feedback.areas.first { $0.id == waiting[i].area }?.title ?? "")")
+                        .font(Theme.sans(12)).foregroundStyle(Theme.muted).monospacedDigit()
+                    if waiting.count > 1 {
+                        Button { index = min(waiting.count - 1, i + 1) } label: { Image(systemName: "chevron.right").frame(width: 24, height: 24) }
+                            .buttonStyle(IconButtonStyle()).disabled(i == waiting.count - 1).help("Next merge")
+                    }
+                }
+                MergeCard(rule: waiting[i], store: store, root: root)
+                    .id(waiting[i].id)
+                    .transition(.opacity.combined(with: .offset(y: 6)))
+            }
+            .frame(maxWidth: 680)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 10)
+            .animation(.page, value: waiting[i].id)
+        }
+    }
+}
+
+private struct MergeCard: View {
     let rule: LearnedRule
     let store: FeedbackStore
     let root: URL
+    @State private var text: String
+    @State private var editing = false
+    @FocusState private var focused: Bool
+
+    init(rule: LearnedRule, store: FeedbackStore, root: URL) {
+        self.rule = rule
+        self.store = store
+        self.root = root
+        _text = State(initialValue: rule.merge?.text ?? "")
+    }
 
     var body: some View {
-        let merge = rule.merge
-        let other = store.rules.first { $0.id == merge?.into }
-        let fits = Lessons.mergeTarget(rule, in: store.rules) != nil
+        let other = store.rules.first { $0.id == rule.merge?.into }
+        let alive = other.map { $0.isOn && $0.mergedInto == nil } ?? false
+        let stale = alive && Lessons.mergeTarget(rule, in: store.rules) == nil
+        let area = Feedback.areas.first { $0.id == rule.area }?.title ?? "this area"
         let after = store.rules.filter { $0.area == rule.area && $0.counts }.count + 1
-        VStack(alignment: .leading, spacing: 6) {
-            Text("Takes wants to merge this rule with another one.")
-                .font(Theme.sans(12, .semibold)).foregroundStyle(Theme.ink)
-                .fixedSize(horizontal: false, vertical: true)
-            if fits, let other, let merge {
-                Text("Other rule: \u{201C}\(other.text)\u{201D}").font(Theme.sans(12)).foregroundStyle(Theme.muted)
-                    .fixedSize(horizontal: false, vertical: true)
-                Text("Merged: \u{201C}\(merge.text)\u{201D}").font(Theme.sans(12)).foregroundStyle(Theme.ink)
-                    .fixedSize(horizontal: false, vertical: true)
-            } else {
-                Text(other == nil || other?.isOn == false || other?.mergedInto != nil
-                     ? "The other rule is gone or off." : "The other rule changed since. Ask Takes for a new merge.")
-                    .font(Theme.sans(12)).foregroundStyle(Theme.muted)
+        let clean = text.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        VStack(spacing: 16) {
+            Text(alive ? "Merge two \(area) rules?" : "The other rule is gone")
+                .font(Theme.display(22)).foregroundStyle(Theme.ink)
+            VStack(alignment: .leading, spacing: 12) {
+                if let other, alive {
+                    if editing {
+                        TextField("", text: $text, axis: .vertical)
+                            .textFieldStyle(.plain).font(Theme.sans(15)).foregroundStyle(Theme.ink)
+                            .lineLimit(2...6)
+                            .focused($focused)
+                            .onExitCommand { editing = false }
+                            .padding(.horizontal, 12).padding(.vertical, 10)
+                            .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Theme.paper))
+                            .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(Theme.accent.opacity(0.6), lineWidth: 1.5))
+                    } else {
+                        Text(Self.marked(from: other.text, to: clean)).font(Theme.sans(15)).foregroundStyle(Theme.ink)
+                            .lineSpacing(4)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    HStack(spacing: 16) {
+                        HStack(spacing: 6) {
+                            RoundedRectangle(cornerRadius: 3).fill(Theme.accent.opacity(0.25)).frame(width: 14, height: 10)
+                            Text("From the new rule")
+                        }
+                        HStack(spacing: 6) {
+                            Text("abc").strikethrough().foregroundStyle(Theme.faint)
+                            Text("Taken out of the other rule")
+                        }
+                    }
+                    .font(Theme.sans(11.5)).foregroundStyle(Theme.muted)
+                    .opacity(editing ? 0 : 1)
+                    Text("New rule: \(rule.text)").font(Theme.sans(12)).foregroundStyle(Theme.faint)
+                        .fixedSize(horizontal: false, vertical: true)
+                    if stale {
+                        Text("Takes wrote this before the other rule changed. Check that it still says both.")
+                            .font(Theme.sans(11.5)).foregroundStyle(Theme.warn)
+                    }
+                } else {
+                    Text(rule.text).font(Theme.sans(15)).foregroundStyle(Theme.ink)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Text("The rule it would merge into is gone or off. Keep this one as its own rule.")
+                        .font(Theme.sans(12)).foregroundStyle(Theme.muted)
+                }
             }
-            HStack(spacing: 4) {
-                if fits {
+            .padding(.horizontal, 22).padding(.vertical, 20)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(Theme.canvas))
+            .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(Theme.border))
+            HStack(spacing: 8) {
+                if alive {
                     Button("Merge") {
-                        let id = rule.id, root = root
-                        store.change(root) { Lessons.merge(root, id) }
+                        let id = rule.id, root = root, t = String(clean.prefix(Feedback.ruleMax))
+                        store.change(root) { Lessons.merge(root, id, text: t) }
+                    }
+                    .buttonStyle(AccentButtonStyle(kind: .accent))
+                    .disabled(clean.isEmpty)
+                    .help("The other rule gets these words. The new rule turns off.")
+                    Button(editing ? "Done" : "Edit words") {
+                        editing.toggle()
+                        if editing { DispatchQueue.main.async { focused = true } }
                     }
                     .buttonStyle(BracketButtonStyle())
-                    .help("The other rule gets the merged text. This rule turns off.")
                 }
-                Button("Keep both") {
+                Button(alive ? "Keep both" : "Keep as its own rule") {
                     let id = rule.id, root = root
                     store.change(root) { Lessons.keepBoth(root, id) }
                 }
                 .buttonStyle(BracketButtonStyle())
-                .help("Keep both rules as they are. This area then has \(after) rules.")
+                .help("Keep both rules as they are. \(area) then has \(after) rules.")
             }
-            .padding(.leading, -8)
         }
-        .padding(.horizontal, 12).padding(.vertical, 10)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Theme.paper))
-        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(Theme.accentSoft, lineWidth: 1.5))
+        .animation(Theme.motion, value: editing)
+    }
+
+    /// The merged words, with words new to the other rule marked and the words it loses struck.
+    static func marked(from old: String, to new: String) -> AttributedString {
+        var out = AttributedString()
+        for (i, part) in Lessons.wordDiff(old, new).enumerated() {
+            var s = AttributedString((i > 0 ? " " : "") + part.words)
+            switch part.kind {
+            case .same: break
+            case .added: s.backgroundColor = Theme.accent.opacity(0.25)
+            case .removed:
+                s.strikethroughStyle = .single
+                s.foregroundColor = Theme.faint
+            }
+            out += s
+        }
+        return out
     }
 }

@@ -617,8 +617,9 @@ struct ChatRunTests {
         let script = dir.appending(path: "claude")
         try """
         #!/bin/bash
-        n=$(( $(cat "\(dir.path)/n" 2>/dev/null || echo 0) + 1 )); echo $n > "\(dir.path)/n"
-        cat > "\(dir.path)/ask-$n.txt"
+        n=$(( $(cat "\(dir.path)/n" 2>/dev/null || echo 0) + 1 ))
+        # The ask is whole before the run counts: a test that sees the run reads all of it.
+        cat > "\(dir.path)/ask-$n.part"; mv "\(dir.path)/ask-$n.part" "\(dir.path)/ask-$n.txt"; echo $n > "\(dir.path)/n"
         echo '{"type":"system","subtype":"init"}'
         \(body)
         echo '{"type":"result","subtype":"success","result":"","modelUsage":{}}'
@@ -773,7 +774,7 @@ struct ChatRunTests {
         try fake(#"if [ $n = 1 ]; then sleep 20; fi"#)
         let chat = ClaudeChat(session: session)
         chat.send("Old run", title: "T", onStage: nil)
-        try? await Task.sleep(for: .milliseconds(300))
+        await until { runs == 1 }
         // The phone's "Run now": a new conversation, then its ask at once.
         chat.reset()
         chat.send("New run", title: "T", onStage: nil)

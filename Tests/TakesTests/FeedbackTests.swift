@@ -231,6 +231,52 @@ struct FeedbackTests {
         #expect(try Data(contentsOf: Lessons.file(root, area: "cut")) == before)
     }
 
+    /// The other rule changed since, but you saw both and approved the words: the merge goes in,
+    /// and words you changed make the rule yours (2026-10-14: the board offered only Keep both).
+    @Test func mergeWithApprovedWords() throws {
+        let (root, _) = try library()
+        defer { try? FileManager.default.removeItem(at: root) }
+        fullCut(root, was: "An older rule 3.")
+        Lessons.merge(root, "cut-11", text: "Rule 3, and no breath.")
+        let target = try #require(rule(root, "cut-3")), source = try #require(rule(root, "cut-11"))
+        #expect(target.text == "Rule 3, and no breath.")
+        #expect(target.by == "you")
+        #expect(!source.isOn && source.mergedInto == "cut-3" && source.merge == nil)
+        // Off is still off: approved words do not bring back a rule you turned off.
+        let (root2, _) = try library()
+        defer { try? FileManager.default.removeItem(at: root2) }
+        fullCut(root2)
+        Lessons.edit(root2, "cut-3") { $0.on = false }
+        let before = try Data(contentsOf: Lessons.file(root2, area: "cut"))
+        Lessons.merge(root2, "cut-11", text: "Rule 3, and no breath.")
+        #expect(try Data(contentsOf: Lessons.file(root2, area: "cut")) == before)
+    }
+
+    /// Undo puts a deleted rule back where it was; a move gives the rule a new id in its new area.
+    @Test func restoreAndMove() throws {
+        let (root, _) = try library()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let a = try #require(Lessons.add(root, area: "cut", text: "First."))
+        let b = try #require(Lessons.add(root, area: "cut", text: "Second."))
+        _ = Lessons.add(root, area: "cut", text: "Third.")
+        Lessons.delete(root, b.id)
+        Lessons.restore(root, b, before: "cut-3")
+        #expect(Lessons.read(root).rules.map(\.text) == ["First.", "Second.", "Third."])
+        Lessons.restore(root, b, before: nil)
+        #expect(Lessons.read(root).rules.count == 3)
+        Lessons.move(root, a.id, to: "sound")
+        let moved = try #require(Lessons.read(root).rules.first { $0.text == "First." })
+        #expect(moved.id == "sound-1" && moved.area == "sound" && moved.by == "you")
+        #expect(FileManager.default.fileExists(atPath: Lessons.file(root, area: "sound").path))
+    }
+
+    @Test func wordDiffMarksAddedAndRemoved() {
+        let d = Lessons.wordDiff("Keep pauses short, about 0.2 s.", "Keep pauses short and cut the breath.")
+        #expect(d.map(\.kind) == [.same, .removed, .added])
+        #expect(d[0].words == "Keep pauses short")
+        #expect(Lessons.wordDiff("", "New words").map(\.kind) == [.added])
+    }
+
     /// A waiting or merged rule does not count toward the 10: the board and the MCP agree.
     @Test func countsSkipsWaitingAndMerged() throws {
         let (root, _) = try library()
@@ -299,7 +345,17 @@ extension Snap {
         let none = FeedbackStore()
         none.loaded = true
         shoot("feedback-rules-empty", RulesCard(store: none, root: root).padding(20).background(Theme.paper), size: CGSize(width: 900, height: 200))
-        shoot("feedback-rules-add", RulesCard(store: store, root: root, adding: true).padding(20).background(Theme.paper),
-              size: CGSize(width: 900, height: 620))
+        shoot("feedback-rules-add", RulesCard(store: store, root: root, adding: true, area: "cut").padding(20).background(Theme.paper),
+              size: CGSize(width: 900, height: 760))
+        // The other rule changed after Takes wrote the merge: both rules side by side, Merge still there.
+        store.rules[0].text = "Pauses 0.15–0.25 s between sentences."
+        shoot("feedback-rules-merge", RulesCard(store: store, root: root, area: "cut", merges: true).padding(20).background(Theme.paper),
+              size: CGSize(width: 1000, height: 560))
+        shoot("feedback-rules-merge-dark", RulesCard(store: store, root: root, area: "cut", merges: true).padding(20).background(Theme.paper),
+              size: CGSize(width: 1000, height: 560), dark: true)
+        shoot("feedback-rules-dark", RulesCard(store: store, root: root, area: "cut").padding(20).background(Theme.paper),
+              size: CGSize(width: 1000, height: 560), dark: true)
+        shoot("feedback-rules-search", RulesCard(store: store, root: root, search: "never").padding(20).background(Theme.paper),
+              size: CGSize(width: 1000, height: 460))
     }
 }

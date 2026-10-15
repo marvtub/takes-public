@@ -217,7 +217,11 @@ several options when the user did not ask for one specific look.
    keep the user's post text.
 2. `render_edit` runs `check_edit` on every render: it compares the edit with the take (sound,
    picture, sync, words and past fixes). Fix every problem before you publish. Run `check_edit` on
-   an edit you made by hand. Do not judge sound by listening with a model.
+   an edit you made by hand. Do not judge sound by listening with a model: the checks measure it.
+   With a Gemini key, Gemini also watches each version next to the user's rules (about 5 cents);
+   `publish_edit` and `check_edit` return it as `review`. Its problems are a view, not measurements:
+   look at the frame of each one, then fix what is real in the next version. Without a key, `review`
+   gives a frame sheet: read it and check each frame against the rules yourself.
 3. For an edit you made by hand: `open_in_app` with the new file's path, once per finished version.
    It never takes focus.
 4. Never open files or apps on the user's screen yourself (no `open`, no QuickTime).

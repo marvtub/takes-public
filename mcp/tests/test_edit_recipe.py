@@ -16,6 +16,8 @@ import unittest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.dirname(__file__))
 import takes_mcp as t  # noqa: E402
+
+os.environ["TAKES_NO_REVIEW"] = "1"  # never let a real Gemini key watch a test edit
 from test_edit_ready import FFMPEG, ff, flash_take  # noqa: E402
 
 REAL = {n: getattr(t, n) for n in ("spawn_detached", "start_job", "trash", "take_clock", "open_in_app",

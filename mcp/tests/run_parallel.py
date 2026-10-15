@@ -47,10 +47,20 @@ def chunks():
 def run(ids):
     """One chunk, in a worker. Returns what the parent prints and counts."""
     sys.path.insert(0, HERE)
+    sys.path.insert(0, os.path.dirname(HERE))
+    # A worker runs many chunks. Some setUps replace takes_mcp functions and keep them replaced,
+    # so put the module back after each chunk, or the next class gets the fakes (flaky test_jobs).
+    import takes_mcp
+    saved = dict(vars(takes_mcp))
     start = time.time()
-    suite = unittest.defaultTestLoader.loadTestsFromNames(ids)
-    with open(os.devnull, "w") as null:
-        r = unittest.TextTestRunner(stream=null, verbosity=0).run(suite)
+    try:
+        suite = unittest.defaultTestLoader.loadTestsFromNames(ids)
+        with open(os.devnull, "w") as null:
+            r = unittest.TextTestRunner(stream=null, verbosity=0).run(suite)
+    finally:
+        for k in [k for k in vars(takes_mcp) if k not in saved]:
+            delattr(takes_mcp, k)
+        vars(takes_mcp).update(saved)
     bad = [(t.id(), tb) for t, tb in r.failures + r.errors]
     return ids, r.testsRun, len(r.skipped), bad, time.time() - start
 

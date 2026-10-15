@@ -570,7 +570,7 @@ enum CopilotAsk {
     static func shown(_ text: String) -> String {
         var t = text
         // The open comments sent with a message (ClaudeChat.withComments) are for Claude too.
-        for mark in ["\n\n[On screen on my phone: ", ClaudeChat.commentsMark, feedbackMark] {
+        for mark in ["\n\n[On screen on my phone: ", ClaudeChat.commentsMark, Mentions.mark, feedbackMark] {
             if let r = t.range(of: mark, options: .backwards) { t = String(t[..<r.lowerBound]) }
         }
         return t

@@ -699,10 +699,12 @@ struct TakeCard: View {
     private var line: String {
         var s = take.duration.map { BoardView.clock($0) } ?? ""
         switch cut?.state {
-        case "running": s += "\nGemini is finding the best cut…"
+        case "running": s += "\nFinding the best cut…"
         case "failed": s += "\nNo best cut: \(cut?.error ?? "it failed")"
         case "done":
-            let who = cut?.by == "agent" ? "Best cut, checked by Takes" : "Gemini's first suggestion (Takes checks it before cutting)"
+            let who = cut?.by == "agent" ? "Best cut, checked by Takes"
+                : cut?.by == "transcript" ? "First suggestion from the transcript (Takes checks it before cutting)"
+                : "Gemini's first suggestion (Takes checks it before cutting)"
             if let r = cut?.range { s += "\n\(who): \(r)\(cut?.clean == false ? " (not every word clean)" : "")" }
             if let w = cut?.why { s += ": \(w)" }
         default: break

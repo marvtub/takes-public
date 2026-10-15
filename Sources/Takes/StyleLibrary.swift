@@ -2,6 +2,7 @@ import AppKit
 import AVFoundation
 import CoreText
 import SwiftUI
+import UniformTypeIdentifiers
 
 // The style library: a style guide, design tokens and reusable assets, for Claude to build on and for
 // you to review and comment on.
@@ -366,6 +367,8 @@ struct StylesBoard: View {
     @State private var projects: [URL] = []
     @State private var asking = false
     @State private var example = ""
+    /// Videos and images for the next style, dropped on the board or in the sheet.
+    @State private var dropped: [URL] = []
     /// When "Make it" was clicked (seconds since 1970), 0 when no style is being made. Kept so the
     /// Making card comes back when you leave the board and return.
     @AppStorage("styleMakingSince") private var makingSince: Double = 0
@@ -410,7 +413,9 @@ struct StylesBoard: View {
         .onFilesChanged(in: StyleLib.user(root: root)) { if !app.isRecording { scan() } }
         .onExitCommand { app.styleFile = nil }
         .onDrop(of: [.fileURL], isTargeted: nil) { providers in
-            NewStyleSheet.paths(from: providers) { example += (example.isEmpty ? "" : " ") + $0 }
+            NewStyleSheet.urls(from: providers) { url in
+                if dropped.count < NewStyleSheet.most, !dropped.contains(url) { dropped.append(url) }
+            }
             asking = true
             return true
         }
@@ -460,7 +465,7 @@ struct StylesBoard: View {
                 .buttonStyle(AccentButtonStyle(kind: .quiet))
                 .help("Takes makes a new style from your example: a link, a video, an image, or words")
                 .sheet(isPresented: $asking) {
-                    NewStyleSheet(example: $example, busy: makingSince > 0, steps: Self.steps,
+                    NewStyleSheet(example: $example, files: $dropped, busy: makingSince > 0, steps: Self.steps,
                                   make: make, cancel: { asking = false })
                 }
         }
@@ -652,7 +657,7 @@ struct StylesBoard: View {
     // MARK: Actions
 
     private func make() {
-        let x = example.trimmingCharacters(in: .whitespacesAndNewlines)
+        let x = (dropped.map(\.path) + [example]).joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
         guard !x.isEmpty else { return }
         ask("""
         Make a new style from this example: \(x)
@@ -660,6 +665,7 @@ struct StylesBoard: View {
         tokens, the parts (each kept with save_to_library), and preview.mp4 + preview.png from the shared sample.
         """)
         example = ""
+        dropped = []
         asking = false
         makingSince = Date().timeIntervalSince1970
         checkMaking()
@@ -1311,10 +1317,12 @@ private struct StylePlayerLayer: NSViewRepresentable {
     }
 }
 
-/// "New style": a drop area, a field for a link or words, a few ideas, and, the first time, what
-/// happens after Make it.
+/// "New style": a stage where each dropped video or image pops in as a small card, one field for a
+/// link or words, three ideas, and, the first time, what happens after Make it.
 struct NewStyleSheet: View {
     @Binding var example: String
+    /// Dropped or chosen videos and images, in order. A path never goes into the field.
+    @Binding var files: [URL]
     /// A style is being made: one at a time.
     let busy: Bool
     let steps: [String]
@@ -1323,8 +1331,14 @@ struct NewStyleSheet: View {
     /// The sheet explained what happens once. After that it shows the steps only on a click.
     @AppStorage("styleSheetSeen") private var seen = false
     @State private var showSteps = false
+    @State private var over = false
+    @FocusState private var typing: Bool
 
+    static let most = 3
     private static let ideas = ["Yellow captions, black cards", "Magazine, serif titles", "Fast cuts, bold words"]
+
+    private var words: String { example.trimmingCharacters(in: .whitespacesAndNewlines) }
+    private var link: StyleLink? { StyleLink(in: example) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -1334,30 +1348,14 @@ struct NewStyleSheet: View {
                     .font(Theme.sans(12.5)).foregroundStyle(Theme.muted)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            VStack(spacing: 8) {
-                Image(systemName: "square.and.arrow.down").font(.system(size: 20)).foregroundStyle(Theme.faint)
-                Text("Drop a video or an image here").font(Theme.sans(12.5, .medium)).foregroundStyle(Theme.ink)
-                Text("or paste a link to a reel, a TikTok or a YouTube video below")
-                    .font(Theme.sans(11.5)).foregroundStyle(Theme.faint)
-            }
-            .frame(maxWidth: .infinity).padding(.vertical, 22)
-            .background(Theme.surface, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .strokeBorder(Theme.border, style: StrokeStyle(lineWidth: 1.5, dash: [6, 5])))
-            .onDrop(of: [.fileURL], isTargeted: nil) { providers in
-                Self.paths(from: providers) { example += (example.isEmpty ? "" : " ") + $0 }
-                return true
-            }
-            TextField("https://… or describe the look", text: $example, axis: .vertical)
-                .lineLimit(2...5).textFieldStyle(.roundedBorder)
-                .onSubmit(submit)
-            HStack(spacing: 6) {
-                Text("Or try").font(Theme.sans(11.5)).foregroundStyle(Theme.faint)
-                ForEach(Self.ideas, id: \.self) { idea in
-                    Button(idea) { example = idea }.buttonStyle(.plain)
-                        .font(Theme.sans(11.5)).foregroundStyle(Theme.muted)
-                        .padding(.horizontal, 8).padding(.vertical, 3)
-                        .background(Theme.hover, in: Capsule())
+            stage
+            field
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Or start from").font(Theme.sans(11.5)).foregroundStyle(Theme.faint)
+                HStack(spacing: 8) {
+                    ForEach(Array(Self.ideas.enumerated()), id: \.offset) { i, idea in
+                        StyleIdeaTile(text: idea, look: i) { example = idea }
+                    }
                 }
             }
             if !seen || showSteps {
@@ -1368,6 +1366,7 @@ struct NewStyleSheet: View {
                             Text("\(i + 1)").font(Theme.sans(11, .bold)).foregroundStyle(Theme.accent)
                                 .frame(width: 18, height: 18).background(Theme.accentSoft, in: Circle())
                             Text(step).font(Theme.sans(12)).foregroundStyle(Theme.muted)
+                                .fixedSize(horizontal: false, vertical: true)
                         }
                     }
                     Text("This runs in the Styles chat. You can keep working while it runs. Then comment on the preview and Takes changes the style.")
@@ -1387,28 +1386,298 @@ struct NewStyleSheet: View {
                 Button("Cancel", action: cancel).buttonStyle(AccentButtonStyle(kind: .quiet))
                     .keyboardShortcut(.cancelAction)
                 Button("Make it", action: submit).buttonStyle(AccentButtonStyle(kind: .accent))
-                    .disabled(example.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || busy)
+                    .disabled((files.isEmpty && words.isEmpty) || busy)
                     .help(busy ? "Takes is making a style. Wait until it is ready." : "")
             }
         }
-        .padding(22)
+        .padding(24)
         .frame(width: 500)
         .background(Theme.paper)
+        .onDrop(of: [.fileURL], isTargeted: $over) { providers in
+            Self.urls(from: providers) { add([$0]) }
+            return true
+        }
+        .onAppear { typing = true }
+    }
+
+    // MARK: Stage
+
+    private var stage: some View {
+        let shape = RoundedRectangle(cornerRadius: 16, style: .continuous)
+        return ZStack {
+            if files.isEmpty && link == nil {
+                VStack(spacing: 14) {
+                    HStack(alignment: .bottom, spacing: 10) {
+                        StyleGhostCard(icon: "play.fill", tilt: -8, delay: 0, big: false)
+                        StyleGhostCard(icon: "photo", tilt: 0, delay: 0.3, big: true)
+                        StyleGhostCard(icon: "link", tilt: 8, delay: 0.6, big: false)
+                    }
+                    .frame(height: 84, alignment: .bottom)
+                    VStack(spacing: 5) {
+                        Text(over ? "Let go to add it" : "Drop a video or an image")
+                            .font(Theme.sans(13.5, .semibold)).foregroundStyle(Theme.ink)
+                        HStack(spacing: 4) {
+                            Button("choose a file", action: choose).buttonStyle(.plain)
+                                .underline().foregroundStyle(Theme.muted)
+                            Text("· or paste a link below").foregroundStyle(Theme.faint)
+                        }
+                        .font(Theme.sans(12))
+                    }
+                }
+                .transition(.opacity)
+            } else {
+                HStack(spacing: 12) {
+                    ForEach(files, id: \.self) { url in
+                        StyleDropCard(url: url) { remove(url) }.transition(.styleDrop)
+                    }
+                    if let link { StyleLinkCard(link: link).transition(.styleDrop) }
+                    if files.count < Self.most {
+                        Button(action: choose) {
+                            Image(systemName: "plus").font(.system(size: 14, weight: .semibold)).foregroundStyle(Theme.faint)
+                                .frame(width: 44, height: 168)
+                                .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                    .strokeBorder(Theme.border, style: StrokeStyle(lineWidth: 1.5, dash: [5, 4])))
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain).help("Add another video or image")
+                    }
+                }
+                .padding(.horizontal, 16)
+                .transition(.opacity)
+            }
+        }
+        .frame(maxWidth: .infinity).frame(height: 236)
+        .background(shape.fill(over ? Theme.accentSoft : Theme.surface))
+        .overlay(shape.strokeBorder(over ? Theme.accent : Theme.border, lineWidth: 1))
+        .shadow(color: Theme.accent.opacity(over ? 0.25 : 0), radius: 10)
+        .clipShape(shape.inset(by: -12))
+        .animation(Theme.spring, value: files)
+        .animation(Theme.spring, value: link)
+        .animation(Theme.motion, value: over)
+    }
+
+    private var field: some View {
+        let shape = RoundedRectangle(cornerRadius: 12, style: .continuous)
+        return HStack(alignment: .firstTextBaseline, spacing: 10) {
+            Image(systemName: link == nil ? "pencil" : "link").font(.system(size: 13)).foregroundStyle(Theme.faint)
+                .frame(width: 16)
+            TextField("Paste a link, or say what you like about it", text: $example, axis: .vertical)
+                .textFieldStyle(.plain).font(Theme.sans(13)).foregroundStyle(Theme.ink)
+                .lineLimit(2...4).focused($typing)
+                .onSubmit(submit)
+        }
+        .padding(.horizontal, 12).padding(.vertical, 11)
+        .background(shape.fill(Theme.surface))
+        .overlay(shape.strokeBorder(typing ? Theme.accent : Theme.border, lineWidth: 1))
+        .shadow(color: Theme.accent.opacity(typing ? 0.18 : 0), radius: 4)
+        .animation(Theme.motion, value: typing)
+    }
+
+    // MARK: Actions
+
+    private func add(_ urls: [URL]) {
+        withAnimation(Theme.spring) {
+            for url in urls where files.count < Self.most && !files.contains(url) {
+                let kind = Asset.kind(of: url)
+                if kind == .video || kind == .image { files.append(url) }
+            }
+        }
+    }
+
+    private func remove(_ url: URL) {
+        withAnimation(Theme.spring) { files.removeAll { $0 == url } }
+    }
+
+    private func choose() {
+        let panel = NSOpenPanel()
+        panel.allowsMultipleSelection = true
+        panel.canChooseDirectories = false
+        panel.allowedContentTypes = [.movie, .image]
+        panel.message = "Pick a video or an image with a look you like"
+        panel.begin { if $0 == .OK { add(panel.urls) } }
     }
 
     private func submit() {
-        guard !busy, !example.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        guard !busy, !files.isEmpty || !words.isEmpty else { return }
         seen = true
         make()
     }
 
-    /// Dropped files as paths, one call each.
-    static func paths(from providers: [NSItemProvider], _ add: @escaping @MainActor (String) -> Void) {
+    /// Dropped files, one call each.
+    static func urls(from providers: [NSItemProvider], _ add: @escaping @MainActor (URL) -> Void) {
         for p in providers {
             _ = p.loadObject(ofClass: URL.self) { url, _ in
                 guard let url else { return }
-                Task { @MainActor in add(url.path) }
+                Task { @MainActor in add(url) }
             }
+        }
+    }
+}
+
+/// The first link in the field, named after its site.
+struct StyleLink: Equatable {
+    let site: String
+    let address: String
+
+    init?(in text: String) {
+        guard let r = text.range(of: #"https?://\S+"#, options: .regularExpression),
+              let host = URL(string: String(text[r]))?.host?.replacingOccurrences(of: "www.", with: "") else { return nil }
+        address = String(text[r]).replacingOccurrences(of: #"^https?://(www\.)?"#, with: "", options: .regularExpression)
+        site = host.contains("tiktok") ? "TikTok" : host.contains("instagram") ? "Instagram reel"
+            : host.contains("youtu") ? "YouTube" : host
+    }
+}
+
+/// A dropped file pops in: it rises, grows a little too far, tilts and settles.
+private struct StyleDropIn: ViewModifier {
+    let away: Bool
+    func body(content: Content) -> some View {
+        content.scaleEffect(away ? 0.55 : 1).rotationEffect(.degrees(away ? -8 : 0))
+            .offset(y: away ? 18 : 0).opacity(away ? 0 : 1)
+    }
+}
+
+extension AnyTransition {
+    static var styleDrop: AnyTransition {
+        .asymmetric(insertion: .modifier(active: StyleDropIn(away: true), identity: StyleDropIn(away: false)),
+                    removal: .scale(scale: 0.8).combined(with: .opacity))
+    }
+}
+
+/// An empty stage: three soft cards that float, for a video, an image and a link.
+private struct StyleGhostCard: View {
+    let icon: String
+    let tilt: Double
+    let delay: Double
+    let big: Bool
+    @State private var up = false
+
+    var body: some View {
+        RoundedRectangle(cornerRadius: big ? 10 : 9, style: .continuous)
+            .fill(Theme.paper)
+            .overlay(RoundedRectangle(cornerRadius: big ? 10 : 9, style: .continuous).strokeBorder(Theme.border, lineWidth: 1.5))
+            .overlay(Image(systemName: icon).font(.system(size: big ? 17 : 14)).foregroundStyle(big ? Theme.muted : Theme.faint))
+            .frame(width: big ? 56 : 46, height: big ? 80 : 68)
+            .rotationEffect(.degrees(tilt))
+            .offset(y: up ? -4 : 0)
+            .onAppear {
+                withAnimation(.easeInOut(duration: 1.6).repeatForever(autoreverses: true).delay(delay)) { up = true }
+            }
+            .accessibilityHidden(true)
+    }
+}
+
+/// A dropped video or image: its picture, its length, and an x on hover.
+private struct StyleDropCard: View {
+    let url: URL
+    let remove: () -> Void
+    @State private var image: NSImage?
+    @State private var length: Double?
+    @State private var hover = false
+
+    private var isVideo: Bool { Asset.kind(of: url) == .video }
+
+    var body: some View {
+        let shape = RoundedRectangle(cornerRadius: 12, style: .continuous)
+        ZStack(alignment: .bottomLeading) {
+            Color.black
+            if let image {
+                Image(nsImage: image).resizable().scaledToFill().frame(width: 112, height: 168).clipped()
+            }
+            HStack(spacing: 4) {
+                if isVideo { Image(systemName: "play.fill").font(.system(size: 8)) }
+                Text(isVideo ? length.map(Self.clock) ?? "Video" : "Image").lineLimit(1)
+            }
+            .font(Theme.sans(10, .semibold)).foregroundStyle(.white)
+            .padding(.horizontal, 6).padding(.vertical, 3)
+            .background(.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+            .padding(6)
+        }
+        .frame(width: 112, height: 168)
+        .clipShape(shape)
+        .overlay(shape.strokeBorder(.white.opacity(0.08)))
+        .overlay(alignment: .topTrailing) {
+            Button(action: remove) {
+                Image(systemName: "xmark").font(.system(size: 9, weight: .bold)).foregroundStyle(.white)
+                    .frame(width: 22, height: 22).background(.black.opacity(0.6), in: Circle())
+            }
+            .buttonStyle(.plain).padding(6).opacity(hover ? 1 : 0)
+            .help("Remove")
+        }
+        .shadow(color: Theme.shadow, radius: 12, y: 6)
+        .onHover { hover = $0 }
+        .animation(Theme.motion, value: hover)
+        .help(url.lastPathComponent)
+        .task(id: url) {
+            image = await Thumbs.shared.image(Asset.at(url))
+            if isVideo { length = await Thumbs.shared.duration(Asset.at(url)) }
+        }
+    }
+
+    static func clock(_ s: Double) -> String {
+        let n = Int(s.rounded())
+        return String(format: "%d:%02d", n / 60, n % 60)
+    }
+}
+
+/// A pasted link, shown on the stage like a file.
+private struct StyleLinkCard: View {
+    let link: StyleLink
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Image(systemName: "link").font(.system(size: 14, weight: .semibold)).foregroundStyle(Theme.paper)
+                .frame(width: 34, height: 34).background(Theme.ink, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+            Text(link.site).font(Theme.sans(13, .semibold)).foregroundStyle(Theme.ink).lineLimit(1)
+            Text(link.address).font(Theme.sans(11)).foregroundStyle(Theme.faint).lineLimit(4)
+            Spacer(minLength: 0)
+            Text("Takes downloads it").font(Theme.sans(10.5)).foregroundStyle(Theme.accentInk)
+        }
+        .padding(12)
+        .frame(width: 150, height: 168, alignment: .leading)
+        .background(Theme.raised, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(Theme.border))
+        .shadow(color: Theme.shadow, radius: 12, y: 6)
+    }
+}
+
+/// An idea with a small picture of its look.
+private struct StyleIdeaTile: View {
+    let text: String
+    let look: Int
+    let pick: () -> Void
+    @State private var hover = false
+
+    var body: some View {
+        Button(action: pick) {
+            VStack(alignment: .leading, spacing: 7) {
+                picture.frame(maxWidth: .infinity).frame(height: 38)
+                    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                Text(text).font(Theme.sans(11.5)).foregroundStyle(Theme.ink)
+                    .lineLimit(2, reservesSpace: true).multilineTextAlignment(.leading)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(8)
+            .background(hover ? Theme.hover : Theme.surface, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .offset(y: hover ? -1 : 0)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .frame(maxWidth: .infinity)
+        .onHover { hover = $0 }
+        .animation(Theme.motion, value: hover)
+    }
+
+    @ViewBuilder private var picture: some View {
+        switch look {
+        case 0:
+            Color(white: 0.06).overlay(Text("YELLOW").font(.system(size: 11, weight: .heavy)).foregroundStyle(.black)
+                .padding(.horizontal, 5).padding(.vertical, 1).background(Color(red: 1, green: 0.83, blue: 0.23)))
+        case 1:
+            Color(red: 0.94, green: 0.91, blue: 0.85).overlay(Text("Aa").font(.system(size: 19, design: .serif))
+                .foregroundStyle(Color(red: 0.42, green: 0.12, blue: 0.12)))
+        default:
+            Theme.accent.overlay(Text("BOLD").font(.system(size: 15, weight: .black)).foregroundStyle(.white))
         }
     }
 }

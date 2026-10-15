@@ -148,7 +148,7 @@ extension PhoneServer {
             return Storyboard.pick(s, shot: id, rel) ? .encode(["ok": true]) : .error(500, "Could not change the storyboard")
         case "cut":
             guard let n = take, d.meta.takes.contains(where: { $0.number == n }) else { return .error(404, "No such take") }
-            if TakeCut.read(s)[String(n)]?.state == "running" { return .error(409, "Gemini is finding it already") }
+            if TakeCut.read(s)[String(n)]?.state == "running" { return .error(409, "Takes is finding it already") }
             TakeCut.start(s, take: n)
             return .encode(["ok": true])
         case "unlink":

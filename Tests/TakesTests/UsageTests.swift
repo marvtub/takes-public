@@ -21,17 +21,90 @@ struct UsageTests {
         let r = Usage.report(id: "3F2A1B4C-1111-2222-3333-444455556666", version: "v2026.10.10", os: "26.1",
                              root: root, projects: 1, sessions: [(a, 7, true), (b, 2, false)],
                              plugins: ["voices", "feedback"], phone: true)
-        #expect(r.counts == Usage.Counts(projects: 1, sessions: 2, takes: 9, edits: 2, storyboards: 1, published: 1, phone: 1))
+        #expect(r.counts.projects == 1 && r.counts.sessions == 2 && r.counts.takes == 9 && r.counts.edits == 2)
+        #expect(r.counts.storyboards == 1 && r.counts.published == 1 && r.counts.phone == 1)
         #expect(r.plugins == ["feedback", "voices"])
 
         let json = String(decoding: try Usage.encode(r), as: UTF8.self)
         for word in ["Secret", "private", "title", "cut-v1", "notes"] { #expect(!json.contains(word)) }
         // The site keeps exactly these fields (gettakes-site functions/ping.js COUNTS).
         let object = try #require(try JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any])
-        #expect(Set(object.keys) == ["id", "v", "os", "counts", "plugins"])
+        #expect(Set(object.keys) == ["id", "v", "os", "counts", "plugins", "agent"])
         let counts = try #require(object["counts"] as? [String: Int])
         #expect(Set(counts.keys) == ["projects", "sessions", "takes", "edits", "storyboards", "posts_ready",
-                                     "posts_scheduled", "posts_posted", "published", "phone"])
+                                     "posts_scheduled", "posts_posted", "published", "phone",
+                                     "chats_7d", "takes_7d", "record_min_7d", "edits_7d", "crashes_7d", "age_days",
+                                     "tokens_7d", "out_tokens_7d"])
+    }
+
+    @Test func tokensAreSummedFromUsageLinesOnlyAndKeptOnlyWhenOn() throws {
+        // Claude: the result's modelUsage, every model. The secret words must never reach the count store.
+        var p = ChatParser([], adapter: ClaudeAdapter())
+        p.consume(#"{"type":"assistant","message":{"content":[{"type":"text","text":"secret answer"}],"usage":{"input_tokens":5,"output_tokens":7}}}"#)
+        p.consume(#"{"type":"result","subtype":"success","result":"secret answer","modelUsage":{"opus":{"inputTokens":100,"outputTokens":40,"cacheReadInputTokens":800,"cacheCreationInputTokens":60},"haiku":{"inputTokens":10,"outputTokens":5}}}"#)
+        #expect(p.spent == 1015 && p.spentOut == 45)
+        var c = ChatParser([], adapter: CodexAdapter())
+        c.consume(#"{"type":"turn.completed","usage":{"input_tokens":3000,"cached_input_tokens":2000,"output_tokens":200}}"#)
+        #expect(c.spent == 3200 && c.spentOut == 200)
+
+        let d = try #require(UserDefaults(suiteName: "usage-tokens-\(UUID().uuidString)"))
+        let now = Date()
+        Usage.addTokens(5000, out: 400, on: false, defaults: d, now: now)
+        #expect(Usage.tokens(d).isEmpty)
+        Usage.addTokens(9000, out: 900, on: true, defaults: d, now: now.addingTimeInterval(-30 * 86_400))
+        Usage.addTokens(5000, out: 400, on: true, defaults: d, now: now)
+        Usage.addTokens(1600, out: 100, on: true, defaults: d, now: now)
+        Usage.addTokens(9000, out: 900, on: true, defaults: d, now: now.addingTimeInterval(-10 * 86_400))
+        #expect(Usage.tokens(d).count == 2)
+        let raw = String(decoding: d.data(forKey: Usage.tokensKey) ?? Data(), as: UTF8.self)
+        #expect(!raw.contains("secret"))
+        let r = Usage.report(id: "3F2A1B4C-1111-2222-3333-444455556666", version: "", os: "", root: FileManager.default.temporaryDirectory,
+                             projects: 0, sessions: [], plugins: [], phone: false, tokens: Usage.tokens(d), now: now)
+        #expect(r.counts.tokens_7d == 7 && r.counts.out_tokens_7d == 1)
+    }
+
+    @Test func theWeekCountsChatsTakesEditsAndCrashesButNoWords() throws {
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory.appending(path: "usage-week-\(UUID().uuidString)")
+        defer { try? fm.removeItem(at: root) }
+        let now = Date()
+        let s = root.appending(path: "P/Walk and talk"), boards = root.appending(path: "boards"), crashes = root.appending(path: "crashes")
+        for d in [s.appending(path: "edits"), s.appending(path: ".claude-chats"), boards, crashes] {
+            try fm.createDirectory(at: d, withIntermediateDirectories: true)
+        }
+        var meta = SessionMeta(title: "Walk and talk", createdAt: now)
+        meta.takes = [Take(number: 1, kind: .camera, file: "a.mov", startedAt: now.addingTimeInterval(-3600), duration: 150),
+                      Take(number: 2, kind: .camera, file: "b.mov", startedAt: now.addingTimeInterval(-86_400), duration: 90),
+                      Take(number: 3, kind: .camera, file: "c.mov", startedAt: now.addingTimeInterval(-20 * 86_400), duration: 600)]
+        try Store.encoder.encode(meta).write(to: s.appending(path: "session.json"))
+        try Data().write(to: s.appending(path: "edits/cut-v1.mp4"))
+        let old = s.appending(path: "edits/cut-v0.mp4")
+        try Data().write(to: old)
+        try fm.setAttributes([.modificationDate: now.addingTimeInterval(-30 * 86_400)], ofItemAtPath: old.path)
+
+        func log(_ msgs: [(ChatMessage.Role, Double)]) throws -> Data {
+            var l = ChatLog(conversation: UUID().uuidString)
+            l.messages = msgs.map { var m = ChatMessage(role: $0.0, text: "a private secret prompt"); m.at = now.addingTimeInterval(-$0.1); return m }
+            let e = JSONEncoder(); e.dateEncodingStrategy = .iso8601
+            return try e.encode(l)
+        }
+        try log([(.user, 60), (.claude, 50), (.user, 9 * 86_400)]).write(to: ClaudeChat.file(s))
+        try log([(.user, 2 * 86_400)]).write(to: s.appending(path: ".claude-chats/old.json"))
+        try log([(.user, 100), (.user, 200)]).write(to: boards.appending(path: "Posts-chat.json"))
+        try Data().write(to: crashes.appending(path: "Takes-2026-10-12-101010.ips"))
+        try Data().write(to: crashes.appending(path: "Safari-2026-10-12-101010.ips"))
+
+        let r = Usage.report(id: "3F2A1B4C-1111-2222-3333-444455556666", version: "v2026.10.13", os: "26.1",
+                             root: root, projects: 1, sessions: [(s, 3, false)], plugins: [], phone: false,
+                             agent: "codex", firstSeen: now.addingTimeInterval(-12.5 * 86_400),
+                             boards: boards, crashes: crashes, now: now)
+        #expect(r.counts.chats_7d == 4 && r.counts.takes_7d == 2 && r.counts.record_min_7d == 4)
+        #expect(r.counts.edits == 2 && r.counts.edits_7d == 1 && r.counts.crashes_7d == 1 && r.counts.age_days == 12)
+        #expect(r.agent == "codex")
+        let json = String(decoding: try Usage.encode(r), as: UTF8.self)
+        for word in ["private", "secret", "prompt", "Walk"] { #expect(!json.contains(word)) }
+        #expect(Usage.report(id: r.id, version: "", os: "", root: root, projects: 0, sessions: [], plugins: [],
+                             phone: false, agent: "gpt", boards: boards, crashes: crashes).agent == "")
     }
 
     @Test func aPhoneSeenThisWeekCounts() throws {

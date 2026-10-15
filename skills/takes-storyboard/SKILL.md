@@ -87,7 +87,7 @@ round-head figures, no text. Write only what is in the frame:
 
 The user records a take per shot with the Record button under a shot. In `get_session`, the
 take's `shot` field holds the shot id. A storyboard take may also carry a `best_cut` suggestion
-(`by: gemini`). Treat it as a first guess: check it against the transcript and the frames at both
+(`by: gemini`, or `by: transcript` when the user has no Gemini key). Treat it as a first guess: check it against the transcript and the frames at both
 ends, then call `set_best_cut` (`session`, `take`, `start`, `end`, `why`, optional `said`,
 `clean`) with the range you would use.
 

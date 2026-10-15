@@ -16,6 +16,7 @@ import hashlib
 import json
 import math
 import os
+import platform
 import random
 import re
 import secrets
@@ -3789,6 +3790,8 @@ def t_check_edit(a):
         rec = load_recipe(s, recipe_path(rel))
     except ValueError:
         pass
+    t0, watch = time.time(), a.get("watch", True)
+    review = start_review(s, path, watch)
     entry = check_file(s, rel, path, a.get("source"), lineage_rel(rec) if rec and rel.startswith(RENDERS + os.sep) else None)
     results = entry["results"]
     rules = [r for r in read_lessons()["rules"] if r.get("on", True) and r.get("check")]
@@ -3804,7 +3807,189 @@ def t_check_edit(a):
     if not rules:
         note += (" No rule has a check yet. When a rule is repeated and a number can test it, add a check with "
                  "set_rule (kinds: %s)." % ", ".join(sorted(CHECKS)))
-    return dict({"file": rel}, **entry, note=note)
+    return dict({"file": rel}, **entry, note=note, review=review_result(s, path, review, t0 + REVIEW_WAIT, watch))
+
+
+# ---------- review: Gemini watches the edit ----------
+# The built-in checks measure sound and picture against the take; they cannot say a page is too busy or a
+# scene is boring. With a Gemini key, check_edit also has REVIEW_MODEL watch and hear the edit next to
+# the rules, like the user would. 2026-10-13 test on 4 past edits: Argon with the rules found about half
+# of the 38 comments the user wrote on them, Flash about a quarter; neither heard the audio problems the
+# built-ins catch. It runs detached (about 20-40 s), once per file version (review_file); render_edit starts
+# it and publish_edit returns it. Without a key, or when Gemini fails, check_edit gives the agent a
+# sheet of frames to look at itself, so no user hits a wall.
+REVIEW_MODEL = "gemini-4-argon"
+REVIEW_PRICE = (2.0, 10.0)  # $ per 1M tokens in, out; intro price until 2026-11-30, then double
+REVIEW_WAIT = 75            # s check_edit waits for the review before it answers without it
+REVIEW_MAX_S = 900          # longer edits are not sent
+SHEET_FRAMES = 24
+REVIEW_PROMPT = """You review a finished edit of a short talking video before its creator sees it. Watch and \
+listen to all of it like a picky editor and list every problem the creator would comment on: sound (glitches, \
+sudden changes, distortion, lips out of sync), cuts (pauses too long, stutters, false starts, looking away, \
+repeats, a clipped word), picture (glitches, a flash frame, the same shot twice, bad framing, cutout edges), \
+on-screen graphics and text (unreadable, too busy, on screen too long or too short, does not match what is \
+said, confusing), and pacing (a boring stretch, a long time without the speaker's face). Times are seconds \
+from the start of the video and must be inside it. Only report what you can see or hear, and how sure you \
+are. Do not praise."""
+REVIEW_RULES = ("\n\nThe creator's rules from past reviews. Check the edit against each one; report each break "
+                "as a problem with its rule id:\n")
+REVIEW_SCHEMA = {"type": "OBJECT", "properties": {"problems": {"type": "ARRAY", "items": {"type": "OBJECT", "properties": {
+    "start": {"type": "NUMBER"}, "end": {"type": "NUMBER"},
+    "area": {"type": "STRING", "enum": ["sound", "cut", "picture", "captions", "graphics", "pacing"]},
+    "what": {"type": "STRING", "description": "One sentence: what is wrong."},
+    "fix": {"type": "STRING", "description": "One short sentence: the change."},
+    "rule": {"type": "STRING", "description": "The rule id it breaks, or ''."},
+    "sure": {"type": "STRING", "enum": ["high", "medium", "low"]}},
+    "required": ["start", "end", "area", "what", "sure"]}}}, "required": ["problems"]}
+
+
+def review_file(s, path, kind):
+    """<session>/.checks-cache/review-<inode>-<size>.<kind>: by inode, so the review of a render still holds
+    once publish_edit links it into edits/ under its version name."""
+    st = os.stat(path)
+    return os.path.join(s, CHECKS_CACHE, "review-%d-%d.%s" % (st.st_ino, st.st_size, kind))
+
+
+def write_review(p, d):
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    with open(p + ".tmp", "w") as f:
+        json.dump(d, f, indent=1, ensure_ascii=False)
+    os.replace(p + ".tmp", p)
+
+
+def read_review(p):
+    try:
+        with open(p) as f:
+            d = json.load(f)
+    except (OSError, ValueError):
+        return None
+    if d.get("state") == "running" and d.get("pid") and not alive(d.get("pid")):
+        return {"state": "failed", "error": "The review stopped before it finished."}
+    return d
+
+
+def edit_review(s, rel):
+    """Detached: REVIEW_MODEL watches one edit and writes its problems into the checks cache."""
+    import tempfile
+    os.environ["PATH"] = os.pathsep.join(["/opt/homebrew/bin", "/usr/local/bin", os.environ.get("PATH", "")])
+    path = os.path.join(s, rel)
+    out = review_file(s, path, "review.json")
+    write_review(out, {"state": "running", "pid": os.getpid(), "model": REVIEW_MODEL, "started": now_iso()})
+    tmp = tempfile.mkdtemp(prefix="takes-review-")
+    try:
+        rules = [r for r in read_lessons()["rules"] if r.get("on", True) and r["area"] in EDIT_AREAS]
+        prompt = REVIEW_PROMPT + (REVIEW_RULES + "\n".join("- %s: %s" % (r["id"], r["text"]) for r in rules) if rules else "")
+        dur = media_seconds(path)
+        usage = {}
+        if os.environ.get("TAKES_REVIEW_CMD"):  # tests: a stand-in that prints the JSON answer
+            r = subprocess.run(json.loads(os.environ["TAKES_REVIEW_CMD"]) + [path], capture_output=True, text=True)
+            if r.returncode != 0:
+                raise ValueError(r.stderr.strip() or "The review failed.")
+            got = json.loads(r.stdout)
+        else:
+            # 720 px high keeps on-screen text readable; Gemini looks at 2 frames a second.
+            proxy = os.path.join(tmp, "review.mp4")
+            subprocess.run([need_ffmpeg(), "-v", "error", "-y", "-i", path, "-vf", "scale=-2:720", "-c:v", "libx264",
+                            "-crf", "30", "-preset", "veryfast", "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart",
+                            proxy], check=True, capture_output=True, timeout=900)
+            got = gemini_call(proxy, "video/mp4", gemini_key(), prompt, REVIEW_SCHEMA, "Review this edit.",
+                              model=REVIEW_MODEL, fps=2, usage=usage)
+        problems = []
+        for x in got.get("problems") or []:
+            try:
+                a, b = float(x["start"]), float(x["end"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if a > dur + 0.5:
+                continue  # a time past the end: made up (2026-10-13 test: 140 s in a 118 s edit)
+            x = dict(x, start=round(max(0.0, a), 1), end=round(min(dur, max(a, b)), 1))
+            problems.append({k: v for k, v in x.items() if v not in ("", None)})
+        problems.sort(key=lambda x: x["start"])
+        tin = usage.get("promptTokenCount", 0)
+        tout = usage.get("candidatesTokenCount", 0) + (usage.get("thoughtsTokenCount") or 0)
+        write_review(out, {"state": "done", "model": REVIEW_MODEL, "at": now_iso(), "problems": problems,
+                           "cost_usd": round(tin / 1e6 * REVIEW_PRICE[0] + tout / 1e6 * REVIEW_PRICE[1], 3)})
+    except Exception as e:
+        msg = str(e)
+        if isinstance(e, subprocess.CalledProcessError) and e.stderr:
+            msg = e.stderr.decode(errors="replace").strip().splitlines()[-1]
+        write_review(out, {"state": "failed", "error": msg[:300]})
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def frame_sheet(s, path):
+    """Up to SHEET_FRAMES frames of the edit in one PNG, 6 a row, for an agent to look at. Returns (file, times)."""
+    dur = media_seconds(path)
+    step = max(1.0, dur / SHEET_FRAMES)
+    times = [round(step * (i + 0.5), 1) for i in range(max(1, int(dur / step)))][:SHEET_FRAMES]
+    out = review_file(s, path, "sheet.png")
+    if not os.path.exists(out):
+        os.makedirs(os.path.dirname(out), exist_ok=True)
+        subprocess.run([need_ffmpeg(), "-v", "error", "-y", "-ss", "%.2f" % (step / 2), "-i", path, "-vf",
+                        "fps=1/%.3f,scale=320:-2,tile=6x%d:padding=4:color=white" % (step, -(-len(times) // 6)),
+                        "-frames:v", "1", out + ".tmp.png"], check=True, capture_output=True, timeout=300)
+        os.replace(out + ".tmp.png", out)
+    return out, times
+
+
+def review_on(watch=True):
+    """False turns the review off: watch=false, or TAKES_NO_REVIEW in tests (a real key must never be charged)."""
+    return watch is not False and not os.environ.get("TAKES_NO_REVIEW")
+
+
+def start_review(s, path, watch=True):
+    """Starts Gemini's review of one edit when there is a key and none is cached. Returns its file, or None
+    when nothing watches the edit."""
+    if not review_on(watch) or not (gemini_key() or os.environ.get("TAKES_REVIEW_CMD")):
+        return None
+    try:
+        if media_seconds(path) > REVIEW_MAX_S:
+            return None
+    except ValueError:
+        return None
+    p = review_file(s, path, "review.json")
+    d = read_review(p)
+    if d and d["state"] in ("done", "running"):
+        return p
+    write_review(p, {"state": "running", "pid": None, "started": now_iso()})
+    spawn_detached(["--edit-review", s, os.path.relpath(path, s)])
+    return p
+
+
+def review_result(s, path, p, until, watch=True):
+    """The review part of check_edit's answer: Gemini's problems, or what the agent does without them."""
+    if not review_on(watch):
+        return {"state": "off"}
+    d = None
+    while p:
+        d = read_review(p)
+        if not d or d["state"] != "running" or time.time() >= until:
+            break
+        time.sleep(1)
+    if d and d["state"] == "done":
+        return {"state": "done", "by": d.get("model"), "problems": d.get("problems", []), "cost_usd": d.get("cost_usd"),
+                "note": "Gemini watched and heard the edit with the rules. Its problems are a view, not measurements: "
+                        "look at the frame of each one before you fix it, and fix what is real in the next version."}
+    if d and d["state"] == "running":
+        return {"state": "running", "note": "Gemini is still watching the edit. Run check_edit again in about a "
+                                            "minute: the built-in checks are cached, and the review is ready then."}
+    if d and d.get("state") == "failed":
+        why = "Gemini's review failed: %s" % d.get("error")
+    elif gemini_key() or os.environ.get("TAKES_REVIEW_CMD"):
+        why = "The edit is longer than %d s, so Gemini did not watch it." % REVIEW_MAX_S
+    else:
+        why = "Takes has no Gemini key, so nothing watched the edit."
+    out = {"state": "none", "why": why}
+    try:
+        sheet, times = frame_sheet(s, path)
+        out.update(sheet=sheet, times=times,
+                   note="Watch it yourself: read the sheet (frames at these seconds, 6 a row) and check each frame "
+                        "against the rules for picture, captions and graphics; check the cut against the transcript. "
+                        "With a Gemini key (Takes › Settings › Gemini) Takes watches and hears each edit for about 5 cents.")
+    except (ValueError, OSError, subprocess.SubprocessError) as e:
+        out["note"] = "Look at stills of the edit yourself (the frame sheet failed: %s)." % str(e)[:120]
+    return out
 
 
 def check_file(s, rel, path, source=None, as_rel=None):
@@ -8366,6 +8551,8 @@ def t_update_idea(a):
     return idea_out(i)
 
 
+
+
 # ---------- phone videos (AirDropped into Downloads) ----------
 
 def airdropped(path):
@@ -9392,7 +9579,8 @@ def video_size(path):
         return None, None
 
 
-def gemini_call(path_or_bytes, mime, key, prompt=None, schema=None, ask="Describe this clip."):
+def gemini_call(path_or_bytes, mime, key, prompt=None, schema=None, ask="Describe this clip.", model=None, fps=None,
+                usage=None):
     """Send one small video to Gemini and return its JSON answer. Inline under 18 MB, else the Files API."""
     import base64
     import urllib.request
@@ -9418,21 +9606,25 @@ def gemini_call(path_or_bytes, mime, key, prompt=None, schema=None, ask="Describ
             f = json.load(urllib.request.urlopen(urllib.request.Request(base + "/v1beta/" + f["name"], headers=hdr),
                                                  timeout=30))
         part = {"file_data": {"mime_type": mime, "file_uri": f["uri"]}}
+    if fps:
+        part["video_metadata"] = {"fps": fps}
     body = {"contents": [{"parts": [part, {"text": ask}]}],
             "system_instruction": {"parts": [{"text": prompt or DESCRIBE_PROMPT}]},
             "generationConfig": {"response_mime_type": "application/json", "response_schema": schema or DESCRIBE_SCHEMA,
                                  "temperature": 0.2}}
-    req = urllib.request.Request(base + "/v1beta/models/%s:generateContent" % DESCRIBE_MODEL, method="POST",
+    req = urllib.request.Request(base + "/v1beta/models/%s:generateContent" % (model or DESCRIBE_MODEL), method="POST",
                                  data=json.dumps(body).encode(), headers=dict(hdr, **{"Content-Type": "application/json"}))
     try:
         out = json.load(urllib.request.urlopen(req, timeout=600))
     except urllib.error.HTTPError as e:
         raise ValueError("Gemini said %s: %s" % (e.code, e.read().decode(errors="replace")[:300]))
-    text = "".join(p.get("text", "") for p in out["candidates"][0]["content"]["parts"])
+    if usage is not None:
+        usage.update(out.get("usageMetadata") or {})
+    text = "".join(p.get("text", "") for p in out["candidates"][0]["content"]["parts"] if not p.get("thought"))
     return json.loads(text)
 
 
-def describe_video(src, prompt=None, schema=None, ask="Describe this clip.", fps=5):
+def describe_video(src, prompt=None, schema=None, ask="Describe this clip.", fps=5, model=None):
     """Gemini's JSON answer about one video: its description (DESCRIBE_SCHEMA) unless told otherwise."""
     import tempfile
     if os.environ.get("TAKES_DESCRIBE_CMD"):  # tests: a stand-in that prints the JSON answer
@@ -9455,7 +9647,7 @@ def describe_video(src, prompt=None, schema=None, ask="Describe this clip.", fps
                         "-c:v", "libx264", "-preset", "veryfast", "-crf", "32",
                         "-c:a", "aac", "-ac", "1", "-b:a", "48k", "-movflags", "+faststart", proxy],
                        check=True, capture_output=True, timeout=1800)
-        return gemini_call(proxy, "video/mp4", key, prompt, schema, ask)
+        return gemini_call(proxy, "video/mp4", key, prompt, schema, ask, model)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -9551,8 +9743,78 @@ def write_cut(s, n, **kw):
     os.replace(cuts_path(s) + ".tmp", cuts_path(s))
 
 
+CUT_MODEL = "gemini-4-argon"  # since 2026-10-13: sharper on timing than Flash; about 1-2 cents a take
+TRANSCRIPT_WAIT = 90  # s: a take just recorded gets its transcript from the app in the background
+
+
+def norm_words(text):
+    return [w for w in re.sub(r"[^a-z0-9' ]+", " ", (text or "").lower().replace("’", "'")).split() if w]
+
+
+def transcript_cut(words, say, secs, dur):
+    """The best delivery of the lines from the take's transcript alone (no key needed): every place he
+    starts the lines is an attempt; the one that says the most of them with the fewest extra words wins,
+    the later one on a tie (his last try is usually his best). words: [(start, end, word)]. Returns the
+    best_cut fields, or None when the transcript has none of the lines."""
+    want = norm_words(say)
+    if not want:
+        # A b-roll shot: no words to find. The middle stretch of the asked length, away from the
+        # start and stop of the recording.
+        secs = min(float(secs or 4), dur)
+        start = max(0.0, (dur - secs) / 2)
+        return {"start": round(start, 2), "end": round(start + secs, 2), "clean": True,
+                "why": "No lines: the middle %.1f s of the take." % secs}
+    import difflib
+    got = [(a, b, w) for a, b, x in words for w in norm_words(x)]
+    toks = [w for _, _, w in got]
+    span = int(len(want) * 1.6) + 4
+    best = None
+    for i, w in enumerate(toks):
+        if w not in want[:3]:
+            continue
+        m = difflib.SequenceMatcher(None, want, toks[i:i + span], autojunk=False)
+        blocks = [b for b in m.get_matching_blocks() if b.size]
+        if not blocks or blocks[0].b != 0:
+            continue
+        hit = sum(b.size for b in blocks)
+        last = i + blocks[-1].b + blocks[-1].size - 1
+        extra = (last - i + 1) - hit  # repeats, stumbles and ums inside the attempt
+        score = hit / len(want) - 0.03 * extra
+        if best is None or score >= best[0] - 0.001:
+            best = (score, i, last, hit, extra)
+    if best is None:
+        return None
+    _, i, last, hit, extra = best
+    tries = sum(1 for k, w in enumerate(toks) if w == want[0] and (k == 0 or toks[k - 1] != w))
+    clean = hit == len(want) and extra == 0
+    start, end = snap_cut(words, got[i][0], got[last][1], dur)
+    why = "From the transcript: %d of %d words%s, attempt %d of %d." % (
+        hit, len(want), "" if not extra else ", %d extra" % extra,
+        1 + sum(1 for k in range(i) if toks[k] == want[0] and (k == 0 or toks[k - 1] != toks[k])), max(tries, 1))
+    return {"start": round(start, 2), "end": round(end, 2), "clean": clean, "why": why,
+            "said": " ".join(x for a, b, x in words if a >= got[i][0] - 0.01 and b <= got[last][1] + 0.01),
+            "attempts": tries or None}
+
+
+def snap_cut(words, start, end, dur):
+    """Moves a cut's edges onto the transcript's word times: 0.08 s before the first word in the range,
+    0.2 s after the last, never into the word next to it. Gemini sees about one frame a second, so its
+    edges often fell inside a word (2026-10-13 test: most picks of Flash and Argon). words: [(start, end, word)]."""
+    inside = [i for i, (a, b, _) in enumerate(words) if start <= (a + b) / 2 <= end]
+    if not inside:
+        return start, end
+    i, j = inside[0], inside[-1]
+    lo = words[i - 1][1] + 0.02 if i > 0 else 0.0
+    hi = words[j + 1][0] - 0.02 if j + 1 < len(words) else dur
+    new_start = max(0.0, min(words[i][0], max(lo, words[i][0] - 0.08)))
+    new_end = min(dur, max(words[j][1], min(hi, words[j][1] + 0.2)))
+    return round(new_start, 2), round(new_end, 2)
+
+
 def take_cut(s, n):
-    """Gemini picks the best cut of take n against its storyboard shot's lines. Runs detached."""
+    """Picks the best cut of take n against its storyboard shot's lines. Runs detached. Gemini (CUT_MODEL)
+    watches the take when there is a key; without one, or when Gemini fails, the take's transcript picks
+    it, so a user without a key still gets a first cut (2026-10-13: "don't run them into walls")."""
     os.environ["PATH"] = os.pathsep.join(["/opt/homebrew/bin", "/usr/local/bin", os.environ.get("PATH", "")])
     t = voice_take(s, n)
     shot = next((x for x in read_storyboard(s)["shots"] if x.get("id") == t.get("shot")), None)
@@ -9561,16 +9823,43 @@ def take_cut(s, n):
         src = os.path.join(s, t["file"])
         say = (shot or {}).get("say", "").strip()
         secs = (shot or {}).get("seconds") or (round(len(say.split()) / 2.6, 1) if say else 4)
-        ask = ("The lines:\n%s\n\nAbout %s s when said well." % (say, secs)) if say else \
-              ("No lines: a b-roll shot. %s. About %s s." % ((shot or {}).get("how") or "", secs))
-        out = describe_video(src, CUT_PROMPT, CUT_SCHEMA, ask, fps=10)
-        dur = media_duration(src) or out["end"]
-        start, end = max(0.0, float(out["start"])), min(float(dur), float(out["end"]))
-        if end <= start:
-            raise ValueError("Gemini gave no usable range.")
-        write_cut(s, n, state="done", start=round(start, 2), end=round(end, 2), clean=bool(out.get("clean")),
-                  why=out.get("why"), said=out.get("said"), attempts=out.get("attempts"),
-                  model=DESCRIBE_MODEL, at=now_iso(), pid=None, by="gemini", gemini=None)
+        dur = media_duration(src)
+        gemini_error = None
+        if gemini_key() or os.environ.get("TAKES_DESCRIBE_CMD"):
+            ask = ("The lines:\n%s\n\nAbout %s s when said well." % (say, secs)) if say else \
+                  ("No lines: a b-roll shot. %s. About %s s." % ((shot or {}).get("how") or "", secs))
+            try:
+                out = describe_video(src, CUT_PROMPT, CUT_SCHEMA, ask, fps=10, model=CUT_MODEL)
+                d = float(dur or out["end"])
+                start, end = max(0.0, float(out["start"])), min(d, float(out["end"]))
+                if end <= start:
+                    raise ValueError("Gemini gave no usable range.")
+                if say:
+                    start, end = snap_cut(transcript_words(src) or [], start, end, d)
+                write_cut(s, n, state="done", start=round(start, 2), end=round(end, 2), clean=bool(out.get("clean")),
+                          why=out.get("why"), said=out.get("said"), attempts=out.get("attempts"),
+                          model=CUT_MODEL, at=now_iso(), pid=None, by="gemini", gemini=None)
+                return
+            except Exception as e:
+                gemini_error = str(e)[:200]
+        # No key, or Gemini failed: the transcript. The app writes it in the background after a take,
+        # so a take recorded in the last few minutes is worth a wait.
+        fresh = time.time() - os.path.getmtime(src) < 300
+        wait = time.time() + (TRANSCRIPT_WAIT if say and fresh else 0)
+        words = transcript_words(src) if say else []
+        while say and words is None and time.time() < wait:
+            time.sleep(3)
+            words = transcript_words(src)
+        if say and not words:
+            raise ValueError((gemini_error + ". " if gemini_error else "No Gemini key, and ") +
+                             "the take has no transcript yet. Try Find the Best Cut again in a minute.")
+        out = transcript_cut(words or [], say, secs, float(dur or (words[-1][1] if words else secs)))
+        if out is None:
+            raise ValueError("The take's transcript has none of the shot's lines.")
+        if gemini_error:
+            out["why"] += " Gemini failed: %s" % gemini_error
+        write_cut(s, n, state="done", at=now_iso(), pid=None, by="transcript", gemini=None, model=None,
+                  said=out.pop("said", None), attempts=out.pop("attempts", None), **out)
     except Exception as e:
         msg = str(e)
         if isinstance(e, subprocess.CalledProcessError) and e.stderr:
@@ -9589,7 +9878,7 @@ def t_set_best_cut(a):
         raise ValueError("end must come after start, inside the take (%.1f s long)." % dur)
     old = read_cuts(s).get(str(n)) or {}
     first = old.get("gemini") or ({k: old.get(k) for k in ("start", "end", "clean", "why")}
-                                  if old.get("by", "gemini") == "gemini" and old.get("state") == "done" else None)
+                                  if old.get("by", "gemini") in ("gemini", "transcript") and old.get("state") == "done" else None)
     write_cut(s, n, state="done", start=round(start, 2), end=round(end, 2), why=a["why"].strip(),
               clean=a.get("clean", True), said=a.get("said"), attempts=None, by="agent", gemini=first,
               shot=t.get("shot") or old.get("shot"), at=now_iso(), error=None, pid=None)
@@ -10188,11 +10477,21 @@ def has_encoder(name):
     return ENCODERS[name]
 
 
+def apple_silicon():
+    """VideoToolbox takes -q:v (constant quality) and encodes ProRes only on Apple silicon."""
+    return sys.platform == "darwin" and platform.machine() == "arm64"
+
+
 def video_codec(c):
-    """libx264 up to 1080p; VideoToolbox above (HEVC 10-bit for a 10-bit or HDR source)."""
+    """A cut's clip. Up to 1080p: VideoToolbox at constant quality on Apple silicon, else libx264;
+    above 1080p VideoToolbox (HEVC 10-bit for a 10-bit or HDR source).
+    2026-10-13 speed audit, a 40 s 1080p take: libx264 crf16 medium took 87 CPU-s on ~13 cores,
+    h264_videotoolbox q72 took 12.8 CPU-s at VMAF 96.8 (x264: 97.3), the file +10%."""
     big = min(c.get("width") or 0, c.get("height") or 0) > 1080
     ten = "10" in (c.get("pix_fmt") or "") or c.get("color_transfer") in ("arib-std-b67", "smpte2084")
-    if not big and has_encoder("libx264"):
+    if not big and apple_silicon() and has_encoder("h264_videotoolbox"):
+        args = ["-c:v", "h264_videotoolbox", "-q:v", "72", "-pix_fmt", "yuv420p"]
+    elif not big and has_encoder("libx264"):
         args = ["-c:v", "libx264", "-crf", "16", "-preset", "medium", "-pix_fmt", "yuv420p"]
     elif not big:
         args = ["-c:v", "h264_videotoolbox", "-b:v", "20M", "-pix_fmt", "yuv420p"]
@@ -10300,9 +10599,10 @@ def render_cut(segs, files, clocks, voices, mp4, wav, vargs=None):
                    0.1 + 0.85 * done / total, 0.1 + 0.85 * (done + sum(lens[b:b + step])) / total)
         with open(os.path.join(tmp, "parts.txt"), "w") as f:
             f.write("".join("file '%s'\n" % n for n in names))
-        run_ff(base + ["-f", "concat", "-safe", "0", "-i", os.path.join(tmp, "parts.txt"), "-i", voice,
-                       "-map", "0:v", "-map", "1:a", "-c:v", "copy", "-c:a", "aac", "-b:a", "256k", "-ar", "48000",
-                       "-movflags", "+faststart", mp4], total, 0.95, 1.0)
+        # A render's cut.mov (vargs) needs no sound: the render mixes voice.wav itself.
+        sound = [] if vargs else ["-i", voice, "-map", "1:a", "-c:a", "aac", "-b:a", "256k", "-ar", "48000"]
+        run_ff(base + ["-f", "concat", "-safe", "0", "-i", os.path.join(tmp, "parts.txt")] + sound[:2]
+               + ["-map", "0:v"] + sound[2:] + ["-c:v", "copy", "-movflags", "+faststart", mp4], total, 0.95, 1.0)
         os.replace(voice, wav)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
@@ -10871,7 +11171,15 @@ LOUDNESS_TARGET = {"normal": -14.0, "quiet": -18.0}
 RENDER_STAGES = {"cut": "Cutting the takes", "steps": "Making the graphics", "picture": "Making the picture",
                  "sound": "Mixing the sound", "check": "Checking the edit"}
 RENDER_DONE = "Ready. Takes checks it before it saves it."
-PRORES = ["-c:v", "prores_ks", "-profile:v", "2", "-pix_fmt", "yuv422p10le"]
+def prores():
+    """The render's cut.mov: ProRes 422 10-bit, a picture pass decodes it once more.
+    VideoToolbox on Apple silicon: 14.5 CPU-s for a 40 s take against 99 for prores_ks (speed audit 2026-10-13)."""
+    if apple_silicon() and has_encoder("prores_videotoolbox"):
+        return ["-c:v", "prores_videotoolbox", "-profile:v", "standard", "-pix_fmt", "p210le"]
+    return ["-c:v", "prores_ks", "-profile:v", "2", "-pix_fmt", "yuv422p10le"]
+
+
+
 RUN_LOG = None  # the render job's list of every argv it ran (run_ff and render_run add to it)
 LOUD_CACHE = {}  # (path, size, mtime) -> (integrated LUFS, true peak dBTP)
 
@@ -11362,7 +11670,8 @@ def recipe_target(r):
 
 def picture_codec():
     if has_encoder("libx264"):
-        return ["-c:v", "libx264", "-crf", "18", "-preset", "medium"]
+        # fast: the same size and VMAF (96.6) as medium on a 40 s take, 10% less CPU (2026-10-13).
+        return ["-c:v", "libx264", "-crf", "18", "-preset", "fast"]
     return ["-c:v", "h264_videotoolbox", "-b:v", "20M"]
 
 
@@ -11602,7 +11911,7 @@ def render_run(job_id):
             voices.append((mix, voice_offset(s, key)) if mix and os.path.exists(mix) else None)
         segs = [{"take": g["take"], "kind": g["kind"], "in": g["in"], "out": g["out"]} for g in cut]
         length = render_cut(segs, files, clocks, voices, os.path.join(tmp, "cut.mov"), os.path.join(tmp, "voice.wav"),
-                            vargs=PRORES)
+                            vargs=prores())
         lead = float(r["cover"]["seconds"]) if r.get("cover") else 0.0
         words = render_words(s, r, cut, lead)
         name_dir = os.path.join(EDIT_DIR, r["name"])
@@ -11648,6 +11957,10 @@ def render_run(job_id):
         # 6. Check: check_edit's checks, with this recipe's parent for the line of versions.
         say("TAKES_STAGE " + RENDER_STAGES["check"])
         entry = check_file(s, os.path.relpath(out, s), out, as_rel=lineage_rel(r))
+        try:
+            start_review(s, out)  # Gemini watches it while the agent reads the checks; publish_edit returns it
+        except (ValueError, OSError):
+            pass
         r.update(checks={"passed": entry["passed"], "known": entry["known"], "source": entry["source"],
                          "results": entry["results"]},
                  commands=[[str(x) for x in c] for c in RUN_LOG], length_s=round(plan["total"], 3),
@@ -12235,6 +12548,10 @@ def publish_render(s, a, note):
     posts = move_posts(s, before, name, new_rel, rec)
     out = {"edit": new_rel, "version": n, "recipe": recipe_path(new_rel), "checks": check_brief(rec["checks"], accept),
            "posts": posts}
+    try:
+        out["review"] = review_result(s, new_abs, start_review(s, new_abs), time.time() + 45)
+    except (ValueError, OSError, subprocess.SubprocessError):
+        pass
     if replies:
         try:
             t_reply_comment({"session": s, "replies": [dict(x, fixed_in=new_rel, resolve=True) for x in replies]})
@@ -13113,9 +13430,12 @@ TOOLS = [
       "on": {"type": "boolean"}, "remove": {"type": "boolean"}}, [], t_set_rule),
     ("check_edit", "Check each new edit before you show it. It compares the edit with its take: sound, picture, "
      "sync, cut words, undone fixes, rules with a check. Fix each failure in a new version and check that. "
-     "pass null: did not run (skip says why). A failure looks wrong: tell the user its say.",
+     "pass null: did not run (skip says why). A failure looks wrong: tell the user its say. review: with a Gemini "
+     "key, Gemini watches the edit with the rules (about 5 cents, cached per version); without one, a frame sheet "
+     "for you to look at. Follow review.note.",
      {"session": SESSION, "file": {"type": "string", "description": "E.g. 'edits/hook-v4.mp4'."},
-      "source": {"type": "string", "description": "Optional take file, when not the keeper."}},
+      "source": {"type": "string", "description": "Optional take file, when not the keeper."},
+      "watch": {"type": "boolean", "description": "false: skip Gemini's review (default true)."}},
      ["session", "file"], t_check_edit),
     ("make_image", "Make or change an image straight from Google or OpenAI (much cheaper than a Higgsfield "
      "image: never use higgsfield for images). Drafts first, final last: while the user finds the direction, "
@@ -13434,9 +13754,9 @@ TOOLS = [
       "on": {"type": "boolean", "description": "false = use the original audio (keeps the cleaned files)."},
       "rerun": {"type": "boolean", "description": "Clean again from the raw take."}},
      ["session", "take"], t_clean_voice),
-    ("set_best_cut", "Set the best cut of a storyboard take after you checked it. Gemini's best_cut is only a "
-     "first suggestion: compare it with the transcript and the frames, then write the range you use here "
-     "(by=agent; Gemini's range stays under gemini). The user sees it on the take in the Storyboard tab. This only "
+    ("set_best_cut", "Set the best cut of a storyboard take after you checked it. The best_cut from Gemini (or from "
+     "the transcript, without a key) is only a first suggestion: compare it with the transcript and the frames, then "
+     "write the range you use here (by=agent; the first range stays under gemini). The user sees it on the take in the Storyboard tab. This only "
      "marks a range. To make the clip, call cut_take with that range.",
      {"session": SESSION, "take": {"type": "integer"},
       "start": {"type": "number", "description": "Seconds from the start of the take."},
@@ -13498,7 +13818,8 @@ TOOLS = [
      "reads the checks the render ran (it refuses on a failed check; accept=[{rule, why}] for a fail you meant), "
      "puts the version on the posts that follow this edit (a version the user picked stays), answers the review "
      "comments it fixes (replies: like reply_comment; fixed_in and resolve are set for you) and saves note as the "
-     "changelog line. Call it once per version. To show another file on a post, call set_post media=... after.",
+     "changelog line. Call it once per version. To show another file on a post, call set_post media=... after. "
+     "Its review (Gemini watched it, or a frame sheet when there is no key) is for the next version: follow review.note.",
      {"session": SESSION,
       "render": {"type": "string", "description": "The job id from render_edit, or its render path."},
       "note": {"type": "string", "description": "One short line the user reads under the edit, at most 60 "
@@ -13790,7 +14111,7 @@ def handle(msg):
                                     "follow them and send the same call again. "
                                     "A take's voice: clean_voice cleans it (the user's voice-cleanup); when get_session shows voice.file "
                                     "under a take, use that WAV as the take's audio in edits. "
-                                    "A take recorded for a storyboard shot has best_cut in get_session. by=gemini is only Gemini's "
+                                    "A take recorded for a storyboard shot has best_cut in get_session. by=gemini or by=transcript is only a "
                                     "first suggestion of the clean delivery (start, end in seconds), not the final cut: "
                                     "check it against the take's words (get_session edit_ready) and a look at the "
                                     "frames at both ends, then set_best_cut with the range you use, even when it "
@@ -14062,6 +14383,8 @@ if __name__ == "__main__":
         print(json.dumps(agents_status()))
     elif sys.argv[1:2] == ["--voice-run"]:
         voice_run(*sys.argv[2:5])
+    elif sys.argv[1:2] == ["--edit-review"]:
+        edit_review(sys.argv[2], sys.argv[3])
     elif sys.argv[1:2] == ["--take-cut"]:
         take_cut(sys.argv[2], sys.argv[3])
     elif sys.argv[1:2] == ["--broll-save"]:

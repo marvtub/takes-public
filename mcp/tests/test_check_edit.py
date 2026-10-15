@@ -13,6 +13,8 @@ from unittest import mock
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.dirname(__file__))
 import takes_mcp as t  # noqa: E402
+
+os.environ["TAKES_NO_REVIEW"] = "1"  # never let a real Gemini key watch a test edit
 import check_media as m  # noqa: E402
 
 FFMPEG = t.find_tool("ffmpeg") and t.find_tool("ffprobe")

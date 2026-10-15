@@ -147,6 +147,9 @@ struct ChatParser {
     var context: ChatContext?
     /// The agent's own conversation id (Codex: from thread.started).
     var thread: String?
+    /// Tokens this run used, all of them and the ones the agent wrote, for the usage counts
+    /// (Usage.addTokens). Numbers from the agent's usage lines only, never from the messages.
+    var spent = 0, spentOut = 0
     /// The agent whose lines these are. Nil: told by the line (Codex's types have a dot).
     let adapter: (any ChatAdapter)?
 
@@ -268,6 +271,11 @@ final class ClaudeChat {
     private(set) var agentTick = 0
     @ObservationIgnored private var log: ChatLog
     @ObservationIgnored private var process: Process?
+    /// Claude Code's process, open between messages (ChatWarm). It is `process` while a run uses it.
+    @ObservationIgnored private var warm: WarmClaude?
+    /// Whether the last Claude message had a note on what the user looks at (nil: not known, as
+    /// after a launch). The note stays in the conversation, so its end needs a note too.
+    @ObservationIgnored private var lookNoted: Bool?
     @ObservationIgnored private var parser: ChatParser?
     @ObservationIgnored private var stderr = Data()
 
@@ -347,7 +355,7 @@ final class ClaudeChat {
         if hasMessages == messages.isEmpty { hasMessages = !messages.isEmpty }
     }
 
-    private static func load(_ url: URL) -> ChatLog? {
+    nonisolated static func load(_ url: URL) -> ChatLog? {
         guard let data = try? Data(contentsOf: url) else { return nil }
         let dec = JSONDecoder()
         dec.dateDecodingStrategy = .iso8601
@@ -691,6 +699,10 @@ final class ClaudeChat {
         parser = ChatParser(messages, context: context, adapter: agent.adapter)
         stderr = Data()
 
+        let agent = self.agent
+        // What changes from message to message. Claude Code gets it in front of the message, so its
+        // instructions stay the same: its process can stay open (ChatWarm) and the prompt cache holds.
+        var notes: [String] = []
         var context: String
         if let session {
             let id = Store.sessionID(session).map { ", session id \($0)" } ?? ""
@@ -718,14 +730,14 @@ final class ClaudeChat {
                     "the blog's components, shown as your blog shows it); the LinkedIn and X articles and the video come from it."
             }
             if let onStage {
-                context += " Right now the user has \(CommentStore.path(of: onStage, in: session)) open in the player."
+                notes.append("Right now the user has \(CommentStore.path(of: onStage, in: session)) open in the player.")
             } else if UserDefaults.standard.string(forKey: "rightTab") == "post",
                       let side = Plugins.postSide(UserDefaults.standard.string(forKey: "postPlatform") ?? "") {
-                context += " " + side.context(session)
+                notes.append(side.context(session))
             } else if UserDefaults.standard.string(forKey: "rightTab") == "post",
                       case let p = PostPlatform.stored(UserDefaults.standard.string(forKey: "postPlatform") ?? "") {
                 // Which post he looks at, so "make it shorter" lands on the right one (2026-10-04).
-                context += " Right now the user has the Post tab open on the \(p.name) side (\(p.rel))."
+                notes.append("Right now the user has the Post tab open on the \(p.name) side (\(p.rel)).")
             }
         } else if boardName.hasPrefix("comments") {
             context = CopilotAsk.context
@@ -756,26 +768,66 @@ final class ClaudeChat {
             a narrow panel: keep them short, no tables, no headings.
             """
         }
-        let agent = self.agent
         if agent.adapter.browser, !boardName.hasPrefix("comments") || session != nil { context += "\n\n" + Self.browserRules }
         context += "\n\n" + ChatRefs.howTo
         if let note = Releaser.agentNote { context += "\n\n" + note }
-        if let origin { context += "\n\n" + origin }
+        if let origin { notes.append(origin) }
         if let recap {
-            context += "\n\nThe earlier conversation in this panel could not be resumed. What it showed:\n" + recap
+            notes.append("The earlier conversation in this panel could not be resumed. What it showed:\n" + recap)
         }
+        // A note stays in the conversation: when the user closed what it named, say so once.
+        if agent == .claude, session != nil, !Self.isCompact(text) {
+            let looks = onStage != nil || UserDefaults.standard.string(forKey: "rightTab") == "post"
+            if !looks, lookNoted != false, log.started {
+                notes.insert("The user has no file open in the player and the Post tab closed now: earlier notes on what is open are out of date.", at: 0)
+            }
+            lookNoted = looks
+        }
+        var ask = text
+        if !notes.isEmpty {
+            if agent == .claude {
+                if !Self.isCompact(text) { ask = "[Takes note: " + notes.joined(separator: "\n\n") + "]\n\n" + text }
+            } else {
+                context += "\n\n" + notes.joined(separator: "\n\n")
+            }
+        }
+
+        if !log.started { log.agent = agent.rawValue }
+        let mcp = agent == .claude ? ChatMCP.config(folder: Self.folder) : nil
+        let canWarm = agent == .claude && Warm.on && !Self.isCompact(text) && (Self.claudeOverride.map { $0.hasSuffix("/claude-warm") } ?? true)
+        var turn = ChatTurn(
+            context: context, model: agent.model.id, conversation: log.conversation, thread: log.thread,
+            started: log.started, access: Self.access, board: session == nil ? boardName : nil,
+            mcpConfig: mcp, warm: canWarm)
+        var env = Self.environment(board: session == nil ? boardName : nil)
+        // The takes server knows the chat by it (rules seen, jobs). Claude Code sets its own
+        // CLAUDE_CODE_SESSION_ID, the same id; pi hands its environment to its MCP servers.
+        env["TAKES_CHAT_ID"] = log.conversation
+        let args = agent.adapter.chatArguments(turn)
+        turn.started = true  // the key leaves out how the process found the conversation
+        let key = canWarm ? Warm.key(exe: claude, args: agent.adapter.chatArguments(turn), env: env, mcp: mcp, folder: Self.folder) : ""
+
+        // The open process takes the message. If it is gone, a new one starts.
+        if canWarm, let w = warm, w.key == key, w.process.isRunning {
+            WarmPool.leave(self)
+            warm?.timer?.cancel()
+            warm?.timer = nil
+            listen(w.process, output: w.output, errors: w.errors, lines: w.lines, gen: gen)
+            if Warm.write(Warm.line(ask), to: w.input) {
+                process = w.process
+                pipes = [w.output, w.errors]
+                watch(gen)
+                return
+            }
+            dropWarm()
+        }
+        dropWarm()
 
         let p = Process()
         p.executableURL = URL(fileURLWithPath: claude)
-        if !log.started { log.agent = agent.rawValue }
-        p.arguments = agent.adapter.chatArguments(ChatTurn(
-            context: context, model: agent.model.id, conversation: log.conversation, thread: log.thread,
-            started: log.started, access: Self.access, board: session == nil ? boardName : nil))
+        p.arguments = args
         p.currentDirectoryURL = Self.folder
-        p.environment = Self.environment(board: session == nil ? boardName : nil)
-        // The takes server knows the chat by it (rules seen, jobs). Claude Code sets its own
-        // CLAUDE_CODE_SESSION_ID, the same id; pi hands its environment to its MCP servers.
-        p.environment?["TAKES_CHAT_ID"] = log.conversation
+        p.environment = env
         let input = Pipe(), output = Pipe(), errors = Pipe()
         p.standardInput = input
         p.standardOutput = output
@@ -783,6 +835,28 @@ final class ClaudeChat {
         // Lines are cut and big tool results shrunk here, on the pipe's thread; the main thread
         // only parses what the chat shows (2026-10-03).
         let lines = StreamLines()
+        listen(p, output: output, errors: errors, lines: lines, gen: gen)
+        do { try p.run() } catch {
+            running = false
+            letSleep()
+            append(ChatMessage(role: .error, text: "Couldn't start the chat: \(error.localizedDescription)"))
+            return
+        }
+        process = p
+        pipes = [output, errors]
+        if canWarm {
+            warm = WarmClaude(process: p, input: input.fileHandleForWriting, output: output, errors: errors, lines: lines, key: key)
+            // A failed write: the process is gone, and its end settles the run.
+            _ = Warm.write(Warm.line(ask), to: input.fileHandleForWriting)
+        } else {
+            input.fileHandleForWriting.write(Data(ask.utf8))
+            try? input.fileHandleForWriting.close()
+        }
+        watch(gen)
+    }
+
+    /// Takes the process's output and its end for the run `gen`.
+    private func listen(_ p: Process, output: Pipe, errors: Pipe, lines: StreamLines, gen: Int) {
         self.lines = lines
         output.fileHandleForReading.readabilityHandler = { [weak self] h in
             let d = h.availableData
@@ -803,22 +877,17 @@ final class ClaudeChat {
             let rest = lines.feed(Self.drain(output.fileHandleForReading))
             let status = proc.terminationStatus, reason = proc.terminationReason
             DispatchQueue.main.async {
-                guard let self, self.generation == gen else { return }
+                guard let self else { return }
+                if self.warm?.process === proc { self.forgetWarm() }
+                guard self.generation == gen else { return }
                 if !rest.isEmpty { self.take(rest) }
                 self.finish(status: status, killed: reason == .uncaughtSignal)
             }
         }
-        do { try p.run() } catch {
-            running = false
-            letSleep()
-            append(ChatMessage(role: .error, text: "Couldn't start the chat: \(error.localizedDescription)"))
-            return
-        }
-        process = p
-        pipes = [output, errors]
-        input.fileHandleForWriting.write(Data(text.utf8))
-        try? input.fileHandleForWriting.close()
-        // Checks every 2 s that the process still lives; one that is gone settles the chat.
+    }
+
+    /// Checks every 2 s that the process still lives; one that is gone settles the chat.
+    private func watch(_ gen: Int) {
         watchdog?.cancel()
         watchdog = Task { [weak self] in
             while !Task.isCancelled {
@@ -838,6 +907,7 @@ final class ClaudeChat {
     /// SIGTERM; a process that still runs 5 s later gets SIGKILL, and so does what it started.
     private func end(_ p: Process?) {
         guard let p, p.isRunning else { return }
+        if warm?.process === p { forgetWarm() }
         p.terminate()
         let pid = p.processIdentifier
         DispatchQueue.global().asyncAfter(deadline: .now() + 5) {
@@ -906,6 +976,7 @@ final class ClaudeChat {
     private func detach() -> Process? {
         let p = process
         process = nil
+        if let p, warm?.process === p { forgetWarm() }
         p?.terminationHandler = nil
         pipes.forEach { $0.fileHandleForReading.readabilityHandler = nil }
         pipes = []
@@ -946,6 +1017,7 @@ final class ClaudeChat {
     /// it did so far, and the next message resumes the conversation from there.
     func quit() {
         saveDraft()
+        if !running { dropWarm() }
         guard running, let process = detach() else { return }
         // A steer that did not go out yet waits in the queue, which is saved: it goes next launch.
         if let steer { queued.append(steer.replacingOccurrences(of: "I interrupted you.\n", with: "")) }
@@ -990,6 +1062,7 @@ final class ClaudeChat {
             running = false
             letSleep()
         }
+        dropWarm()
         shelve()
         log = ChatLog(conversation: UUID().uuidString.lowercased())
         messages = []
@@ -1035,6 +1108,12 @@ final class ClaudeChat {
     }
 
     private func take(_ lines: [String]) {
+        // Output from an open process between runs: it did something by itself. Its next run could
+        // mix that up with the answer, so it ends; the next message starts a new process.
+        guard parser != nil else {
+            if warm != nil, lines.contains(where: { !$0.isEmpty }) { dropWarm() }
+            return
+        }
         for line in lines { parser?.consume(line) }
         if parser?.compacted == true {
             forgetRules()
@@ -1043,7 +1122,52 @@ final class ClaudeChat {
         if parser?.started == true && !log.started { log.started = true }
         if let t = parser?.thread, log.thread != t { log.thread = t }
         publish()
+        // An open process stays alive after its answer: the answer's end is the run's end.
+        if running, parser?.finished == true, let w = warm, w.process === process {
+            if lines.contains(where: { $0.contains(#""type":"result""#) && $0.contains(#""is_error":true"#) }) {
+                // A failed turn (API error, lost login, rate limit): it is not kept. The end of its
+                // input ends it, and its exit and stderr settle the run as before.
+                forgetWarm()
+                try? w.input.close()
+                return
+            }
+            park()
+            finish(status: 0, killed: false)
+        }
     }
+
+    /// The open process waits for the next message, at most Warm.idle.
+    private func park() {
+        warm?.timer?.cancel()
+        warm?.timer = Task { [weak self] in
+            try? await Task.sleep(for: Warm.idle)
+            guard !Task.isCancelled, let self, !self.running else { return }
+            self.dropWarm()
+        }
+        WarmPool.park(self)
+    }
+
+    /// Ends the open process, if there is one, and lets go of it first: its end reaches no run.
+    func dropWarm() {
+        guard let w = warm else { return }
+        forgetWarm()
+        if process === w.process { return end(w.process) }  // a run uses it: its end settles the run
+        w.process.terminationHandler = nil
+        w.output.fileHandleForReading.readabilityHandler = nil
+        w.errors.fileHandleForReading.readabilityHandler = nil
+        try? w.input.close()  // Claude Code ends at the end of its input
+        end(w.process)
+    }
+
+    /// The process is no longer kept open (it ended, or a run ends it).
+    private func forgetWarm() {
+        warm?.timer?.cancel()
+        warm = nil
+        WarmPool.leave(self)
+    }
+
+    /// The open process's id, for tests.
+    var warmPID: pid_t? { warm.map { $0.process.processIdentifier } }
 
     // A reply streams in a few words per line. Showing each one made the panel regroup and compare
     // every message per word, in each chat that streams. Show the parser's state at most 10 times
@@ -1078,6 +1202,7 @@ final class ClaudeChat {
         deadSince = nil
         pipes = []
         var parser = self.parser ?? ChatParser(messages, context: context, adapter: agent.adapter)
+        Usage.addTokens(parser.spent, out: parser.spentOut)
         let why = String(decoding: stderr, as: UTF8.self)
         if !killed, agent.adapter.lost(why), log.started, let ask = lastAsk, let claude = self.exePath {
             // Drop the failed reply; keep the question (or the note of a job that ended).
@@ -1423,6 +1548,12 @@ private struct ChatCornerBody: View {
     let target: ChatTarget
     var away = false
     @State private var hover = false
+    /// The user drags the button off things it covers (2026-10-14). One place for every page,
+    /// kept across launches; double-click puts it back in the corner.
+    @AppStorage("chatCornerX") private var movedX = 0.0
+    @AppStorage("chatCornerY") private var movedY = 0.0
+    @State private var drag = CGSize.zero
+    @State private var dragging = false
 
     init(hub: ChatHub, target: ChatTarget, away: Bool = false) {
         self.hub = hub; self.chat = target.chat; self.target = target; self.away = away
@@ -1446,6 +1577,7 @@ private struct ChatCornerBody: View {
                 button
             }
         }
+        .offset(shift)
         .opacity(open && hub.docked ? 0 : 1)
         .liveLayer(!(open && hub.docked))
         .animation(Theme.spring, value: hub.open)
@@ -1481,8 +1613,33 @@ private struct ChatCornerBody: View {
         openComments = target.session.map { CommentStore.read($0).comments.filter(\.open).count } ?? 0
     }
 
+    /// Where the corner sits now. The open panel (390 × 560) must still fit in the window.
+    private var shift: CGSize {
+        var x = movedX + drag.width, y = movedY + drag.height
+        if open && !hub.docked, let size = Self.windowSize {
+            x = max(x, -(size.width - 520)); y = max(y, -(size.height - 700))
+        }
+        return CGSize(width: min(0, x), height: min(0, y))
+    }
+
+    private static var windowSize: CGSize? { (NSApp.keyWindow ?? NSApp.mainWindow)?.contentView?.bounds.size }
+
+    private var move: some Gesture {
+        DragGesture(minimumDistance: 4, coordinateSpace: .global)
+            .onChanged { v in dragging = true; hover = true; drag = v.translation }
+            .onEnded { v in
+                // Stays in the window: the button never hides under the sidebar edge or the top bar.
+                let size = Self.windowSize ?? CGSize(width: 1400, height: 900)
+                movedX = min(0, max(-(size.width - 140), movedX + v.translation.width))
+                movedY = min(0, max(-(size.height - 160), movedY + v.translation.height))
+                drag = .zero
+                DispatchQueue.main.async { dragging = false }
+            }
+    }
+
     private var button: some View {
         Button {
+            guard !dragging else { return }
             if away { hub.onRecord = true; hub.open = true } else { hub.open.toggle() }
         } label: {
             ZStack {
@@ -1516,7 +1673,11 @@ private struct ChatCornerBody: View {
         }
         .buttonStyle(.plain)
         .onHover { hover = $0 }
-        .help(away ? "Talk to Takes (⇧⌘L)" : open ? "Close the chat (⇧⌘L)" : "Talk to Takes about this session (⇧⌘L)")
+        .highPriorityGesture(move)
+        .simultaneousGesture(TapGesture(count: 2).onEnded {
+            withAnimation(Theme.spring) { movedX = 0; movedY = 0 }
+        })
+        .help(away ? "Talk to Takes (⇧⌘L). Drag to move it." : open ? "Close the chat (⇧⌘L)" : "Talk to Takes about this session (⇧⌘L). Drag to move it; double-click puts it back.")
     }
 }
 
@@ -1842,6 +2003,7 @@ private struct ChatComposer: View {
     @State private var spokenAfter = ""
     @FocusState private var focused: Bool
     @Environment(\.chatLive) private var live
+    @State private var mentions = MentionPicker()
 
     var body: some View {
         let _ = Perf.body("ChatComposer")
@@ -1904,13 +2066,16 @@ private struct ChatComposer: View {
                 stopHelp: "Stop the reply",
                 send: { send(chat.draft) }, stop: stop,
                 steer: { send(chat.draft, now: true) },
-                paste: { ChatAttach.paste(into: chat) })
+                paste: { ChatAttach.paste(into: chat) },
+                mentions: mentions)
         }
         .padding(12)
         .animation(Theme.motion, value: focused)
         .animation(Theme.motion, value: chat.running)
         .animation(Theme.motion, value: chat.attachments)
         .onChange(of: dictation.problem) { _, why in if let why { app.show(toast: why) } }
+        .onAppear { mentions.session = target.session }
+        .onChange(of: target.session) { _, s in mentions.session = s; mentions.picked = [] }
         .onDisappear { chat.saveDraft() }
     }
 
@@ -1928,6 +2093,7 @@ private struct ChatComposer: View {
         }
         if typed {
             if out == text, ClaudeChat.mentionsComments(text) { out = ClaudeChat.withoutCommentsToken(text) }
+            if !ClaudeChat.isCompact(out) { out += mentions.take(for: text) }
             if openComments > 0, let session = target.session, !ClaudeChat.isCompact(out) {
                 out = ClaudeChat.withComments(out, CommentStore.read(session).comments)
             }
@@ -1995,6 +2161,8 @@ struct ChatField: View {
     var paste: (() -> Bool)?
     /// False for a note another button uses (a decline reason): no send arrow.
     var sends = true
+    /// The @ list (ChatMentions). Nil: the box has none (Muse).
+    var mentions: MentionPicker?
 
     /// While a run goes, the button stops it; with text in the box it sends instead.
     private var stopping: Bool { running && !canSend }
@@ -2008,6 +2176,33 @@ struct ChatField: View {
                 .overlay(alignment: .topLeading) { CommandToken(draft: draft) }
                 .focused(focused)
                 .onSubmit { if sends { submit() } }
+                // While the @ list is open, its keys come first.
+                .onKeyPress(keys: [.upArrow, .downArrow, .return, .tab, .escape], phases: .down) { press in
+                    guard let mentions, press.modifiers.intersection([.command, .shift, .option, .control]).isEmpty else { return .ignored }
+                    let rows = mentions.rows(draft)
+                    guard !rows.isEmpty else { return .ignored }
+                    let lit = min(mentions.lit, rows.count - 1)
+                    switch press.key {
+                    case .upArrow: mentions.lit = (lit - 1 + rows.count) % rows.count
+                    case .downArrow: mentions.lit = (lit + 1) % rows.count
+                    case .escape: mentions.shut = draft
+                    default: pick(rows[lit], mentions)
+                    }
+                    return .handled
+                }
+                // Backspace right after a picked name takes the whole name.
+                .onKeyPress(.delete, phases: .down) { press in
+                    guard press.modifiers.isEmpty, let mentions, !mentions.picked.isEmpty,
+                          let editor = MentionTint.editor() else { return .ignored }
+                    let at = editor.selectedRange()
+                    guard at.length == 0 else { return .ignored }
+                    let before = (editor.string as NSString).substring(to: at.location)
+                    guard let token = mentions.picked.map(\.token).sorted(by: { $0.count > $1.count })
+                        .first(where: { before.hasSuffix($0) }) else { return .ignored }
+                    let n = (token as NSString).length
+                    editor.insertText("", replacementRange: NSRange(location: at.location - n, length: n))
+                    return .handled
+                }
                 // Escape cancels dictation, else stops the run (as in Claude Code).
                 .onKeyPress(.escape) {
                     if dictation.active { dictation.cancel(); return .handled }
@@ -2070,8 +2265,37 @@ struct ChatField: View {
         .background(Theme.canvas, in: RoundedRectangle(cornerRadius: 14))
         .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(focused.wrappedValue ? Theme.muted.opacity(0.5) : Theme.border, lineWidth: 0.5))
         .animation(Theme.spring, value: dictation.active)
+        // The list stands on the box: a zero-high frame on its top edge, the list growing up from it.
+        .overlay(alignment: .top) {
+            if let mentions, focused.wrappedValue, case let rows = mentions.rows(draft), !rows.isEmpty {
+                MentionMenu(rows: rows, lit: min(mentions.lit, rows.count - 1),
+                            hover: { mentions.lit = $0 }, pick: { pick($0, mentions) })
+                    .frame(maxWidth: .infinity, maxHeight: 0, alignment: .bottomLeading)
+                    .offset(y: -6)
+                    .transition(.opacity.combined(with: .offset(y: 4)))
+            }
+        }
         .onChange(of: dictation.text) { _, words in draft = spokenAfter + words }
+        .onChange(of: draft) { _, _ in
+            guard let mentions else { return }
+            mentions.lit = 0
+            MentionTint.apply(mentions.picked.map(\.token))
+        }
+        .onChange(of: focused.wrappedValue) { _, on in if on, let mentions { MentionTint.apply(mentions.picked.map(\.token)) } }
         .onDisappear { dictation.cancel() }
+    }
+
+    /// The typed "@words" become "@Name ". Through the editor, so the cursor stays at the end.
+    private func pick(_ m: Mention, _ mentions: MentionPicker) {
+        let old = draft
+        let q = Mentions.query(old, picked: mentions.picked)
+        mentions.add(m)
+        if let q, let editor = MentionTint.editor(), editor.string == old {
+            editor.insertText(m.token + " ", replacementRange: NSRange(q.at..<old.endIndex, in: old))
+        } else {
+            draft = Mentions.pick(m, into: old)
+        }
+        focused.wrappedValue = true
     }
 
     private func startDictation() {
@@ -2382,7 +2606,7 @@ private struct ChatBubble: View, Equatable {
                     case .text(let t):
                         HStack {
                             Spacer(minLength: 48)
-                            Text(t).font(Theme.sans(13)).foregroundStyle(Theme.paper)
+                            Text(Mentions.styled(t, tokens: Mentions.tokens(in: message.text))).font(Theme.sans(13)).foregroundStyle(Theme.paper)
                                 .textSelection(.enabled)
                                 .padding(.horizontal, 12).padding(.vertical, 8)
                                 .background(Theme.ink, in: RoundedRectangle(cornerRadius: 14))

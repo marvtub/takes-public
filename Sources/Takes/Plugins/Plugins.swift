@@ -39,6 +39,9 @@ struct TakesPlugin: Identifiable {
     /// What its board chat (hub.boardChat(id)) hears (2026-10-10, Ideas). With one, the phone can
     /// open that chat too, as board:<id>, before the board was ever shown on the Mac.
     var chatContext: (@MainActor () -> String)? = nil
+    /// Runs once when the app starts, for work on a schedule that must not wait for the board
+    /// (2026-10-13, a weekly check). The plugin shows the schedule on its board.
+    var start: (@MainActor (AppModel) -> Void)? = nil
 }
 
 /// A plugin's part of the phone server. `route` answers the requests it knows (with the library

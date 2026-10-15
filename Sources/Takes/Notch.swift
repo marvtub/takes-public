@@ -250,11 +250,16 @@ final class NotchPanel {
         // The tour needs five lines of room; the panel goes back to your size after it.
         if UserDefaults.standard.integer(forKey: NotchView.introKey) < NotchView.intro.count { lines = max(lines, 5) }
         let layout = NotchLayout.make(for: screen, body: Self.body(lines: lines))
-        panel.contentView = NSHostingView(rootView: NotchView(layout: layout, glow: glow, close: { [weak self] in self?.close() }).environment(app))
         // Clear room round the sides and the bottom for the glow. Clicks there go to the app under it.
         let m = NotchView.margin
         let f = layout.frame
-        panel.setFrame(CGRect(x: f.minX - m, y: f.minY - m, width: f.width + 2 * m, height: f.height + m), display: true)
+        // The size first, then the view at that size (2026-10-14): the first time the window was
+        // still zero wide, and the glow's animation on appear also grew the page in from the side.
+        panel.setFrame(CGRect(x: f.minX - m, y: f.minY - m, width: f.width + 2 * m, height: f.height + m), display: false)
+        let host = NSHostingView(rootView: NotchView(layout: layout, glow: glow, close: { [weak self] in self?.close() }).environment(app))
+        host.frame = NSRect(origin: .zero, size: panel.frame.size)
+        panel.contentView = host
+        panel.display()
     }
 
     private func make() -> NSPanel {
@@ -264,7 +269,9 @@ final class NotchPanel {
         p.level = .statusBar
         p.hidesOnDeactivate = false
         p.becomesKeyOnlyIfNeeded = true
-        p.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
+        // canJoinAllApplications: also over another app's full-screen window (2026-10-14: it showed
+        // only on a Space without one).
+        p.collectionBehavior = [.canJoinAllSpaces, .canJoinAllApplications, .fullScreenAuxiliary, .stationary, .ignoresCycle]
         p.backgroundColor = .clear
         p.isOpaque = false
         p.hasShadow = false

@@ -45,6 +45,13 @@ struct JobFixture {
         return fd
     }
 
+    /// The runner died. Unlock before close: a process another test spawned at that moment can
+    /// hold a copy of the fd for a while, and close alone leaves the lock with that copy.
+    func drop(_ fd: Int32) {
+        flock(fd, LOCK_UN)
+        close(fd)
+    }
+
     func cleanup() { try? FileManager.default.removeItem(at: root) }
 }
 
@@ -75,7 +82,7 @@ struct JobsTests {
         try f.job("job-aaaaaa", ["status": "running"])
         let fd = f.hold("job-aaaaaa")
         #expect(JobBoard.load(f.session).first?.status == .running)
-        close(fd)  // the runner died
+        f.drop(fd)  // the runner died
         #expect(JobBoard.load(f.session).first?.status == .lost)
         try f.job("job-aaaaaa", ["status": "starting", "started": JobFixture.iso(5)])
         #expect(JobBoard.load(f.session).first?.status == .starting)
@@ -89,7 +96,7 @@ struct JobsTests {
         #expect(JobBoard.load(f.session).first?.status == .lost)
         let g = f.hold("shot-1-v1", generate: true)
         #expect(JobBoard.load(f.session).first?.status == .running)
-        close(g)
+        f.drop(g)
         #expect(JobBoard.load(f.session).first?.status == .lost)  // a free lock file: its runner is gone
     }
 

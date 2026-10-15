@@ -738,7 +738,7 @@ struct PluginInfo: Codable, Hashable {
 
 // MARK: Board and Assets (2026-10-09, the Mac's PhoneBoard.swift)
 
-/// A take's best cut: Gemini's first suggestion, or the range Takes checked.
+/// A take's best cut: a first suggestion (Gemini, or the transcript without a key), or the range Takes checked.
 struct Cut: Codable, Hashable {
     var state: String
     var start: Double?

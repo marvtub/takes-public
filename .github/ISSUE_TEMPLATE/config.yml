@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Questions, ideas and bugs
+    url: https://github.com/marvtub/takes-public/discussions
+    about: Takes uses Discussions. Please post there.
+  - name: Security problem
+    url: https://github.com/marvtub/takes-public/security/advisories/new
+    about: Report it privately, not in public.

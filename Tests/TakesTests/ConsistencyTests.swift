@@ -159,6 +159,14 @@ import SwiftUI
         #expect(PlanChoice.matching(list, "kebab posts").isEmpty)
     }
 
+    /// The board keeps its store between visits, so a second visit shows the plan at once.
+    @MainActor @Test func boardKeepsItsStoreBetweenVisits() {
+        let a = URL(fileURLWithPath: "/tmp/plan-a"), b = URL(fileURLWithPath: "/tmp/plan-b")
+        let store = ConsistencyStore.shared(a)
+        #expect(ConsistencyStore.shared(a) === store)
+        #expect(ConsistencyStore.shared(b) !== store)
+    }
+
     @Test func flameGrowsWithTheDays() {
         #expect(FireLevel(days: 0).name == "Pick a day to start")
         #expect(FireLevel(days: 0).opacity == 0)

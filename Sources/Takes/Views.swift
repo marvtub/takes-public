@@ -28,6 +28,7 @@ struct TakesApp: App {
                 .overlay { UsageAskLayer().environment(app) }
                 .sheet(isPresented: Bindable(Releaser.shared).asking) { ReleaseAsk() }
                 .task {
+                    Onboarding.bigWindowOnce()
                     Onboarding.shared.startIfNew(app.library)
                     // After the welcome's check: the demo makes the library not empty.
                     Demo.shared.addIfNew(app.library)
@@ -107,6 +108,7 @@ struct TakesApp: App {
                 Toggle("Follow My Voice", isOn: Binding(get: { app.followVoice }, set: { app.followVoice = $0 }))
                 Divider()
                 Button("Script in the Notch") { NotchPanel.shared.toggle(app) }.keyboardShortcut("n", modifiers: [.command, .option])
+                Button("Screen Pill") { ScreenPill.shared.toggle(app) }.keyboardShortcut("r", modifiers: [.command, .option])
                 PrompterWindowButton()
                 Divider()
                 Button("Bigger Script") { app.fontSize = min(96, app.fontSize + 4) }.keyboardShortcut("=", modifiers: [.command, .option])
@@ -140,7 +142,19 @@ struct TakesApp: App {
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
-    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+    /// Not while the screen pill has put the window away (2026-10-14: Takes quit on Screen).
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        MainActor.assumeIsolated { !ScreenPill.shared.holdsWindows }
+    }
+
+    /// A Dock click while the pill is up closes the pill and brings Takes back.
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        MainActor.assumeIsolated {
+            guard ScreenPill.shared.holdsWindows else { return true }
+            ScreenPill.shared.hide()
+            return false
+        }
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         Updater.shared.start()
@@ -270,7 +284,7 @@ struct ContentView: View {
         .ignoresSafeArea(.container, edges: .top)
         .onReceive(NotificationCenter.default.publisher(for: NSWindow.didEnterFullScreenNotification)) { _ in fullScreen = true }
         .onReceive(NotificationCenter.default.publisher(for: NSWindow.didExitFullScreenNotification)) { _ in fullScreen = false }
-        .overlay { if app.notchTour { NotchTourShade().transition(.opacity) } }
+        .overlay { ZStack { if app.notchTour { NotchTourShade().transition(.opacity) } }.allowsHitTesting(app.notchTour) }
         .animation(Theme.motion, value: app.notchTour)
         .onReceive(NotificationCenter.default.publisher(for: .takesToggleSidebar)) { _ in
             let opening = !showsSidebar
@@ -1065,6 +1079,10 @@ struct DetailView: View {
         return Self.covers(rightTab, previewing: app.preview != nil) ? rightTab : nil
     }
 
+    /// The right column shows the script and the takes list (not Assets or Sound), with room
+    /// below the takes for the chat button.
+    private var belowTakes: Bool { cover == nil && rightTab != "assets" && rightTab != "sounds" }
+
     nonisolated static func covers(_ tab: String, previewing: Bool) -> Bool {
         ["post", "storyboard", "broll", "write"].contains(tab) || (["assets", "sounds"].contains(tab) && !previewing)
     }
@@ -1119,9 +1137,10 @@ struct DetailView: View {
         }
         .overlay(alignment: .bottomTrailing) {
             if let doc = library.current, !app.isRecording {
-                // Above the Assets footer bar, clear of its buttons.
+                // Above the Assets footer bar, clear of its buttons. Under the script and takes it
+                // sits in the room left below the takes (2026-10-14).
                 ChatCorner(hub: app.chats, doc: doc, away: recordOnly && cover == nil)
-                    .padding(.trailing, 26).padding(.bottom, 60)
+                    .padding(.trailing, 26).padding(.bottom, belowTakes ? 22 : 60)
                     .transition(.opacity)
             }
         }
@@ -1260,6 +1279,9 @@ struct DetailView: View {
                                 ScriptPane(doc: doc)
                                 Rule()
                                 TakesList(doc: doc).fixedSize(horizontal: false, vertical: true)
+                                // Room for the chat button and its job pill (the overlay below): they
+                                // sat on the last takes' trash buttons (2026-10-14).
+                                if !app.isRecording { Color.clear.frame(height: 72) }
                             }
                         }
                         .environment(\.colorScheme, app.lightsDown ? .dark : scheme)
@@ -1354,8 +1376,8 @@ struct CameraCard: View {
                 .contentTransition(.opacity)
             Spacer(minLength: 8)
             if let accessory, !rolling, !app.lightsDown { accessory.transition(.opacity) }
-            if app.mode == .cameraScreen {
-                Label("Screen too", systemImage: "display").font(Theme.sans(11.5, .medium)).foregroundStyle(Theme.muted)
+            if app.mode.hasScreen {
+                Label(app.mode.hasCamera ? "Screen too" : "Screen only", systemImage: "display").font(Theme.sans(11.5, .medium)).foregroundStyle(Theme.muted)
             }
             if !camera.formatDescription.isEmpty && !camera.paused {
                 Text(camera.formatDescription).font(Theme.mono(11)).foregroundStyle(Theme.faint).lineLimit(1)
@@ -1524,31 +1546,8 @@ struct RecordPill: View {
                       help: "Switch between vertical and horizontal. \(camera.formatDescription)") {
                     camera.orientation = camera.orientation == .vertical ? .horizontal : .vertical
                 }
-                ghost(app.mode == .cameraScreen ? "Screen on" : "Screen off",
-                      help: "Record your screen too, as a second file") {
-                    app.mode = app.mode == .cameraScreen ? .camera : .cameraScreen
-                }
-                // With two displays, which one records shows here, not only in the device panel
-                // (Jeremy could not find it, 2026-10-06).
-                if app.mode == .cameraScreen && screen.displays.count > 1 {
-                    let screen = screen
-                    TakesMenuButton(help: "Which display to record") {
-                        HStack(spacing: 4) {
-                            Image(systemName: "display")
-                            Text(screen.displays.first { $0.id == screen.displayID }?.name ?? "Display")
-                                .lineLimit(1).frame(maxWidth: 110)
-                        }
-                        .font(Theme.sans(12, .medium))
-                        .padding(.horizontal, 8).frame(height: 28)
-                        .modifier(PillGhostLook())
-                    } content: {
-                        MenuLabel("Record")
-                        for d in screen.displays {
-                            MenuButton(d.name, icon: "display", checked: d.id == screen.displayID) { screen.displayID = d.id }
-                        }
-                    }
-                    .fixedSize()
-                }
+                // The screen is recorded from the pill (2026-10-14): Takes steps aside while it is up.
+                ghost("Screen", help: "Record your screen: a small record bar over every app (⌥⌘R)") { ScreenPill.shared.show(app) }
                 Button { devices.toggle() } label: {
                     Image(systemName: "slider.horizontal.3").font(.system(size: 12, weight: .medium))
                         .frame(width: 28, height: 28)
@@ -1664,7 +1663,7 @@ enum DevicePanel {
                 .padding(.leading, 33).padding(.trailing, 10).padding(.vertical, 4)
                 .help("Microphone level")
         }
-        if mode == .cameraScreen {
+        if mode.hasScreen {
             MenuLabel("Screen")
             for d in screen.displays {
                 MenuButton(d.name, icon: "display", checked: d.id == screen.displayID) { screen.displayID = d.id }
@@ -1723,6 +1722,8 @@ struct LevelMeter: View {
 struct TakesList: View {
     var doc: SessionDoc
     @State private var dragging: Int?
+    /// The right column can be about 270 pt wide (2026-10-14): rows then show icons, no transcript.
+    @State private var compact = false
 
     var body: some View {
         let _ = Perf.body("TakesList")
@@ -1743,6 +1744,7 @@ struct TakesList: View {
                 }
             }
             .background(Theme.paper)
+            .onGeometryChange(for: Bool.self) { $0.size.width < 470 } action: { compact = $0 }
         }
     }
 
@@ -1756,7 +1758,7 @@ struct TakesList: View {
     }
 
     private func row(_ number: Int, _ takes: [Take]) -> some View {
-        TakeRow(doc: doc, number: number, takes: takes)
+        TakeRow(doc: doc, number: number, takes: takes, compact: compact)
             .reorderable(number, dragging: $dragging) { doc.moveTake($0, to: $1) }
     }
 }
@@ -1766,6 +1768,7 @@ struct TakeRow: View {
     var doc: SessionDoc
     let number: Int
     let takes: [Take]
+    var compact = false
     @State private var name = ""
     @State private var hooks: [Hook] = []
     /// What the take says, from its transcript (Transcripts.swift).
@@ -1794,16 +1797,18 @@ struct TakeRow: View {
     var body: some View {
         let _ = Perf.body("TakeRow")
         let keeper = takes.first?.keeper == true
-        HStack(spacing: 10) {
+        HStack(spacing: compact ? 8 : 10) {
             Button { doc.toggleKeeper(number) } label: {
                 Image(systemName: keeper ? "star.fill" : "star").foregroundStyle(keeper ? Theme.accent : Theme.muted)
             }
             .help("Mark as keeper")
             Text(String(format: "%02d", number)).font(Theme.mono(12, .medium)).foregroundStyle(Theme.accentInk)
+                .fixedSize()
             TextField("Take \(number)", text: $name)
                 .textFieldStyle(.plain)
                 .font(Theme.sans(13, .medium))
-                .frame(minWidth: 80, maxWidth: 220)
+                .frame(minWidth: compact ? 36 : 64, maxWidth: 200)
+                .layoutPriority(1)
                 .focused($editing)
                 .onSubmit { doc.renameTake(number, to: name) }
                 // Typing saves the name; leaving the field renames the files too.
@@ -1818,6 +1823,7 @@ struct TakeRow: View {
                 .help("Type a name. It saves as you type; the files get it when you leave the field.")
             Text((takes.first?.duration).map(SessionDoc.clock) ?? "–")
                 .font(Theme.mono(12)).foregroundStyle(Theme.muted)
+                .fixedSize()
             if let variant = takes.first?.script {
                 Tag(text: variant, accent: true)
                     .help("Read from the variant “\(variant)”")
@@ -1829,12 +1835,20 @@ struct TakeRow: View {
             ForEach(takes) { t in
                 let url = doc.fileURL(t)
                 Button { app.preview = url } label: {
-                    Label(t.kind == .camera ? "Camera" : "Screen", systemImage: app.preview == url ? "play.fill" : "play")
-                        .labelStyle(.titleAndIcon)
+                    if compact {
+                        Image(systemName: t.kind == .screen ? "display" : app.preview == url ? "video.fill" : "video")
+                    } else {
+                        Label(t.kind == .camera ? "Camera" : "Screen", systemImage: app.preview == url ? "play.fill" : "play")
+                            .labelStyle(.titleAndIcon)
+                            .lineLimit(1)
+                    }
                 }
                 .buttonStyle(BracketButtonStyle(active: app.preview == url))
+                // In a narrow column "Camera" broke into "Camer / a" (2026-10-14): the transcript
+                // gives way first.
+                .fixedSize()
                 .disabled(app.isRecording)
-                .help("Play \(t.file)")
+                .help("Play the \(t.kind == .camera ? "camera" : "screen") video: \(t.file)")
                 .takesContextMenu { [trashRow] in
                     MenuButton("Open in QuickTime", icon: "play.rectangle") { NSWorkspace.shared.openSoon(url) }
                     MenuButton("Reveal in Finder", icon: "folder") { NSWorkspace.shared.revealSoon([url]) }
@@ -1842,10 +1856,19 @@ struct TakeRow: View {
                     trashRow
                 }
             }
-            if let said, !said.isEmpty {
+            // A camera-only take in a session with screen takes keeps the screen button's place,
+            // so the columns line up.
+            if !takes.contains(where: { $0.kind == .screen }), doc.meta.takes.contains(where: { $0.kind == .screen }) {
+                Button {} label: {
+                    if compact { Image(systemName: "display") } else { Label("Screen", systemImage: "play").lineLimit(1) }
+                }
+                .buttonStyle(BracketButtonStyle()).fixedSize().hidden()
+            }
+            if !compact, let said, !said.isEmpty {
                 Text(said)
                     .font(Theme.sans(12)).foregroundStyle(Theme.muted)
                     .lineLimit(1).truncationMode(.tail)
+                    .layoutPriority(-1)
                     .help(said)
                     .takesContextMenu {
                         MenuButton("Copy transcript", icon: "doc.on.doc") {
@@ -1853,7 +1876,7 @@ struct TakeRow: View {
                             NSPasteboard.general.setString(said, forType: .string)
                         }
                     }
-            } else if let v = voiceFile, Transcripts.shared.waiting(v) {
+            } else if !compact, let v = voiceFile, Transcripts.shared.waiting(v) {
                 Text(Transcripts.shared.current == v.standardizedFileURL ? "Transcribing…" : "Waiting to transcribe")
                     .font(Theme.sans(12)).foregroundStyle(Theme.muted.opacity(0.7))
             }
@@ -2609,13 +2632,23 @@ struct ScriptPane: View {
 /// own that can be mirrored.
 /// The main window while the notch's quick tour runs: dark, with a pointer up to the notch.
 struct NotchTourShade: View {
+    @Environment(AppModel.self) private var app
+
+    /// Ends the tour here: the shade goes at once, even when the notch panel is off screen (another
+    /// Space, a full-screen window) and never hears the step change (2026-10-15).
+    static func skip(_ app: AppModel) {
+        UserDefaults.standard.set(NotchView.intro.count, forKey: NotchView.introKey)
+        app.notchTour = false
+    }
+
     var body: some View {
         ZStack(alignment: .top) {
             Color.black.opacity(0.6).contentShape(Rectangle()).onTapGesture {}
             HStack(spacing: 10) {
                 Image(systemName: "arrow.up").font(.system(size: 12, weight: .bold))
                 Text("The quick tour is in the notch, at the top of your screen").font(Theme.sans(13, .medium))
-                Button("Skip tour") { UserDefaults.standard.set(NotchView.intro.count, forKey: NotchView.introKey) }
+                Button("Skip tour") { Self.skip(app) }
+                    .keyboardShortcut(.cancelAction)
                     .buttonStyle(.plain).font(Theme.sans(12.5, .semibold)).foregroundStyle(Theme.accent)
             }
             .foregroundStyle(.white)

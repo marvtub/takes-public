@@ -457,6 +457,19 @@ final class ConsistencyStore {
     static var brief: String?
     private var busy = false
     private var again = false
+    private var root: URL?
+
+    /// One store per library, kept between visits: the board shows the last plan at once and
+    /// refreshes behind it. A new store each visit left the page blank for 5 s on a busy Mac
+    /// (load 51, 2026-10-14), though the scan reads its files in 0.13 s.
+    private static var current: ConsistencyStore?
+    static func shared(_ root: URL) -> ConsistencyStore {
+        if let c = current, c.root == root { return c }
+        let s = ConsistencyStore()
+        s.root = root
+        current = s
+        return s
+    }
 
     /// The files ConsistencyStats and WeekGame read.
     nonisolated static func matters(_ paths: [String], root: URL) -> Bool {
@@ -464,10 +477,11 @@ final class ConsistencyStore {
                           folders: ["posts", "edits", "thumbnails"])
     }
 
-    func refresh(_ root: URL) {
+    /// `urgent` when the user is looking at the board: utility work waits behind every build on the Mac.
+    func refresh(_ root: URL, urgent: Bool = false) {
         guard !busy else { again = true; return }
         busy = true
-        Task.detached(priority: .utility) {
+        Task.detached(priority: urgent ? .userInitiated : .utility) {
             let plan = PostingPlan.read(root)
             var scanned = plan.map { ConsistencyStats.scan(root, plan: $0) } ?? ConsistencyStats()
             let game = plan.map { WeekGame.scan(root, plan: $0) } ?? WeekGame()
@@ -550,7 +564,7 @@ struct ConsistencyBoard: View {
     var choices: () -> [PlanChoice] = { [] }
     /// Opens a session (a card's click).
     var open: (URL) -> Void = { _ in }
-    @State private var store = ConsistencyStore()
+    private var store: ConsistencyStore { .shared(root) }
 
     var body: some View {
         let target = ChatTarget(chat: hub.boardChat("consistency"), title: "Plan", session: nil)
@@ -560,7 +574,7 @@ struct ConsistencyBoard: View {
         .overlay(alignment: .bottomTrailing) {
             BoardChatCorner(hub: hub, target: target).padding(18)
         }
-        .onAppear { store.refresh(root) }
+        .onAppear { store.refresh(root, urgent: true) }
         .onReceive(NotificationCenter.default.publisher(for: .takesFilesChanged)) { n in
             guard ConsistencyStore.matters(n.object as? [String] ?? [], root: root) else { return }
             store.refresh(root)

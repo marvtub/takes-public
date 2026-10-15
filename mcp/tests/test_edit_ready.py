@@ -404,14 +404,19 @@ class Prepare(Base):
         try:
             p = subprocess.Popen([sys.executable, SERVER, "--prepare-run", self.s, "1"], cwd=self.s,
                                  stdout=subprocess.PIPE, text=True, env=dict(os.environ, TAKES_TEST_LOG=log))
-            time.sleep(1.0)
+            # Until it says it waits on the lock: a fixed second was too short on a busy Mac.
+            head = ""
+            while "Waits for" not in head:
+                line = p.stdout.readline()
+                if not line: break
+                head += line
             open(marker, "w").write(str(rec.pid))
             os.close(fd)  # the other take ends
             time.sleep(1.5)
             self.assertIsNone(p.poll(), "it waits while the take records")
             self.assertFalse(os.path.exists(log), "Whisper ran while a take recorded")
             os.remove(marker)
-            out = p.communicate(timeout=30)[0]
+            out = head + p.communicate(timeout=30)[0]
             self.assertIn("Waits for take 7 of 2026-10-11-other.", out)
             self.assertIn("Waits for the recording to end.", out)
             self.assertTrue(os.path.exists(log))

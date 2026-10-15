@@ -125,8 +125,8 @@ struct AgentsTests {
     /// Only Agents/ names an agent CLI, finds one or builds its arguments. Setup.swift was the last file
     /// to move onto Agents (2026-10-12).
     /// Admin tools, never in the public copy: they stay on Claude Code (the user, 2026-10-12). Site AI
-    /// asks Claude on purpose: it checks whether Claude names Takes.
-    static let adminOnly: Set<String> = ["Copilot.swift", "Plugins/Private/SiteAI.swift"]
+    /// asks Claude, ChatGPT (Codex) and Gemini on purpose: it checks whether each names Takes.
+    static let adminOnly: Set<String> = ["Copilot.swift", "Plugins/Private/SiteAI.swift", "Plugins/Private/SiteAskCLI.swift"]
 
     @Test func onlyAgentsNamesAnAgentCLI() throws {
         let src = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()

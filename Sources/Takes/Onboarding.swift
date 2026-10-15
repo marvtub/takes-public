@@ -36,10 +36,39 @@ final class Onboarding {
     /// and the notch felt noisy to new users). Only then: after that, macOS keeps what they pick.
     static func fillScreen() {
         guard !AppModel.testing else { return }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-            guard let w = NSApp.windows.first(where: { $0.isVisible && !($0 is NSPanel) && $0.styleMask.contains(.titled) }),
-                  !w.styleMask.contains(.fullScreen) else { return }
-            w.toggleFullScreen(nil)
+        mainWindow { w in
+            if !w.styleMask.contains(.fullScreen) { w.toggleFullScreen(nil) }
+        }
+    }
+
+    static let bigKey = "windowMadeBig"
+
+    /// The fallback (2026-10-13: a new user's Takes opened in the 960-wide minimum window). Once per
+    /// Mac, a window at about the minimum size grows to fill the screen, full screen or not. A
+    /// window someone made big already stays as it is; one they shrink later stays small.
+    static func bigWindowOnce() {
+        guard !AppModel.testing, !UserDefaults.standard.bool(forKey: bigKey) else { return }
+        mainWindow { w in
+            UserDefaults.standard.set(true, forKey: bigKey)
+            guard let screen = w.screen ?? NSScreen.main, !w.styleMask.contains(.fullScreen) else { return }
+            let area = screen.visibleFrame
+            if w.frame.width < min(1200, area.width * 0.8) || w.frame.height < min(760, area.height * 0.8) {
+                w.setFrame(area, display: true)
+            }
+        }
+    }
+
+    /// The main window, once it is on screen: at launch it can come a moment after the first
+    /// task runs, so this looks again for up to 3 seconds.
+    private static func mainWindow(tries: Int = 15, _ act: @escaping @MainActor (NSWindow) -> Void) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+            MainActor.assumeIsolated {
+                if let w = NSApp.windows.first(where: { $0.isVisible && !($0 is NSPanel) && $0.styleMask.contains(.titled) }) {
+                    act(w)
+                } else if tries > 1 {
+                    mainWindow(tries: tries - 1, act)
+                }
+            }
         }
     }
 
@@ -112,6 +141,10 @@ struct OnboardingLayer: View {
             }
         }
         .animation(Theme.spring, value: flow.shown)
+        // On its way out it takes no clicks (2026-10-15, Product Hunt on the newest macOS: Skip and
+        // Write my script closed it, but the window stayed dead and had to be quit). The fade kept
+        // every click for its 0.9 s, and an exit that never ends kept them for good.
+        .allowsHitTesting(flow.shown)
     }
 }
 
@@ -168,7 +201,8 @@ struct OnboardingCard: View {
             .animation(Theme.spring, value: flow.page)
             Spacer()
             if flow.page < Onboarding.pages - 1 {
-                Button("Skip") { flow.finish() }.buttonStyle(BracketButtonStyle())
+                // Esc too, from any page and whatever has focus (onExitCommand needs the card focused).
+                Button("Skip") { flow.finish() }.buttonStyle(BracketButtonStyle()).keyboardShortcut(.cancelAction)
             }
             if flow.page > 0 {
                 Button("Back") { flow.go(flow.page - 1) }.buttonStyle(AccentButtonStyle(kind: .quiet))
@@ -181,6 +215,7 @@ struct OnboardingCard: View {
                 .keyboardShortcut(.defaultAction)
             } else {
                 Button("Look around first") { flow.finish() }.buttonStyle(AccentButtonStyle(kind: .quiet))
+                    .keyboardShortcut(.cancelAction)
             }
         }
         .padding(.horizontal, 24).frame(height: 64)

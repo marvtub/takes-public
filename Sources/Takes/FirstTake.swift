@@ -129,6 +129,7 @@ struct FirstTakeLayer: View {
             }
         }
         .animation(Theme.spring, value: flow.shown)
+        .allowsHitTesting(flow.shown)  // on its way out it takes no clicks, like OnboardingLayer
     }
 }
 

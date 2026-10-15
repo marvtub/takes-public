@@ -468,6 +468,7 @@ struct AgentsPage: View {
     @AppStorage("chatAgent") private var agentRaw = ChatAgent.claude.rawValue
     @AppStorage("chatModel.claude") private var claudeModel = ""
     @AppStorage("chatModel.codex") private var codexModel = ""
+    @AppStorage(ChatMCP.allKey) private var allMCP = false
     private var status: AgentsStatus { AgentsStatus.shared }
 
     var body: some View {
@@ -490,6 +491,26 @@ struct AgentsPage: View {
                         }
                     }
                     Text("A new pick counts from the next new conversation. A conversation keeps the agent it started on.")
+                        .font(Theme.sans(12)).foregroundStyle(Theme.faint).fixedSize(horizontal: false, vertical: true)
+                }
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("MCP servers in the chat").font(Theme.sans(13, .semibold)).foregroundStyle(Theme.ink)
+                    card {
+                        HStack(spacing: 12) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(allMCP ? "All servers" : "Only the servers you added")
+                                    .font(Theme.sans(13, .semibold)).foregroundStyle(Theme.ink)
+                                Text(allMCP
+                                     ? "Also your claude.ai connectors and plugin servers. Each message starts about 1 s slower."
+                                     : "takes and the servers you added with claude mcp add. Each message starts about 1 s faster.")
+                                    .font(Theme.sans(12)).foregroundStyle(Theme.muted).fixedSize(horizontal: false, vertical: true)
+                            }
+                            Spacer(minLength: 8)
+                            TakesSwitch(selection: $allMCP, options: [(false, "Mine"), (true, "All")])
+                        }
+                        .padding(.horizontal, 14).padding(.vertical, 12)
+                    }
+                    Text("Claude Code only. Claude in Chrome stays on either way. Counts from the next message.")
                         .font(Theme.sans(12)).foregroundStyle(Theme.faint).fixedSize(horizontal: false, vertical: true)
                 }
                 VStack(alignment: .leading, spacing: 10) {
