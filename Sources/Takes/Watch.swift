@@ -12,37 +12,48 @@ extension Notification.Name {
 }
 
 final class FileWatch {
-    private var stream: FSEventStreamRef?
+    // The stream starts, stops and gets its events on its own queue. FSEventStreamStart waits for
+    // fseventsd, and on 14 Oct it did not answer: the main thread hung 99 s at launch inside
+    // AppModel.init. Events go to the main queue after they come in (2026-10-18).
+    // Its own queue per watch: one slow start must not hold up another watch.
+    private let queue = DispatchQueue(label: "de.marvinaziz.takes.filewatch", qos: .utility)
+    private var stream: FSEventStreamRef?  // only read or written on `queue`
     private(set) var root: URL?
 
     func watch(_ url: URL) {
         guard url.standardizedFileURL != root?.standardizedFileURL else { return }
         stop()
         root = url.standardizedFileURL
-        var ctx = FSEventStreamContext(version: 0, info: nil, retain: nil, release: nil, copyDescription: nil)
-        let callback: FSEventStreamCallback = { _, _, count, paths, _, _ in
-            guard let list = unsafeBitCast(paths, to: NSArray.self) as? [String], count > 0 else { return }
-            FileWatch.collect(list)
+        let path = url.path
+        queue.async { [self] in
+            var ctx = FSEventStreamContext(version: 0, info: nil, retain: nil, release: nil, copyDescription: nil)
+            let callback: FSEventStreamCallback = { _, _, count, paths, _, _ in
+                guard let list = unsafeBitCast(paths, to: NSArray.self) as? [String], count > 0 else { return }
+                DispatchQueue.main.async { FileWatch.collect(list) }
+            }
+            // File events, so a chat save can be told apart from a real change (see `folders`).
+            let flags = FSEventStreamCreateFlags(kFSEventStreamCreateFlagUseCFTypes | kFSEventStreamCreateFlagFileEvents)
+            guard let s = FSEventStreamCreate(nil, callback, &ctx, [path] as CFArray,
+                                              FSEventStreamEventId(kFSEventStreamEventIdSinceNow), 0.4, flags) else { return }
+            FSEventStreamSetDispatchQueue(s, queue)
+            FSEventStreamStart(s)
+            stream = s
         }
-        // File events, so a chat save can be told apart from a real change (see `folders`).
-        let flags = FSEventStreamCreateFlags(kFSEventStreamCreateFlagUseCFTypes | kFSEventStreamCreateFlagFileEvents)
-        guard let s = FSEventStreamCreate(nil, callback, &ctx, [url.path] as CFArray,
-                                          FSEventStreamEventId(kFSEventStreamEventIdSinceNow), 0.4, flags) else { return }
-        FSEventStreamSetDispatchQueue(s, .main)
-        FSEventStreamStart(s)
-        stream = s
     }
 
     func stop() {
-        guard let s = stream else { return }
+        root = nil
+        queue.async { [self] in Self.end(stream); stream = nil }
+    }
+
+    private static func end(_ s: FSEventStreamRef?) {
+        guard let s else { return }
         FSEventStreamStop(s)
         FSEventStreamInvalidate(s)
         FSEventStreamRelease(s)
-        stream = nil
-        root = nil
     }
 
-    deinit { stop() }
+    deinit { let s = stream; queue.async { Self.end(s) } }
 
     // A render writes its file many times a second, and each event made every pane read the disk
     // again on the main thread (assets, comments, post, hooks, the library). Changes are now
@@ -52,7 +63,7 @@ final class FileWatch {
     private static var pendingJobs: Set<String> = []
     private static var due = false
 
-    /// Runs on the main queue (the stream's dispatch queue).
+    /// Runs on the main queue (the stream callback sends it there).
     private static func collect(_ paths: [String]) {
         let changed = folders(paths), jobs = jobSessions(paths)
         guard !changed.isEmpty || !jobs.isEmpty else { return }

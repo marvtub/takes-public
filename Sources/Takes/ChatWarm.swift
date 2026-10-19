@@ -31,6 +31,8 @@ enum Warm {
     /// Tests: only a fake named claude-warm gets it (the other fakes read one ask, to its end).
     nonisolated(unsafe) static var idle: Duration = .seconds(600)
     nonisolated(unsafe) static var most = 3
+    /// After the last background task ended, how long to wait for the turn it starts.
+    nonisolated(unsafe) static var quiet: Duration = .seconds(60)
 
     /// One message as a stream-json input line.
     static func line(_ text: String) -> Data {

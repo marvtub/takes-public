@@ -13,6 +13,24 @@ enum ChatPiece: Equatable {
     case post(URL)
 }
 
+/// One block of a reply's text (ChatRefs.blocks).
+enum ChatBlock: Equatable {
+    case text([String])
+    case heading(Int, String)
+    case list([ChatListItem])
+    case table([[String]])
+    case code(String)
+    case quote(String)
+    case rule
+}
+
+/// A list item; `mark` is "1." for a numbered item, nil for a bullet.
+struct ChatListItem: Equatable {
+    var depth: Int
+    var mark: String?
+    var text: String
+}
+
 enum ChatRefs {
     /// What Claude is told, in both chats.
     static let howTo = """
@@ -92,6 +110,75 @@ enum ChatRefs {
         return out
     }
 
+    /// A reply's text as blocks to draw (2026-10-18): tables, headings, lists, code and quotes
+    /// showed as raw markdown. Same rules as the markdown reader (MarkdownText).
+    static func blocks(_ text: String) -> [ChatBlock] {
+        let lines = text.components(separatedBy: "\n")
+        var out: [ChatBlock] = []
+        var para: [String] = []
+        var items: [ChatListItem] = []
+        func flush() {
+            if !para.isEmpty { out.append(.text(para)); para = [] }
+            if !items.isEmpty { out.append(.list(items)); items = [] }
+        }
+        var i = 0
+        while i < lines.count {
+            let line = lines[i]
+            let t = line.trimmingCharacters(in: .whitespaces)
+            if t.isEmpty { flush(); i += 1; continue }
+            if t.hasPrefix("```") || t.hasPrefix("~~~") {
+                flush()
+                var j = i + 1
+                while j < lines.count, !lines[j].trimmingCharacters(in: .whitespaces).hasPrefix(String(t.prefix(3))) { j += 1 }
+                out.append(.code(lines[(i + 1)..<min(j, lines.count)].joined(separator: "\n")))
+                i = j + 1; continue
+            }
+            let hashes = t.prefix(while: { $0 == "#" }).count
+            if (1...6).contains(hashes), t.dropFirst(hashes).first == " " {
+                flush()
+                out.append(.heading(hashes, t.dropFirst(hashes).trimmingCharacters(in: .whitespaces)))
+                i += 1; continue
+            }
+            if t.range(of: #"^([-*_])(\s*\1){2,}$"#, options: .regularExpression) != nil {
+                flush(); out.append(.rule); i += 1; continue
+            }
+            if t.hasPrefix("|"), i + 1 < lines.count, MarkdownText.isTableSeparator(lines[i + 1]) {
+                flush()
+                var rows = [MarkdownText.tableCells(t)]
+                var j = i + 2
+                while j < lines.count, lines[j].trimmingCharacters(in: .whitespaces).hasPrefix("|") {
+                    rows.append(MarkdownText.tableCells(lines[j].trimmingCharacters(in: .whitespaces))); j += 1
+                }
+                out.append(.table(rows))
+                i = j; continue
+            }
+            if t.hasPrefix(">") {
+                flush()
+                var q: [String] = []
+                while i < lines.count, lines[i].trimmingCharacters(in: .whitespaces).hasPrefix(">") {
+                    q.append(String(lines[i].trimmingCharacters(in: .whitespaces).dropFirst()).trimmingCharacters(in: .whitespaces)); i += 1
+                }
+                out.append(.quote(q.joined(separator: "\n")))
+                continue
+            }
+            if let item = MarkdownText.listItem(line) {
+                if !para.isEmpty { out.append(.text(para)); para = [] }
+                let numbered = item.mark.first?.isNumber == true
+                items.append(ChatListItem(depth: item.depth, mark: numbered ? item.mark : nil, text: item.body))
+                i += 1; continue
+            }
+            // A line under a list item, indented or not, belongs to that item.
+            if !items.isEmpty {
+                items[items.count - 1].text += " " + t
+                i += 1; continue
+            }
+            para.append(line)
+            i += 1
+        }
+        flush()
+        return out
+    }
+
     /// The text of a "- " or "* " list item, else nil.
     static func bullet(_ line: String) -> String? {
         let t = line.trimmingCharacters(in: .whitespaces)
@@ -140,10 +227,8 @@ struct ChatReply: View {
                 switch piece {
                 case .text(let t):
                     VStack(alignment: .leading, spacing: 12) {
-                        ForEach(Array(ChatRefs.paragraphs(t).enumerated()), id: \.offset) { i, para in
-                            // A bold line alone reads as a heading: more room above it.
-                            paragraph(para)
-                                .padding(.top, i > 0 && para.count == 1 && para[0].hasPrefix("**") && para[0].hasSuffix("**") ? 10 : 0)
+                        ForEach(Array(ChatRefs.blocks(t).enumerated()), id: \.offset) { i, block in
+                            self.block(block).padding(.top, i > 0 ? Self.room(above: block) : 0)
                         }
                     }
                 case .file(let url): FileRefCard(url: url).padding(.vertical, 4)
@@ -169,19 +254,55 @@ struct ChatReply: View {
         return action
     }
 
-    /// A paragraph, or a list with a hanging bullet per item.
-    @ViewBuilder private func paragraph(_ lines: [String]) -> some View {
-        if lines.allSatisfy({ ChatRefs.bullet($0) != nil }) {
+    /// More room above a heading, or a bold line alone, which reads as one.
+    private static func room(above block: ChatBlock) -> CGFloat {
+        switch block {
+        case .heading: return 10
+        case .text(let l) where l.count == 1 && l[0].hasPrefix("**") && l[0].hasSuffix("**"): return 10
+        default: return 0
+        }
+    }
+
+    @ViewBuilder private func block(_ b: ChatBlock) -> some View {
+        switch b {
+        case .text(let lines):
+            prose(lines.joined(separator: "\n"))
+        case .heading(let level, let title):
+            Text(Self.markdown(title)).font(Theme.sans(level <= 2 ? 15.5 : 14, .semibold)).foregroundStyle(Theme.ink)
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        case .list(let items):
             VStack(alignment: .leading, spacing: 7) {
-                ForEach(Array(lines.enumerated()), id: \.offset) { _, line in
+                ForEach(Array(items.enumerated()), id: \.offset) { _, item in
                     HStack(alignment: .firstTextBaseline, spacing: 8) {
-                        Text("•").foregroundStyle(Theme.faint)
-                        prose(ChatRefs.bullet(line) ?? line)
+                        Text(item.mark ?? "•").font(Theme.sans(13.5)).monospacedDigit().foregroundStyle(Theme.faint)
+                            .frame(minWidth: items.contains { $0.mark != nil } ? 16 : 0, alignment: .trailing)
+                        prose(item.text)
                     }
+                    .padding(.leading, CGFloat(item.depth) * 18)
                 }
             }
-        } else {
-            prose(lines.joined(separator: "\n"))
+        case .table(let rows):
+            ChatTable(rows: rows)
+        case .code(let code):
+            // Long lines wrap: a scroll view inside the scrolling transcript fights it.
+            Text(code).font(.system(size: 12, design: .monospaced)).foregroundStyle(Theme.ink)
+                .lineSpacing(3)
+                .textSelection(.enabled)
+                .padding(.horizontal, 12).padding(.vertical, 10)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Theme.hover, in: RoundedRectangle(cornerRadius: 8))
+        case .quote(let q):
+            HStack(alignment: .top, spacing: 10) {
+                RoundedRectangle(cornerRadius: 1).fill(Theme.border).frame(width: 2)
+                Text(Self.markdown(q)).font(Theme.sans(13.5)).foregroundStyle(Theme.muted)
+                    .lineSpacing(4)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .fixedSize(horizontal: false, vertical: true)
+        case .rule:
+            Rectangle().fill(Theme.border).frame(height: 0.5).padding(.vertical, 4)
         }
     }
 
@@ -209,6 +330,89 @@ struct ChatReply: View {
         let fixed = s.replacingOccurrences(of: "](/", with: "](file:///")
         return (try? AttributedString(markdown: fixed, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)))
             ?? AttributedString(s)
+    }
+}
+
+/// A markdown table in a reply: a header row, hairlines between rows, columns that share the
+/// panel's width. A narrow column keeps its own width; the wide ones split the rest and wrap.
+struct ChatTable: View {
+    let rows: [[String]]
+
+    var body: some View {
+        let cols = rows.map(\.count).max() ?? 0
+        ChatTableLayout(columns: cols) {
+            ForEach(Array(rows.enumerated()), id: \.offset) { r, row in
+                ForEach(0..<cols, id: \.self) { c in
+                    Text(ChatReply.markdown(c < row.count ? row[c] : ""))
+                        .font(Theme.sans(12.5, r == 0 ? .semibold : .regular))
+                        .foregroundStyle(r == 0 ? Theme.muted : Theme.ink)
+                        .lineSpacing(2)
+                        .padding(.horizontal, 10).padding(.vertical, 7)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                        .background(r == 0 ? Theme.hover : .clear)
+                        .overlay(alignment: .bottom) {
+                            if r < rows.count - 1 { Rectangle().fill(Theme.border).frame(height: 0.5) }
+                        }
+                }
+            }
+        }
+        .textSelection(.enabled)
+        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Theme.border, lineWidth: 0.5))
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+/// Cells in row order. Each column gets its natural width if all fit; if not, the narrow columns
+/// keep theirs and the wide ones share what is left, so their text wraps.
+struct ChatTableLayout: Layout {
+    let columns: Int
+
+    struct Plan { var widths: [CGFloat]; var heights: [CGFloat] }
+
+    func plan(_ width: CGFloat?, _ cells: Subviews) -> Plan {
+        guard columns > 0, !cells.isEmpty else { return Plan(widths: [], heights: []) }
+        let rowCount = (cells.count + columns - 1) / columns
+        var natural = Array(repeating: CGFloat(0), count: columns)
+        for (i, cell) in cells.enumerated() {
+            natural[i % columns] = max(natural[i % columns], ceil(cell.sizeThatFits(.unspecified).width))
+        }
+        var widths = natural
+        if let width, natural.reduce(0, +) > width {
+            // Fill the narrowest columns first; each takes its natural width or a fair share.
+            var left = width
+            for (n, c) in natural.indices.sorted(by: { natural[$0] < natural[$1] }).enumerated() {
+                let share = max(left / CGFloat(columns - n), 40)
+                widths[c] = min(natural[c], share)
+                left -= widths[c]
+            }
+        }
+        var heights = Array(repeating: CGFloat(0), count: rowCount)
+        for (i, cell) in cells.enumerated() {
+            let h = cell.sizeThatFits(ProposedViewSize(width: widths[i % columns], height: nil)).height
+            heights[i / columns] = max(heights[i / columns], ceil(h))
+        }
+        return Plan(widths: widths, heights: heights)
+    }
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let p = plan(proposal.width, subviews)
+        return CGSize(width: p.widths.reduce(0, +), height: p.heights.reduce(0, +))
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        let p = plan(bounds.width, subviews)
+        var y = bounds.minY
+        for r in p.heights.indices {
+            var x = bounds.minX
+            for c in 0..<columns {
+                let i = r * columns + c
+                guard i < subviews.count else { break }
+                subviews[i].place(at: CGPoint(x: x, y: y), proposal: ProposedViewSize(width: p.widths[c], height: p.heights[r]))
+                x += p.widths[c]
+            }
+            y += p.heights[r]
+        }
     }
 }
 

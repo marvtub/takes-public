@@ -142,6 +142,10 @@ struct ChatParser {
     var messages: [ChatMessage]
     var started = false
     var finished = false
+    /// Claude Code: background tasks (agents, Bash) still running. Their end starts a turn by itself.
+    var background = 0
+    /// Claude Code: an answer came while no background task ran. An open process ends its run here.
+    var settled = false
     /// The conversation compacted: its rules may be gone from it (the owner resets them).
     var compacted = false
     var context: ChatContext?
@@ -273,6 +277,8 @@ final class ClaudeChat {
     @ObservationIgnored private var process: Process?
     /// Claude Code's process, open between messages (ChatWarm). It is `process` while a run uses it.
     @ObservationIgnored private var warm: WarmClaude?
+    /// Ends a run whose background tasks ended without a new turn (Warm.quiet).
+    @ObservationIgnored private var quietEnd: Task<Void, Never>?
     /// Whether the last Claude message had a note on what the user looks at (nil: not known, as
     /// after a launch). The note stays in the conversation, so its end needs a note too.
     @ObservationIgnored private var lookNoted: Bool?
@@ -1122,17 +1128,32 @@ final class ClaudeChat {
         if parser?.started == true && !log.started { log.started = true }
         if let t = parser?.thread, log.thread != t { log.thread = t }
         publish()
-        // An open process stays alive after its answer: the answer's end is the run's end.
-        if running, parser?.finished == true, let w = warm, w.process === process {
-            if lines.contains(where: { $0.contains(#""type":"result""#) && $0.contains(#""is_error":true"#) }) {
-                // A failed turn (API error, lost login, rate limit): it is not kept. The end of its
-                // input ends it, and its exit and stderr settle the run as before.
-                forgetWarm()
-                try? w.input.close()
-                return
-            }
+        // An open process stays alive after its answer: the answer's end is the run's end. Not while
+        // background tasks run: Claude Code answers again when they end (2026-10-18: the comment
+        // scout's 4 agents died at its first answer, 4 runs in a row).
+        guard running, let w = warm, w.process === process, parser?.finished == true else { return }
+        if lines.contains(where: { $0.contains(#""type":"result""#) && $0.contains(#""is_error":true"#) }) {
+            // A failed turn (API error, lost login, rate limit): it is not kept. The end of its
+            // input ends it, and its exit and stderr settle the run as before.
+            forgetWarm()
+            try? w.input.close()
+            return
+        }
+        if parser?.settled == true {
             park()
             finish(status: 0, killed: false)
+        } else if parser?.background == 0 {
+            // The tasks ended but no turn came yet. One normally starts at once; if none comes in
+            // Warm.quiet, the run ends as it is.
+            let gen = generation
+            quietEnd?.cancel()
+            quietEnd = Task { [weak self] in
+                try? await Task.sleep(for: Warm.quiet)
+                guard !Task.isCancelled, let self, self.generation == gen, self.running,
+                      self.parser?.finished == true, self.parser?.background == 0 else { return }
+                self.park()
+                self.finish(status: 0, killed: false)
+            }
         }
     }
 
@@ -1197,6 +1218,7 @@ final class ClaudeChat {
 
     private func finish(status: Int32, killed: Bool) {
         guard running else { return }
+        quietEnd?.cancel()
         watchdog?.cancel()
         watchdog = nil
         deadSince = nil
@@ -1387,6 +1409,9 @@ final class ChatHub {
         boards[name] = c
         return c
     }
+
+    /// A board's chat if it was made already. Never makes one, so a view can read it (2026-10-14).
+    func existingBoardChat(_ name: String) -> ClaudeChat? { boards[name] }
 
     /// The chat of a session, if it has one open this run. Never makes one (the sidebar asks).
     func existing(_ session: URL) -> ClaudeChat? { chats[session.standardizedFileURL] }

@@ -34,8 +34,9 @@ run() {
 }
 # Tests that time real playback, web views or streamed output. Beside 250 parallel tests the Mac is
 # too busy for their timing, and they failed the public release (2026-10-06) though each passes
-# alone. A full run leaves them out, then runs them by themselves, one at a time.
-TIMED='aSteerShowsNoErrorAndGoesOn|theNextArticleUsesALoadedPage|theHiddenDockedChatSkipsStreamedWords|effectPlaysAtItsSecond|resetWhileRunningKeepsTheNewAsk|watcherSeesAWrite'
+# alone. A full run leaves them out, then runs them by themselves, one at a time. The fake Codex and
+# pi chats and two chat-queue tests joined them (2026-10-18): they failed three releases in a row.
+TIMED='aSteerShowsNoErrorAndGoesOn|theNextArticleUsesALoadedPage|theHiddenDockedChatSkipsStreamedWords|effectPlaysAtItsSecond|resetWhileRunningKeepsTheNewAsk|watcherSeesAWrite|aCodexConversationStartsAThreadAndResumesIt|aPiConversationKeepsItsIDAndTellsTheTakesServer|compactQueuesAloneAndRunsFirst|stopEndsARunAndDropsTheQueue'
 if [[ -z "$FULL" ]]; then
   run "$@"
 else

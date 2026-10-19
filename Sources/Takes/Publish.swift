@@ -135,10 +135,10 @@ enum Cleanup {
         return Set(assets.filter { $0.take && keep.contains($0.name) }.map(\.url))
     }
 
-    /// Transcripts and subtitles that sit next to a video and go with it.
+    /// Transcripts, subtitles, the recipe and its exports: they sit next to a video and go with it.
     static func sidecars(of url: URL) -> [URL] {
         let stem = url.deletingPathExtension()
-        return [".words.json", ".srt", ".vtt", EditRecipe.suffix].map { URL(fileURLWithPath: stem.path + $0) }
+        return ([".words.json", ".srt", ".vtt", EditRecipe.suffix] + EditRecipe.exportSuffixes).map { URL(fileURLWithPath: stem.path + $0) }
             .filter { FileManager.default.fileExists(atPath: $0.path) }
     }
 

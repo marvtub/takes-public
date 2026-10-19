@@ -146,6 +146,16 @@ else
 fi
 echo "Built $APP"
 if [[ "${1:-}" == "install" ]]; then
+  # Keep this build's dSYM: the worktree that built it goes away, and without it a hang dump shows
+  # ??? frames (builds 912 and 915, 2026-10-18). Named by commit and UUID; the newest 15 stay.
+  if [[ -d build.noindex/Takes.dSYM ]]; then
+    UUID="$(dwarfdump --uuid build.noindex/Takes.dSYM 2>/dev/null | awk 'NR==1{print $2}')"
+    SYMS=~/Library/Logs/Takes/dSYM
+    mkdir -p "$SYMS"
+    rm -rf "$SYMS/admin-${STAMP%% *}-$UUID.dSYM"
+    cp -R build.noindex/Takes.dSYM "$SYMS/admin-${STAMP%% *}-$UUID.dSYM" 2>/dev/null || true
+    ls -dt "$SYMS"/admin-*.dSYM 2>/dev/null | tail -n +16 | while read -r old; do rm -rf "$old"; done || true
+  fi
   # Once Takes is installed, always stage: never decide by "is it running?". That check failed
   # silently twice (pgrep sees nothing from agent shells; pipefail broke ps | grep -q) and the
   # install overwrote the running app with no Update row (2026-10-06). A staged build waits for

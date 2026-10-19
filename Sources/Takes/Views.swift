@@ -1436,7 +1436,7 @@ private struct StageToast: View {
     var body: some View {
         ZStack {
             if let t = app.toast {
-                StagePill(text: t, icon: "checkmark", accent: true)
+                StagePill(text: t, icon: app.toastIcon, accent: true)
                     .padding(.bottom, 64)
                     .transition(.opacity.combined(with: .move(edge: .bottom)))
             }

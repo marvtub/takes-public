@@ -156,6 +156,8 @@ final class AppModel {
     var stillsSaved = 0
     /// Short message over the video ("Saved stills/…"). Clears itself.
     var toast: String?
+    /// The toast's icon: a check by default; a job that runs or a failure says so (2026-10-18).
+    var toastIcon = "checkmark"
     /// Thumbnails Takes is putting on a video as its cover now (Cover.swift).
     var coverWork: Set<URL> = []
     /// What Claude asked to show while the user looked at something else (open_in_app from a chat
@@ -783,8 +785,9 @@ final class AppModel {
         }
     }
 
-    func show(toast text: String) {
+    func show(toast text: String, icon: String = "checkmark") {
         toast = text
+        toastIcon = icon
         Task {
             try? await Task.sleep(for: .seconds(2.5))
             if toast == text { toast = nil }

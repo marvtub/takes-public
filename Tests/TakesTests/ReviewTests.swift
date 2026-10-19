@@ -115,16 +115,21 @@ struct IdleTests {
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: dir) }
         let watch = FileWatch()
+        let start = Date()
         watch.watch(dir)
-        let seen = Seen()
+        // The stream starts on its own queue (a 99 s launch hang on 14 Oct); changes still come on main.
+        #expect(Date().timeIntervalSince(start) < 1)
+        let seen = Seen(), offMain = Seen()
         let token = NotificationCenter.default.addObserver(forName: .takesFilesChanged, object: nil, queue: nil) { n in
-            if FileWatch.touches(n, dir) { seen.hit() }
+            guard FileWatch.touches(n, dir) else { return }
+            Thread.isMainThread ? seen.hit() : offMain.hit()
         }
         defer { NotificationCenter.default.removeObserver(token) }
         try await Task.sleep(for: .milliseconds(300))
         try Data("x".utf8).write(to: dir.appending(path: "comments.json"))
         for _ in 0..<40 where !seen.value { try await Task.sleep(for: .milliseconds(100)) }
         #expect(seen.value)
+        #expect(!offMain.value)
     }
 }
 

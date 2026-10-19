@@ -351,6 +351,98 @@ struct ChatParagraphTests {
         #expect(ChatRefs.bullet("- **Bold.** rest") == "**Bold.** rest")
     }
 
+    @Test func tablesHeadingsListsCodeAndQuotesBecomeBlocks() {
+        let t = """
+        ## Claims
+        Checks: one H1.
+
+        | Takes claim | Source | Status |
+        |---|---|---|
+        | Free, MIT license | `scripts/public/LICENSE:1` | true |
+        | No account | public README:17 | true |
+
+        1. First
+        2. Second
+           still second
+        - a bullet
+          - nested
+
+        > a quote
+        > two lines
+
+        ```
+        let a = 1 | 2
+        ```
+        ---
+        Ship it?
+        """
+        #expect(ChatRefs.blocks(t) == [
+            .heading(2, "Claims"),
+            .text(["Checks: one H1."]),
+            .table([["Takes claim", "Source", "Status"],
+                    ["Free, MIT license", "`scripts/public/LICENSE:1`", "true"],
+                    ["No account", "public README:17", "true"]]),
+            .list([ChatListItem(depth: 0, mark: "1.", text: "First"),
+                   ChatListItem(depth: 0, mark: "2.", text: "Second still second"),
+                   ChatListItem(depth: 0, mark: nil, text: "a bullet"),
+                   ChatListItem(depth: 1, mark: nil, text: "nested")]),
+            .quote("a quote\ntwo lines"),
+            .code("let a = 1 | 2"),
+            .rule,
+            .text(["Ship it?"]),
+        ])
+    }
+
+    @Test func aTableWithoutItsSeparatorYetStaysText() {
+        // While a reply streams in, the header row comes before the separator line.
+        #expect(ChatRefs.blocks("| a | b |") == [.text(["| a | b |"])])
+        #expect(ChatRefs.blocks("**Bold.** rest\n- one") == [.text(["**Bold.** rest"]), .list([ChatListItem(depth: 0, mark: nil, text: "one")])])
+    }
+
+    /// TAKES_SNAPSHOT=<dir> writes the reply as the chat panel draws it, light and dark.
+    @MainActor @Test func aRichReplySnapshot() throws {
+        guard let dir = ProcessInfo.processInfo.environment["TAKES_SNAPSHOT"] else { return }
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().appending(path: "../../assets")
+        for f in (try? FileManager.default.contentsOfDirectory(at: root.appending(path: "fonts"), includingPropertiesForKeys: nil)) ?? []
+        where f.pathExtension == "ttf" { CTFontManagerRegisterFontsForURL(f as CFURL, .process, nil) }
+        let reply = """
+        **Checks:** one H1, no sideways scroll at 390 wide, every image loads.
+
+        ## Claims on the page
+
+        | Takes claim | Source | Status |
+        |---|---|---|
+        | Free, MIT license | `scripts/public/LICENSE:1` | true |
+        | Needs macOS 15, Apple silicon | Package.swift:6 | true |
+        | Text follows your voice in the script's language | ScriptFollower.swift:91 | true |
+        | Mirrored text in its own window | Notch.swift:522, Views.swift:2752 | true |
+        | No account | public README:17 | true |
+
+        1. Ship the page
+        2. Check the sitemap
+        - a bullet with **bold**
+          - nested one
+
+        > Remote: keyboard only, no phone remote in the source.
+
+        ```
+        ./build.sh install
+        ```
+        ---
+        Ship it?
+        """
+        for (name, appearance) in [("light", NSAppearance.Name.aqua), ("dark", .darkAqua)] {
+            NSAppearance.current = NSAppearance(named: appearance)
+            let v = ChatReply(text: reply).frame(width: 470).padding(20).background(Theme.paper)
+                .environment(\.colorScheme, name == "dark" ? .dark : .light)
+            let r = ImageRenderer(content: v)
+            r.scale = 2
+            let cg = try #require(r.cgImage)
+            let data = try #require(NSBitmapImageRep(cgImage: cg).representation(using: .png, properties: [:]))
+            try data.write(to: URL(fileURLWithPath: dir).appending(path: "chat-rich-\(name).png"))
+        }
+    }
+
     @Test func everyToolRunIsOneTimeline() {
         let tool = { (t: String) in ChatMessage(role: .tool, text: t) }
         let msgs = [tool("computer"), tool("computer"), ChatMessage(role: .claude, text: "ok"),

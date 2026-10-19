@@ -649,8 +649,8 @@ def misplaced(s):
         if not os.path.isdir(d):
             continue
         for f in sorted(os.listdir(d)):
-            if f.startswith(".") or f.endswith((".words.json", ".srt", ".vtt", RECIPE_EXT)):
-                continue  # transcripts and recipes sit next to their video
+            if f.startswith(".") or f.endswith((".words.json", ".srt", ".vtt", RECIPE_EXT) + EXPORT_EXTS):
+                continue  # transcripts, recipes and exports sit next to their video
             kind = media_kind(f)
             if kind not in want:
                 out.append("%s/%s is not %s. %s" % (folder, f, what,
@@ -5180,7 +5180,7 @@ def t_voiceover(a):
 # Words in a take
 
 def norm_word(w):
-    return re.sub(r"[^\w']+", "", w.casefold())
+    return re.sub(r"[^\w']+", "", unicodedata.normalize("NFC", w).casefold())
 
 
 def find_words(words, old, near=None):
@@ -9914,7 +9914,9 @@ PREP_OFFLINE = ".prepare-offline"
 PREP_OFFLINE_S = 3600
 PREP_WAIT_S = 2
 RECORDING = ".recording"
-FILLERS = {"um", "uh", "uhm", "umm", "uhh", "erm", "er", "ah", "hmm", "mm", "mhm"}
+# Korean ums too (2026-10-18). Not 그 or 저: they are also words ("that", "I").
+FILLERS = {"um", "uh", "uhm", "umm", "uhh", "erm", "er", "ah", "hmm", "mm", "mhm",
+           "음", "음음", "으음", "으", "어", "어어", "아", "흠"}
 WORK_DIR = "_work"
 WORK_KEEP = 5
 CUT_MAX = 200
@@ -12631,6 +12633,473 @@ def recipe_note(video):
         return None
 
 
+# ---------- export to Resolve / Premiere (2026-10-18) ----------
+# export_edit (and the app's "Export for Resolve / Premiere…" on an edit) turns a version's recipe into
+# a timeline other editors open: edits/<name>-vN.fcpxml (FCPXML 1.10: DaVinci Resolve, Final Cut Pro),
+# edits/<name>-vN.premiere.xml (Final Cut Pro 7 XML: Premiere Pro, Resolve) and edits/<name>-vN.edl
+# (CMX3600, the picture cut only). They sit next to the version like its recipe, and an export again
+# writes them again (they are made from the recipe, never edited by hand).
+# Tracks: V1 the cut (each part's take file, picture only), V2+ the picture layers, A1 the voice, A2 the
+# music, A3 the sfx. The voice is a WAV on the video clock, so Resolve needs no audio offset: the clean
+# voice when the recipe used it, else the take's own sound, written once to _edit/.audio/<take>.wav with
+# extract_voice (a NLE may not apply the camera's 0.16-0.24 s audio start). The cover, the crop, the loudness,
+# music ducking and fades, and the steps that made the layers stay out: the result lists them.
+# Times: the cut on whole frames of the edit, as render_run cuts it. The timeline starts at 01:00:00:00.
+
+from fractions import Fraction  # noqa: E402
+import xml.etree.ElementTree as ET  # noqa: E402
+
+EXPORT_EXTS = (".fcpxml", ".premiere.xml", ".edl")
+EXPORT_AUDIO = os.path.join(EDIT_DIR, ".audio")
+EXPORT_TC_HOURS = 1
+
+
+def export_paths(video):
+    """edits/x-v5.mp4 -> {".fcpxml": edits/x-v5.fcpxml, ...}"""
+    stem = os.path.splitext(video)[0]
+    return {ext: stem + ext for ext in EXPORT_EXTS}
+
+
+def take_wav(s, t, clock):
+    """The take's own sound as a WAV on the video clock, made once (again when the take changed)."""
+    out = os.path.join(s, EXPORT_AUDIO, os.path.splitext(os.path.basename(t["file"]))[0] + ".wav")
+    src = os.path.join(s, t["file"])
+    if os.path.exists(out) and os.path.getmtime(out) >= os.path.getmtime(src):
+        return out
+    os.makedirs(os.path.dirname(out), exist_ok=True)
+    part = out[:-4] + ".part.wav"
+    extract_voice(src, part, channels=min(2, int(clock.get("channels") or 1)), codec="pcm_s24le")
+    os.replace(part, out)
+    return out
+
+
+def layer_file(s, r, ref):
+    """A layer's file as this version used it: the frozen copy of _edit/<name>/ when publish_edit made one."""
+    mine = os.path.join(EDIT_DIR, r.get("name") or "", "")
+    if r.get("src") and ref.startswith(mine):
+        frozen = os.path.join(s, r["src"], ref[len(mine):])
+        if os.path.exists(frozen):
+            return frozen
+    return ref_abs(s, ref)
+
+
+def export_plan(s, r, clock=None, seconds=None, wav=None):
+    """The edit as tracks: {name, fps, w, h, frames, media, video: [track], audio: [track], left_out,
+    warnings}. A clip is {media, at, len} in frames of the edit, with src (seconds of its file, a Fraction)
+    and gain_db. clock/seconds/wav: take_clock, media_seconds and take_wav, swapped in tests."""
+    clock, seconds, wav = clock or take_clock, seconds or media_seconds, wav or take_wav
+    f = r.get("frame") or {}
+    media, ids = {}, {}
+    left, warns = [], []
+
+    def add(path, **kw):
+        path = os.path.abspath(path)
+        if path not in ids:
+            ids[path] = "m%d" % (len(ids) + 1)
+            media[ids[path]] = dict({"path": path, "name": os.path.basename(path)}, **kw)
+        return ids[path]
+
+    # V1 and A1: the cut, on whole frames as render_run and render_cut cut it.
+    cut, voices = [], []
+    first = None
+    for i, g in enumerate(r.get("cut") or []):
+        try:
+            t = voice_take(s, g["take"], g.get("kind"))
+        except ValueError:
+            t = None
+        p = os.path.join(s, t["file"]) if t else None
+        c = clock(p) if p and os.path.isfile(p) else None
+        if not c:
+            raise ValueError("cut[%d]: take %s is gone, so this edit cannot be exported." % (i, g.get("take")))
+        first = first or c
+        fs = c["fps"]
+        a, b = Fraction(round(g["in"] * fs), fs), Fraction(round(g["out"] * fs), fs)
+        n = max(2, frames(float(b - a), first["fps"]))
+        vid = add(p, video=True, audio=c.get("audio_offset_s") is not None, fps=fs, w=c.get("width"),
+                  h=c.get("height"), channels=c.get("channels") or 0, seconds=c.get("duration"))
+        cut.append({"media": vid, "src": a, "secs": Fraction(n, first["fps"]), "take": t, "clock": c,
+                    "kind": t["kind"]})
+    F = int(f.get("fps") or first["fps"])
+    W, H = int(f.get("w") or first.get("width") or 1920), int(f.get("h") or first.get("height") or 1080)
+    at = Fraction(0)
+    keys = (r.get("voice") or {}).get("keys") or {}
+    for g in cut:
+        g["at"], g["len"] = int(round(at * F)), max(1, int(round((at + g["secs"]) * F)) - int(round(at * F)))
+        at += g["secs"]
+        key = voice_key(g["take"]["number"], g["kind"])
+        mix = keys.get(key)
+        if mix and os.path.isfile(os.path.join(s, mix)):
+            late = Fraction(round(voice_offset(s, key) * 48000), 48000)
+            path, start = os.path.join(s, mix), g["src"] - late
+        elif mix:
+            raise ValueError("The clean voice %s is gone, so this edit cannot be exported. Clean the voice "
+                             "again (clean_voice) or render a new version." % mix)
+        elif g["clock"].get("audio_offset_s") is not None:
+            path, start = wav(s, g["take"], g["clock"]), g["src"]
+        else:
+            continue  # no sound in this part: render_cut puts silence there
+        pad = 0
+        if start < 0:
+            pad = int(math.ceil(-start * F))
+            start += Fraction(pad, F)
+        if pad >= g["len"]:
+            continue
+        aid = add(path, audio=True, channels=1 if mix else min(2, int(g["clock"].get("channels") or 1)),
+                  seconds=None)
+        voices.append({"media": aid, "at": g["at"] + pad, "len": g["len"] - pad, "src": start})
+    for c in voices:
+        m = media[c["media"]]
+        if m["seconds"] is None:
+            m["seconds"] = seconds(m["path"])
+    total = sum(g["len"] for g in cut)
+    L = Fraction(total, F)
+    video = [[{k: g[k] for k in ("media", "at", "len", "src")} for g in cut]]
+    # V2+: picture layers, each on the lowest track where it fits.
+    for i, o in enumerate(r.get("over") or []):
+        p = layer_file(s, r, o["file"])
+        if not os.path.isfile(p):
+            left.append("over[%d] (%s): the file is gone" % (i, o["file"]))
+            continue
+        src = Fraction(o.get("in") or 0).limit_denominator(48000)
+        if media_kind(p) == "image":
+            dur = (o.get("out") or float(src) + 3.0) - float(src)
+            mid, src = add(p, video=True, still=True, w=None, h=None, fps=F, seconds=None), Fraction(0)
+        else:
+            dur = (o["out"] - float(src)) if o.get("out") is not None else max(0.0, seconds(p) - float(src))
+            c = clock(p) or {}
+            mid = add(p, video=True, audio=False, fps=c.get("fps") or F, w=c.get("width"), h=c.get("height"),
+                      seconds=c.get("duration"))
+        a0 = int(round(o["at"] * F))
+        n = min(int(round((o["at"] + dur) * F)), total) - a0
+        if n <= 0:
+            left.append("over[%d] (%s): it starts after the cut ends" % (i, o["file"]))
+            continue
+        clip = {"media": mid, "at": a0, "len": n, "src": src}
+        for tr in video[1:]:
+            if all(x["at"] + x["len"] <= a0 or x["at"] >= a0 + n for x in tr):
+                tr.append(clip)
+                break
+        else:
+            video.append([clip])
+    # A2: music, cut as render_plan cuts it (one song at a time, to the next song or the end).
+    music, sfx = r.get("music") or [], r.get("sfx") or []
+    starts = sorted(m["at"] for m in music)
+    mtrack = []
+    for i, m in enumerate(music):
+        p = ref_abs(s, m["file"])
+        if not os.path.isfile(p):
+            left.append("music[%d] (%s): the file is gone" % (i, m["file"]))
+            continue
+        nxt = [x for x in starts if x > m["at"] + 1e-6]
+        stop = min([float(L)] + nxt[:1])
+        if m.get("out") is not None:
+            stop = min(stop, m["at"] + m["out"] - m["in"])
+        a0 = int(round(m["at"] * F))
+        n = int(round(stop * F)) - a0
+        if n > 0:
+            mtrack.append({"media": add(p, audio=True, channels=2, seconds=seconds(p)), "at": a0, "len": n,
+                           "src": Fraction(m.get("in") or 0).limit_denominator(48000), "gain_db": m.get("gain_db")})
+    xtrack = []
+    for i, x in enumerate(sfx):
+        p = ref_abs(s, x["file"])
+        if not os.path.isfile(p):
+            left.append("sfx[%d] (%s): the file is gone" % (i, x["file"]))
+            continue
+        a0 = int(round(x["at"] * F))
+        n = min(int(round((x["at"] + seconds(p)) * F)), total) - a0
+        if n > 0:
+            xtrack.append({"media": add(p, audio=True, channels=2, seconds=seconds(p)), "at": a0, "len": n,
+                           "src": Fraction(0), "gain_db": x.get("gain_db")})
+    audio = [voices] + [tr for tr in (mtrack, xtrack) if tr]
+    if r.get("cover"):
+        left.append("the cover (%s): it shows %gs before the cut in the mp4; the timeline starts at the cut"
+                    % (r["cover"]["image"], r["cover"]["seconds"]))
+    if f.get("crop"):
+        left.append("the crop (frame.crop): the takes fill the frame from the centre; set the crop in the editor")
+    elif f.get("shape") not in (None, "source") and (W, H) != (first.get("width"), first.get("height")):
+        warns.append("The takes fill the %dx%d frame from the centre, as in the mp4." % (W, H))
+    if music:
+        left.append("the music's loudness match, ducking under the voice and fade-out: the music sits at its "
+                    "own level plus gain_db")
+    left.append("the final loudness (%g LUFS in the mp4)" % recipe_target(r))
+    if r.get("steps"):
+        left.append("the steps that made the picture layers: their renders are on V2 and up")
+    if r.get("over"):
+        warns.append("Picture layers are their rendered files (captions, motion graphics): they are not editable text.")
+    for p, was in (r.get("inputs") or {}).items():
+        try:
+            st = os.stat(ref_abs(s, p))
+            now = [st.st_size, int(st.st_mtime)]
+        except OSError:
+            continue
+        if was and now != was and not p.startswith(EDIT_DIR + os.sep):
+            warns.append("%s changed since this version was made: the timeline uses the file as it is now." % p)
+    return {"name": os.path.splitext(os.path.basename(r.get("edit") or r.get("name") or "edit"))[0],
+            "fps": F, "w": W // 2 * 2, "h": H // 2 * 2, "frames": total, "media": media, "video": video,
+            "audio": audio, "left_out": left, "warnings": warns}
+
+
+def fx_time(x):
+    """A time as FCPXML writes it: '0s', '3s', '1001/30000s'."""
+    x = Fraction(x)
+    return "%ds" % x.numerator if x.denominator == 1 else "%d/%ds" % (x.numerator, x.denominator)
+
+
+def file_url(path):
+    return "file://" + urllib.parse.quote(os.path.abspath(path))
+
+
+def fcpxml_of(tl):
+    """FCPXML 1.10 of an export_plan timeline: a library > event > project > sequence. V1 is the spine; every
+    other clip is anchored to the V1 clip under its start (lane 2+ picture, -1 voice, -2 music, -3 sfx)."""
+    F = tl["fps"]
+    fr = lambda n: Fraction(n, F)  # noqa: E731
+    root = ET.Element("fcpxml", version="1.10")
+    res = ET.SubElement(root, "resources")
+    ET.SubElement(res, "format", id="r0", name="Takes %dx%d %dp" % (tl["w"], tl["h"], F),
+                  frameDuration=fx_time(Fraction(1, F)), width=str(tl["w"]), height=str(tl["h"]),
+                  colorSpace="1-1-1 (Rec. 709)")
+    fmts = {}
+    for mid, m in tl["media"].items():
+        if m.get("video") and not m.get("still"):
+            key = (m.get("w") or tl["w"], m.get("h") or tl["h"], m.get("fps") or F)
+            if key not in fmts:
+                fmts[key] = "r%d" % (len(fmts) + 1)
+                ET.SubElement(res, "format", id=fmts[key], frameDuration=fx_time(Fraction(1, key[2])),
+                              width=str(key[0]), height=str(key[1]))
+    heard = {c["media"] for tr in tl["audio"] for c in tr}
+    for mid, m in tl["media"].items():
+        a = {"id": mid, "name": m["name"], "start": "0s"}
+        if m.get("seconds"):
+            grid = m.get("fps") or F if m.get("video") else 48000
+            a["duration"] = fx_time(Fraction(int(m["seconds"] * grid), grid))
+        if m.get("video"):
+            a["hasVideo"] = "1"
+            a["videoSources"] = "1"
+            if not m.get("still"):
+                a["format"] = fmts[(m.get("w") or tl["w"], m.get("h") or tl["h"], m.get("fps") or F)]
+        # A take used only for picture says it has no sound: Resolve ignores srcEnable="video" and lays the
+        # camera's sound on A1 beside the voice WAV, a doubled voice 0.2 s apart (seen in Resolve 21, 2026-10-18).
+        if m.get("audio") and mid in heard:
+            a.update(hasAudio="1", audioSources="1", audioChannels=str(m.get("channels") or 2), audioRate="48000")
+        el = ET.SubElement(res, "asset", a)
+        ET.SubElement(el, "media-rep", kind="original-media", src=file_url(m["path"]))
+    lib = ET.SubElement(root, "library")
+    ev = ET.SubElement(lib, "event", name="Takes")
+    pr = ET.SubElement(ev, "project", name=tl["name"])
+    seq = ET.SubElement(pr, "sequence", format="r0", duration=fx_time(fr(tl["frames"])),
+                        tcStart=fx_time(EXPORT_TC_HOURS * 3600), tcFormat="NDF", audioLayout="stereo", audioRate="48k")
+    spine = ET.SubElement(seq, "spine")
+    parents = []
+    t0 = EXPORT_TC_HOURS * 3600  # the spine's time starts at the sequence's timecode, as Final Cut writes it
+    for c in tl["video"][0]:
+        el = ET.SubElement(spine, "asset-clip", ref=c["media"], name=tl["media"][c["media"]]["name"],
+                           offset=fx_time(t0 + fr(c["at"])), start=fx_time(c["src"]), duration=fx_time(fr(c["len"])),
+                           srcEnable="video", tcFormat="NDF")
+        ET.SubElement(el, "adjust-conform", type="fill")
+        parents.append((c, el))
+
+    def anchor(c, lane, kind):
+        p, el = next(((p, e) for p, e in reversed(parents) if p["at"] <= c["at"]), parents[0])
+        off = p["src"] + fr(c["at"] - p["at"])  # in the parent's own time: its start is its first frame
+        m = tl["media"][c["media"]]
+        attrs = {"ref": c["media"], "lane": str(lane), "offset": fx_time(off), "name": m["name"],
+                 "start": fx_time(c["src"]), "duration": fx_time(fr(c["len"]))}
+        if kind == "still":
+            ET.SubElement(ET.SubElement(el, "video", attrs), "adjust-conform", type="fill")
+            return
+        x = ET.SubElement(el, "asset-clip", dict(attrs, srcEnable="video" if kind == "video" else "audio"))
+        if kind == "video":
+            ET.SubElement(x, "adjust-conform", type="fill")
+        elif c.get("gain_db"):
+            ET.SubElement(x, "adjust-volume", amount="%gdB" % c["gain_db"])
+
+    # Anchored items go after a clip's own adjustments: the DTD wants the conform first.
+    for n, tr in enumerate(tl["video"][1:]):
+        for c in tr:
+            anchor(c, n + 2, "still" if tl["media"][c["media"]].get("still") else "video")
+    for n, tr in enumerate(tl["audio"]):
+        for c in tr:
+            anchor(c, -(n + 1), "audio")
+    return fcp_doc(root, "fcpxml")
+
+
+def fcp_doc(root, doctype):
+    ET.indent(root, "  ")
+    return ('<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE %s>\n' % doctype
+            + ET.tostring(root, encoding="unicode") + "\n")
+
+
+def xmeml_of(tl):
+    """Final Cut Pro 7 XML (xmeml 5) of an export_plan timeline: the format Premiere Pro imports. Times
+    are frames of the edit."""
+    F = tl["fps"]
+    root = ET.Element("xmeml", version="5")
+    seq = ET.SubElement(root, "sequence", id="sequence-1")
+
+    def rate(el, fps=F):
+        r = ET.SubElement(el, "rate")
+        ET.SubElement(r, "timebase").text = str(fps)
+        ET.SubElement(r, "ntsc").text = "FALSE"
+
+    def sub(el, tag, text):
+        ET.SubElement(el, tag).text = str(text)
+
+    sub(seq, "name", tl["name"])
+    sub(seq, "duration", tl["frames"])
+    rate(seq)
+    tc = ET.SubElement(seq, "timecode")
+    rate(tc)
+    sub(tc, "string", "%02d:00:00:00" % EXPORT_TC_HOURS)
+    sub(tc, "frame", EXPORT_TC_HOURS * 3600 * F)
+    sub(tc, "displayformat", "NDF")
+    med = ET.SubElement(seq, "media")
+    vid, aud = ET.SubElement(med, "video"), ET.SubElement(med, "audio")
+    sc = ET.SubElement(ET.SubElement(vid, "format"), "samplecharacteristics")
+    rate(sc)
+    sub(sc, "width", tl["w"])
+    sub(sc, "height", tl["h"])
+    sub(sc, "anamorphic", "FALSE")
+    sub(sc, "pixelaspectratio", "square")
+    sub(sc, "fielddominance", "none")
+    asc = ET.SubElement(ET.SubElement(aud, "format"), "samplecharacteristics")
+    sub(asc, "depth", 24)
+    sub(asc, "samplerate", 48000)
+    seen, n = set(), [0]
+
+    def clipitem(track, c, kind):
+        m = tl["media"][c["media"]]
+        n[0] += 1
+        it = ET.SubElement(track, "clipitem", id="clipitem-%d" % n[0])
+        sub(it, "name", m["name"])
+        sub(it, "enabled", "TRUE")
+        full = int(round((m.get("seconds") or 0) * F)) or None
+        src = int(round(c["src"] * F))
+        sub(it, "duration", full or src + c["len"])
+        rate(it)
+        sub(it, "start", c["at"])
+        sub(it, "end", c["at"] + c["len"])
+        sub(it, "in", src)
+        sub(it, "out", src + c["len"])
+        fid = "file-" + c["media"][1:]
+        fe = ET.SubElement(it, "file", id=fid)
+        if fid not in seen:
+            seen.add(fid)
+            sub(fe, "name", m["name"])
+            sub(fe, "pathurl", file_url(m["path"]))
+            rate(fe)
+            sub(fe, "duration", full or src + c["len"])
+            fm = ET.SubElement(fe, "media")
+            if m.get("video"):
+                s = ET.SubElement(ET.SubElement(fm, "video"), "samplecharacteristics")
+                rate(s)
+                if m.get("w"):
+                    sub(s, "width", m["w"])
+                    sub(s, "height", m["h"])
+            if m.get("audio"):
+                fa = ET.SubElement(fm, "audio")
+                sub(ET.SubElement(fa, "samplecharacteristics"), "samplerate", 48000)
+                sub(fa, "channelcount", m.get("channels") or 2)
+        if kind == "audio":
+            st = ET.SubElement(it, "sourcetrack")
+            sub(st, "mediatype", "audio")
+            sub(st, "trackindex", 1)
+            if c.get("gain_db"):
+                flt = ET.SubElement(ET.SubElement(it, "filter"), "effect")
+                sub(flt, "name", "Audio Levels")
+                sub(flt, "effectid", "audiolevels")
+                sub(flt, "effectcategory", "audiolevels")
+                sub(flt, "effecttype", "audiolevels")
+                sub(flt, "mediatype", "audio")
+                p = ET.SubElement(flt, "parameter")
+                sub(p, "parameterid", "level")
+                sub(p, "name", "Level")
+                sub(p, "valuemin", 0)
+                sub(p, "valuemax", 3.98109)
+                sub(p, "value", "%.5f" % (10 ** (c["gain_db"] / 20.0)))
+
+    for tr in tl["video"]:
+        t = ET.SubElement(vid, "track")
+        for c in tr:
+            clipitem(t, c, "video")
+    for tr in tl["audio"]:
+        t = ET.SubElement(aud, "track")
+        for c in tr:
+            clipitem(t, c, "audio")
+    return fcp_doc(root, "xmeml")
+
+
+def tc_of(n, fps, hours=0):
+    n += hours * 3600 * fps
+    return "%02d:%02d:%02d:%02d" % (n // (3600 * fps), n // (60 * fps) % 60, n // fps % 60, n % fps)
+
+
+def edl_of(tl):
+    """CMX3600 of the cut (V1 only, the picture): one event per part, the source file in a comment."""
+    F = tl["fps"]
+    lines = ["TITLE: %s" % tl["name"][:70], "FCM: NON-DROP FRAME", ""]
+    for i, c in enumerate(tl["video"][0]):
+        m = tl["media"][c["media"]]
+        reel = re.sub(r"[^A-Z0-9]", "", os.path.splitext(m["name"])[0].upper().replace("CAMERA", "C")
+                      .replace("SCREEN", "S").replace("TAKE", "T"))[:8] or "AX"
+        src = int(round(c["src"] * F))
+        lines.append("%03d  %-8s V     C        %s %s %s %s" % (
+            i + 1, reel, tc_of(src, F), tc_of(src + c["len"], F),
+            tc_of(c["at"], F, EXPORT_TC_HOURS), tc_of(c["at"] + c["len"], F, EXPORT_TC_HOURS)))
+        lines.append("* FROM CLIP NAME: %s" % m["name"])
+        lines.append("* SOURCE FILE: %s" % m["path"])
+        lines.append("")
+    return "\n".join(lines)
+
+
+def write_text(path, text):
+    with open(path + ".tmp", "w") as f:
+        f.write(text)
+    os.replace(path + ".tmp", path)
+
+
+def export_edit(s, ref):
+    """Writes the three files of an edit version. Returns the tool's result."""
+    name, v = edit_ref(s, ref)
+    vs = edit_versions(s, name).get(name) or {}
+    if v is None:
+        v = max((n for n, e in vs.items() if e["video"] and e["recipe"]), default=None)
+    e = vs.get(v) if v is not None else None
+    if not e or not e["video"]:
+        raise ValueError("No edit %s here. get_session lists the edits." % (ref or name))
+    if not e["recipe"]:
+        raise ValueError("%s has no recipe, so Takes does not know its cut. Edits made before recipes have none: "
+                         "render_edit + publish_edit make a version with one." % e["video"])
+    r = load_recipe(s, e["recipe"])
+    tl = export_plan(s, r)
+    tl["name"] = os.path.splitext(os.path.basename(e["video"]))[0]
+    paths = export_paths(os.path.join(s, e["video"]))
+    for ext, text in ((".fcpxml", fcpxml_of(tl)), (".premiere.xml", xmeml_of(tl)), (".edl", edl_of(tl))):
+        write_text(paths[ext], text)
+    rel = lambda p: os.path.relpath(p, s)  # noqa: E731
+    out = {"edit": e["video"], "fcpxml": rel(paths[".fcpxml"]), "premiere": rel(paths[".premiere.xml"]),
+           "edl": rel(paths[".edl"]), "fps": tl["fps"], "size": "%dx%d" % (tl["w"], tl["h"]),
+           "length": tc_of(tl["frames"], tl["fps"]),
+           "tracks": {"video": len(tl["video"]), "audio": len(tl["audio"])},
+           "left_out": tl["left_out"],
+           "next": "Resolve: File > Import > Timeline > the .fcpxml. Premiere: File > Import > the .premiere.xml. "
+                   "Keep the session folder where it is: the timeline links the take files by path."}
+    if tl["warnings"]:
+        out["warnings"] = tl["warnings"]
+    return out
+
+
+def t_export_edit(a):
+    s = resolve_session(a["session"])
+    ref = a.get("edit")
+    if not ref:
+        names = recipe_names(s)
+        if not names:
+            raise ValueError("No edit here has a recipe yet. render_edit + publish_edit make one.")
+        ref = max(((newest_recipe(s, n) or {}) for n in names), key=lambda x: x.get("made") or "").get("edit")
+    return export_edit(s, ref)
+
+
 # ---------- LinkedIn comment copilot (same format as Sources/Takes/Copilot.swift) ----------
 
 
@@ -13838,6 +14307,15 @@ TOOLS = [
       "edit": {"type": "string", "description": "'hook-v4', 'edits/hook-v4.mp4' or 'hook' for its newest. Default: "
                "the newest edit."}},
      ["session"], t_get_edit_recipe),
+    ("export_edit", "Export an edit version as a timeline for DaVinci Resolve, Premiere Pro or Final Cut Pro, made "
+     "from its recipe: edits/<name>-vN.fcpxml (Resolve, Final Cut), .premiere.xml (Premiere) and .edl (picture "
+     "cut only), next to the version. They link the original take files with the cut's in and out points and "
+     "the voice as a WAV on the video clock (the clean voice when the recipe used it). left_out lists what the "
+     "timeline does not carry (cover, crop, loudness, music ducking). Only when the user asks for it.",
+     {"session": SESSION,
+      "edit": {"type": "string", "description": "'hook-v4', 'edits/hook-v4.mp4' or 'hook' for its newest. "
+               "Default: the newest edit."}},
+     ["session"], t_export_edit),
     ("save_broll", "Save a video of a session into the user's b-roll library (_library/broll/<folder>/, an APFS "
      "clone), so every session can use it (list_broll, add_broll). Gemini describes it in the background and "
      "writes the description and keywords into the clip. Only on the user's ask.",
@@ -14051,6 +14529,31 @@ def reply(id_, result=None, error=None):
     sys.stdout.flush()
 
 
+def server_version(here=None):
+    """The Takes version, so a directory (Glama, the MCP registry) shows the release, not a fixed number.
+    In a checkout: scripts/version.sh (the newest commit's date). The repo's own Info.plist only holds a
+    placeholder, so git comes first. In the app: the release tag, or the build's version, from Info.plist."""
+    import plistlib
+    here = here or os.path.dirname(os.path.abspath(__file__))
+    script = os.path.join(here, "..", "scripts", "version.sh")
+    if os.path.exists(script):
+        try:
+            out = subprocess.run(["bash", script], capture_output=True, text=True, timeout=5).stdout.split()
+            if out:
+                return out[0]
+        except Exception:
+            pass
+    try:
+        with open(os.path.join(here, "..", "Info.plist"), "rb") as f:
+            info = plistlib.load(f)
+        v = (info.get("ReleaseTag") or "").lstrip("v") or info.get("CFBundleShortVersionString")
+        if v:
+            return v
+    except Exception:
+        pass
+    return "dev"
+
+
 def handle(msg):
     method, id_ = msg.get("method"), msg.get("id")
     if id_ is None:
@@ -14058,7 +14561,7 @@ def handle(msg):
     if method == "initialize":
         v = (msg.get("params") or {}).get("protocolVersion") or PROTOCOL
         reply(id_, {"protocolVersion": v, "capabilities": {"tools": {}},
-                    "serverInfo": {"name": "takes", "version": "0.5"},
+                    "serverInfo": {"name": "takes", "version": server_version()},
                     "instructions": "Takes is the user's video recorder. Library = projects > sessions > takes. "
                                     "Every tool takes a session's path or its id (get_session); an old path still "
                                     "works after a rename. Cut takes with rough_cut (a first draft: improve it freely) "
@@ -14441,6 +14944,12 @@ if __name__ == "__main__":
             else:
                 res = {"voices": t_voices, "design_voice": t_design_voice}[sys.argv[2]](json.loads(sys.argv[3] if len(sys.argv) > 3 else "{}"))
         except (ValueError, KeyError) as e:
+            res = {"error": str(e)}
+        print(json.dumps(res))
+    elif sys.argv[1:2] == ["--export-edit"]:  # the app's Export for Resolve / Premiere: JSON out
+        try:
+            res = export_edit(os.path.normpath(os.path.abspath(sys.argv[2])), sys.argv[3])
+        except (ValueError, KeyError, OSError) as e:
             res = {"error": str(e)}
         print(json.dumps(res))
     elif sys.argv[1:2] == ["--voice-mix"]:

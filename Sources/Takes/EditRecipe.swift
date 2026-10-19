@@ -13,6 +13,85 @@ enum EditRecipe {
         video.deletingPathExtension().appendingPathExtension("recipe.json")
     }
 
+    // MARK: Export for Resolve / Premiere (2026-10-18)
+
+    /// What "Export for Resolve / Premiere…" writes next to a version (export_edit in takes_mcp.py): the
+    /// timeline for Resolve and Final Cut, the one for Premiere, and the picture cut as an EDL. Hidden on the
+    /// Assets tab like the recipe; Cleanup trashes them with their video.
+    static let exportSuffixes = [".fcpxml", ".premiere.xml", ".edl"]
+    static let exportTitle = "Export for Resolve / Premiere…"
+
+    /// The row on an edit tile's right-click menu (Assets tab).
+    @MenuBuilder static func exportRow(_ action: @escaping () -> Void) -> [MenuItem] {
+        MenuButton(exportTitle, icon: "square.and.arrow.up", action: action)
+    }
+
+    static func isExport(_ name: String) -> Bool { exportSuffixes.contains { name.hasSuffix($0) } }
+
+    /// edits/x-v5.mp4 → edits/x-v5.fcpxml
+    static func exportURL(for video: URL) -> URL {
+        video.deletingPathExtension().appendingPathExtension("fcpxml")
+    }
+
+    /// A version in edits/ that has its recipe: the export needs the cut list.
+    static func canExport(_ video: URL, group: String) -> Bool {
+        group == "edits" && FileManager.default.fileExists(atPath: url(for: video).path)
+    }
+
+    enum Exported: Hashable {
+        case done(URL)
+        case failed(String)
+    }
+
+    /// The server's answer as the app shows it.
+    static func exported(_ json: [String: Any], session: URL) -> Exported {
+        if let file = json["fcpxml"] as? String { return .done(session.appending(path: file)) }
+        let why = (json["error"] as? String).map { $0.trimmingCharacters(in: .whitespacesAndNewlines) } ?? ""
+        return .failed(why.isEmpty ? "The export gave no answer." : why)
+    }
+
+    /// One line for the toast, and its icon.
+    static func toast(_ e: Exported) -> String {
+        switch e {
+        case .done(let u): return "Exported \(u.lastPathComponent) for Resolve / Premiere"
+        case .failed(let why): return "Takes could not export it. \(why)"
+        }
+    }
+
+    static func toastIcon(_ e: Exported) -> String {
+        if case .done = e { return "checkmark" }
+        return "exclamationmark.triangle"
+    }
+
+    static let exportingIcon = "square.and.arrow.up"
+
+    /// Runs `takes_mcp.py --export-edit <session> <edits/x-vN.mp4>` off the main thread. It writes the
+    /// three files in a second or two (the first export of a take also writes its sound as a WAV).
+    nonisolated static func export(_ video: URL, session: URL) async -> Exported {
+        guard let script = Bundle.main.url(forResource: "takes_mcp", withExtension: "py") else {
+            return .failed("The takes server is missing from the app.")
+        }
+        let rel = "edits/" + video.lastPathComponent
+        let json: [String: Any] = await Task.detached(priority: .userInitiated) {
+            let p = Process()
+            p.executableURL = URL(filePath: "/usr/bin/python3")
+            p.arguments = [script.path, "--export-edit", session.path, rel]
+            var env = ProcessInfo.processInfo.environment
+            env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:\(Setup.localBin):" + (env["PATH"] ?? "/usr/bin:/bin")
+            if let root = UserDefaults.standard.string(forKey: "root") { env["TAKES_ROOT"] = root }
+            p.environment = env
+            let out = Pipe()
+            p.standardOutput = out
+            p.standardError = FileHandle.nullDevice
+            p.standardInput = FileHandle.nullDevice
+            guard (try? p.run()) != nil else { return ["error": "Could not start the takes server."] }
+            let data = out.fileHandleForReading.readDataToEndOfFile()
+            p.waitUntilExit()
+            return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] ?? [:]
+        }.value
+        return exported(json, session: session)
+    }
+
     /// The recipe as JSON, nil when there is none or it does not read.
     static func read(_ video: URL) -> [String: Any]? {
         guard let data = try? Data(contentsOf: url(for: video)) else { return nil }

@@ -62,7 +62,14 @@ extension ClaudeAdapter: ChatAdapter {
         switch type {
         case "system":
             switch o["subtype"] as? String {
-            case "init": p.started = true
+            case "init":
+                // Also the start of a turn that background tasks started: the run goes on.
+                p.started = true
+                p.finished = false
+                p.settled = false
+            case "background_tasks_changed":
+                p.background = (o["tasks"] as? [Any])?.count ?? 0
+                if p.background > 0 { p.settled = false }
             case "compact_boundary":
                 // /compact, or Claude Code compacting by itself when the context is full.
                 let m = o["compact_metadata"] as? [String: Any] ?? [:]
@@ -122,6 +129,7 @@ extension ClaudeAdapter: ChatAdapter {
             }
         case "result":
             p.finished = true
+            p.settled = p.background == 0
             p.closeOpen()
             // The window size comes only here. Subagents may run on smaller models: take the largest.
             let windows = (o["modelUsage"] as? [String: [String: Any]] ?? [:]).values.compactMap { $0["contextWindow"] as? Int }

@@ -90,7 +90,10 @@ final class Usage {
         return id
     }
 
-    nonisolated static func today(_ now: Date = Date()) -> String { String(ISO8601DateFormatter().string(from: now).prefix(10)) }
+    // One formatter for every call: the Site stats usage card asks for a day per row, and a new
+    // ISO8601DateFormatter each time froze a view body 1.6 s on 18 Oct. It is thread-safe.
+    nonisolated(unsafe) private static let dayFormat = ISO8601DateFormatter()
+    nonisolated static func today(_ now: Date = Date()) -> String { String(dayFormat.string(from: now).prefix(10)) }
 
     /// The last report sent, as it went out.
     static var lastSent: (day: String, json: String)? {

@@ -14,7 +14,7 @@
   <img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-22c55e">
 </p>
 
-Takes shows each post the way LinkedIn, X, YouTube or Shorts will show it, so you review the real thing. No coding needed and no account. Your videos, scripts and chats stay in folders on your Mac. Takes only checks for updates, and sends usage counts if you say yes ([privacy](https://gettakes.app/privacy)).
+Takes shows each post the way LinkedIn, X, YouTube or Shorts will show it, so you review the real thing. No coding needed and no account. Your videos, scripts and chats stay in folders on your Mac. Takes sends none of them, and your agent talks only to its own provider. Takes only checks for updates, and sends usage counts if you say yes ([privacy](https://gettakes.app/privacy)).
 
 ## Install
 

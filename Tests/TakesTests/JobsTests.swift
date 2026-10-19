@@ -200,6 +200,8 @@ struct JobsTests {
         #expect(FileWatch.folders(paths + [s + "/edits/launch-v3.mp4"]) == [s + "/edits"])
     }
 
+    /// The stream starts on its own queue (a 99 s launch hang on 14 Oct), and a change still
+    /// reaches the panes on the main thread.
     @MainActor @Test func noteLineStaysVisible() {
         let note = ChatMessage(role: .tool, text: "Render edit v3 is done", toolID: ChatMessage.jobNote)
         let tools = (1...3).map { ChatMessage(role: .tool, text: "Bash · step \($0)", toolID: "t\($0)") }
@@ -368,3 +370,4 @@ extension ChatRunTests {
         #expect(runs == 8)
     }
 }
+

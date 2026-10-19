@@ -193,6 +193,9 @@ Order that works: cut, then reframe, then grade, then audio, then captions.
 
 - **Edits:** `render_edit` + `publish_edit` write `<session>/edits/<slug>-vN.mp4` and its recipe.
   `next_path kind=edit name=<slug>` gives the path for an edit you make by hand. Videos only.
+- **To finish in another editor** (Resolve, Premiere, Final Cut), on the user's ask: `export_edit
+  edit=<slug>-vN` writes `.fcpxml`, `.premiere.xml` and `.edl` next to the version. Tell the user
+  what its `left_out` lists.
 - **Thumbnails:** `next_path kind=thumbnail name=<slug>` gives `<session>/thumbnails/<slug>-vN.png`.
   For several options, add an option word to the name (`<slug>-closeup`). Never put them in `edits/`.
 - **Never overwrite a version, and never write to or rename a take file.** Every change is a new

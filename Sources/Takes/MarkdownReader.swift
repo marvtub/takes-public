@@ -225,6 +225,13 @@ enum MarkdownText {
     }
 }
 
+extension MarkdownText {
+    /// The table and list rules of the reader, for the chat (ChatRefs.blocks).
+    static func isTableSeparator(_ line: String) -> Bool { Builder.isSeparator(line) }
+    static func tableCells(_ row: String) -> [String] { Builder.cells(row) }
+    static func listItem(_ line: String) -> (depth: Int, mark: String, body: String)? { Builder.item(line) }
+}
+
 /// A markdown file to read: styled, selectable, links open in the browser. Open comments' quotes
 /// are marked; select text and comment on it as in the editor.
 struct MarkdownReader: NSViewRepresentable {

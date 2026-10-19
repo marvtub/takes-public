@@ -103,7 +103,8 @@ final class AssetStore: ObservableObject {
             if Self.skipFolders.contains(first) || (parts.count == 1 && first.hasPrefix("_")) { walk.skipDescendants(); continue }
             guard let v = try? file.resourceValues(forKeys: Set(keys)), v.isRegularFile == true,
                   !first.hasPrefix("_"), !file.lastPathComponent.hasSuffix(".words.json"),  // transcripts
-                  !file.lastPathComponent.hasSuffix(EditRecipe.suffix) else { continue }  // an edit's recipe
+                  !file.lastPathComponent.hasSuffix(EditRecipe.suffix),  // an edit's recipe
+                  !(first == "edits" && EditRecipe.isExport(file.lastPathComponent)) else { continue }  // its export
             let take = parts.count == 1 && takeFiles.contains(first)
             let modified = v.contentModificationDate ?? .distantPast
             found.append(Asset(url: file,
@@ -531,6 +532,9 @@ struct AssetsPane: View {
             MenuButton("Fix Words…", icon: "text.badge.checkmark") { draft(ElevenLabs.fixDraft(a.rel)) }
             MenuButton("Change Voice…", icon: "waveform") { draft(ElevenLabs.voiceDraft(a.rel)) }
         }
+        if a.kind == .video, EditRecipe.canExport(a.url, group: a.group) {
+            EditRecipe.exportRow { exportEdit(a) }
+        }
         MenuButton("Open", icon: "arrow.up.forward.app") { NSWorkspace.shared.openSoon(a.url) }
         MenuButton("Reveal in Finder", icon: "folder") { reveal(a.url) }
         MenuButton("Copy Path", icon: "doc.on.doc") {
@@ -554,6 +558,18 @@ struct AssetsPane: View {
                 try? FileManager.default.trashItem(at: a.url, resultingItemURL: nil)
                 store.scan(doc)
             }
+        }
+    }
+
+    /// The timeline files for another editor, from the version's recipe; Finder shows them when done.
+    private func exportEdit(_ a: Asset) {
+        let session = doc.url, app = app
+        app.show(toast: "Exporting \(a.url.deletingPathExtension().lastPathComponent) for Resolve / Premiere",
+                 icon: EditRecipe.exportingIcon)
+        Task {
+            let e = await EditRecipe.export(a.url, session: session)
+            if case .done(let file) = e { NSWorkspace.shared.revealSoon([file]) }
+            app.show(toast: EditRecipe.toast(e), icon: EditRecipe.toastIcon(e))
         }
     }
 

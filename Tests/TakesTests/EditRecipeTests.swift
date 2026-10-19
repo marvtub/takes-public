@@ -85,6 +85,35 @@ struct EditRecipeTests {
         #expect(Cleanup.sidecars(of: s.appending(path: "edits/hook-v2.mp4")).map(\.lastPathComponent) == ["hook-v2.recipe.json"])
     }
 
+    @Test func exportsHideAndGoWithTheirVersion() throws {
+        let s = try session()
+        defer { clean(s) }
+        let v = s.appending(path: "edits/hook-v2.mp4")
+        try Data().write(to: v)
+        #expect(!EditRecipe.canExport(v, group: "edits"))  // no recipe, no cut list
+        try write(["note": "x"], EditRecipe.url(for: v))
+        #expect(EditRecipe.canExport(v, group: "edits"))
+        #expect(!EditRecipe.canExport(v, group: "generated"))
+        for ext in ["fcpxml", "premiere.xml", "edl"] { try Data().write(to: s.appending(path: "edits/hook-v2.\(ext)")) }
+        try Data().write(to: s.appending(path: "notes.edl"))  // not next to a version: a file of his own, shown
+        #expect(EditRecipe.exportURL(for: v).lastPathComponent == "hook-v2.fcpxml")
+        #expect(Set(AssetStore.walk(s, takeFiles: []).map(\.rel)) == ["edits/hook-v2.mp4", "notes.edl"])
+        #expect(Cleanup.sidecars(of: v).map(\.lastPathComponent)
+                == ["hook-v2.recipe.json", "hook-v2.fcpxml", "hook-v2.premiere.xml", "hook-v2.edl"])
+    }
+
+    @Test func exportAnswerAndToast() {
+        let s = URL(fileURLWithPath: "/lib/P/2026-10-18-a")
+        let done = EditRecipe.exported(["fcpxml": "edits/hook-v2.fcpxml", "left_out": ["the cover"]], session: s)
+        #expect(done == .done(s.appending(path: "edits/hook-v2.fcpxml")))
+        #expect(EditRecipe.toast(done) == "Exported hook-v2.fcpxml for Resolve / Premiere")
+        let bad = EditRecipe.exported(["error": "edits/old-v1.mp4 has no recipe, so Takes does not know its cut."], session: s)
+        #expect(EditRecipe.toast(bad) == "Takes could not export it. edits/old-v1.mp4 has no recipe, so Takes does not know its cut.")
+        #expect(EditRecipe.exported([:], session: s) == .failed("The export gave no answer."))
+        #expect(!EditRecipe.toast(bad).contains("Claude"))
+        #expect(EditRecipe.toastIcon(done) == "checkmark" && EditRecipe.toastIcon(bad) == "exclamationmark.triangle")
+    }
+
     @Test func coverArgsSkipTheBakedCover() {
         let v = URL(fileURLWithPath: "/s/edits/a-v2.mp4"), img = URL(fileURLWithPath: "/s/thumbnails/t.png")
         let with = Cover.args(image: img, video: v, out: URL(fileURLWithPath: "/s/o.mp4"), w: 360, h: 640, fps: 30, sound: true, skip: 0.1)
@@ -164,6 +193,51 @@ struct EditRecipeTests {
         p.arguments = ["-hide_banner", "-loglevel", "error", "-y"] + args
         try p.run(); p.waitUntilExit()
         #expect(p.terminationStatus == 0)
+    }
+}
+
+/// The edit tile's right-click menu with Export for Resolve / Premiere, and its toasts, in light and dark:
+/// `TAKES_SNAPSHOT=/some/dir ./test.sh --filter ExportMenuSnapshot`.
+@MainActor
+struct ExportMenuSnapshotTests {
+    @Test func exportRowAndToasts() throws {
+        guard let dir = ProcessInfo.processInfo.environment["TAKES_SNAPSHOT"] else { return }
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().appending(path: "../../assets")
+        for f in (try? FileManager.default.contentsOfDirectory(at: root.appending(path: "fonts"), includingPropertiesForKeys: nil)) ?? []
+        where f.pathExtension == "ttf" { CTFontManagerRegisterFontsForURL(f as CFURL, .process, nil) }
+        @MenuBuilder func rows() -> [MenuItem] {
+            MenuButton("Show in Player", icon: "play.rectangle") {}
+            MenuGroup("Use in Post", icon: "rectangle.stack") { MenuButton("LinkedIn post") {} }
+            EditRecipe.exportRow {}
+            MenuButton("Open", icon: "arrow.up.forward.app") {}
+            MenuButton("Reveal in Finder", icon: "folder") {}
+            MenuButton("Copy Path", icon: "doc.on.doc") {}
+            MenuDivider()
+            MenuButton("Move to Trash", icon: "trash", danger: true) {}
+        }
+        for (name, appearance) in [("light", NSAppearance.Name.aqua), ("dark", .darkAqua)] {
+            NSAppearance.current = NSAppearance(named: appearance)
+            let st = MenuState()
+            st.highlight = "b:" + EditRecipe.exportTitle
+            let s = URL(fileURLWithPath: "/lib/P/a")
+            let v = HStack(alignment: .top, spacing: 28) {
+                TakesMenuList(content: rows, state: st)
+                VStack(alignment: .leading, spacing: 14) {
+                    StagePill(text: "Exporting hook-v4 for Resolve / Premiere", icon: EditRecipe.exportingIcon, accent: true)
+                    ForEach([EditRecipe.Exported.done(s.appending(path: "edits/hook-v4.fcpxml")), .failed("No edit hook-v9 here.")],
+                            id: \.self) { e in
+                        StagePill(text: EditRecipe.toast(e), icon: EditRecipe.toastIcon(e), accent: true)
+                    }
+                }
+            }
+            .padding(30).background(Theme.canvas)
+            .environment(\.colorScheme, name == "dark" ? .dark : .light)
+            let r = ImageRenderer(content: v)
+            r.scale = 2
+            let cg = try #require(r.cgImage)
+            let data = try #require(NSBitmapImageRep(cgImage: cg).representation(using: .png, properties: [:]))
+            try data.write(to: URL(fileURLWithPath: dir).appending(path: "export-menu-\(name).png"))
+        }
     }
 }
 

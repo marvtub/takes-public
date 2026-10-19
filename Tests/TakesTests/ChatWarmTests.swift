@@ -127,6 +127,50 @@ extension ChatRunTests {
         #expect(ask(3)?.contains("Takes note") == false, "said once")
     }
 
+    @Test func backgroundTasksKeepTheRunUntilTheirTurnAnswers() async throws {
+        let chat = ClaudeChat(session: session)
+        defer { chat.dropWarm(); cleanup() }
+        // As the comment scout: it starts agents, answers, and answers again when they end.
+        try warmFake(#"""
+        if [ $n = 1 ]; then
+          echo '{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"a"}]}'
+          echo '{"type":"assistant","message":{"content":[{"type":"text","text":"Started the agents."}]}}'
+          echo '{"type":"result","subtype":"success","result":"","modelUsage":{}}'
+          sleep 1
+          echo '{"type":"system","subtype":"background_tasks_changed","tasks":[]}'
+          echo '{"type":"system","subtype":"init"}'
+          echo '{"type":"assistant","message":{"content":[{"type":"text","text":"Drafts done."}]}}'
+        fi
+        """#)
+        chat.send("Scout", title: "T", onStage: nil)
+        await until { chat.messages.contains { $0.text == "Started the agents." } }
+        #expect(chat.running, "the agents still run")
+        await until { runs == 1 && !chat.running }
+        #expect(chat.messages.contains { $0.text == "Drafts done." })
+        #expect(chat.warmPID != nil, "the process waits again")
+        #expect(starts == 1)
+        #expect(!chat.messages.contains { $0.role == .error })
+    }
+
+    @Test func tasksThatEndWithNoNewTurnEndTheRunAfterAWhile() async throws {
+        let chat = ClaudeChat(session: session)
+        let quiet = Warm.quiet
+        Warm.quiet = .milliseconds(300)
+        defer { Warm.quiet = quiet; chat.dropWarm(); cleanup() }
+        try warmFake(#"""
+        if [ $n = 1 ]; then
+          echo '{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"a"}]}'
+          echo '{"type":"result","subtype":"success","result":"","modelUsage":{}}'
+          sleep 1
+          echo '{"type":"system","subtype":"background_tasks_changed","tasks":[]}'
+          sleep 4
+        fi
+        """#)
+        chat.send("One", title: "T", onStage: nil)
+        await until(4) { runs == 1 && !chat.running }
+        #expect(!chat.running, "ended before the late answer")
+    }
+
     @Test func atMostThreeWaitAndAnIdleOneEnds() async throws {
         let chats = (1...4).map { i -> ClaudeChat in
             let s = dir.appending(path: "P/2026-10-14-s\(i)")
