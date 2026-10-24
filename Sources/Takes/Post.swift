@@ -24,8 +24,9 @@ import SwiftUI
 enum PostPlatform: String, CaseIterable, Identifiable {
     case linkedin, x, youtube, vertical, article
     var id: String { rawValue }
-    /// The platforms the app shows: the article only where the blog is on (Features.blog).
-    static let shown: [PostPlatform] = allCases.filter { Features.blog || $0 != .article }
+    /// The platforms the app shows: the article only where the blog is on (Features.blog). Computed, not
+    /// stored: Public view turns the blog off while the app runs, and a stored static is set once (2026-10-22).
+    static var shown: [PostPlatform] { allCases.filter { Features.blog || $0 != .article } }
     /// The remembered side of the post tab, or LinkedIn when that side is not shown.
     static func stored(_ raw: String) -> PostPlatform {
         PostPlatform(rawValue: raw).flatMap { shown.contains($0) ? $0 : nil } ?? .linkedin

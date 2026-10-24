@@ -155,7 +155,7 @@ final class Usage {
         let sessions = library.projects.flatMap { library.grouped[$0.url] ?? [] }.map { ($0.url, $0.takeCount, $0.published) }
         let v = ProcessInfo.processInfo.operatingSystemVersion
         let id = Self.id, version = Self.release ?? "source", root = library.root, projects = library.projects.count
-        let plugins = Plugins.all.map(\.id), phone = PhoneServer.usedRecently()
+        let plugins = Plugins.built.filter { Plugins.isInstalled($0.id) }.map(\.id), phone = PhoneServer.usedRecently()
         let agent = ChatAgent.current.rawValue
         let first = UserDefaults.standard.object(forKey: Self.firstKey) as? Date
         let tokens = Self.tokens()

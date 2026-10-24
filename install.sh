@@ -8,6 +8,11 @@
 # deploy serves this file from origin/main at /install (2026-10-05).
 set -euo pipefail
 
+# The command from a link with a source (curl -fsSL https://gettakes.app/install/<ref> | bash) gets
+# a random install code on this line (gettakes.app functions/lib/ref.js, 2026-10-20). Takes sends it
+# once, with its first update check, so the site can count installs per link. Nothing else.
+TAKES_INSTALL_TOKEN=""
+
 say() { printf '\n\033[1m%s\033[0m\n' "$*"; }
 fail() { printf '\n%s\n' "$*" >&2; exit 1; }
 
@@ -39,6 +44,10 @@ rm -rf "$apps/Takes.app"
 ditto "$tmp/mnt/Takes.app" "$apps/Takes.app"
 xattr -dr com.apple.quarantine "$apps/Takes.app" 2>/dev/null || true
 echo "Takes is in $apps."
+if [[ $TAKES_INSTALL_TOKEN =~ ^[a-km-np-z2-9]{10}$ ]]; then
+    support="$HOME/Library/Application Support/Takes"
+    mkdir -p "$support" && printf '%s\n' "$TAKES_INSTALL_TOKEN" > "$support/install-ref" || true
+fi
 
 # 2. ffmpeg and ffprobe: static builds from ffmpeg.martin-riedl.de (linked from ffmpeg.org),
 # checked against their SHA-256. Skipped when ffmpeg is already there (Homebrew or other).

@@ -1,6 +1,6 @@
 ---
 name: takes-video-edit
-description: Edit a video recorded in Takes, starting from the Takes session (takes MCP): rough_cut and cut_take for the cuts, render_edit and publish_edit to build and save each version from its recipe, HyperFrames for the motion graphics over it. Start here for any video in Takes, also when the HyperFrames skills are installed. Use when the user asks to edit, cut, trim, caption, reframe (for example to 9:16), clean up the audio of, fix the words said in, add a voice-over to, or make a thumbnail for a take or a video in Takes, or asks for a new version of an edit after review comments.
+description: "Edit a video recorded in Takes, starting from the Takes session (takes MCP): rough_cut and cut_take for the cuts, render_edit and publish_edit to build and save each version from its recipe, HyperFrames for the motion graphics over it. Start here for any video in Takes, also when the HyperFrames skills are installed. Use when the user asks to edit, cut, trim, caption, reframe (for example to 9:16), clean up the audio of, fix the words said in, add a voice-over to, or make a thumbnail for a take or a video in Takes, or asks for a new version of an edit after review comments."
 ---
 
 # Takes video edit

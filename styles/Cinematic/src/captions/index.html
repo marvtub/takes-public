@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=1080, height=1920" />
+    <!-- Cinematic captions: film subtitles. Cormorant Garamond 400, 56 px, centred in the bottom
+         letterbox bar, one line at a time (36 characters or fewer). Words between *stars* turn
+         muted-gold italic. Each line fades in slowly, holds still, and fades out. No karaoke, no box.
+         Put your clip next to this file as footage.mp4 and the lines with their times in LINES. -->
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+    <style>
+      @font-face { font-family: "Cormorant Garamond"; src: url("../../fonts/CormorantGaramond-Variable.ttf"); font-weight: 300 700; }
+      @font-face { font-family: "Cormorant Garamond"; src: url("../../fonts/CormorantGaramond-Italic-Variable.ttf"); font-style: italic; font-weight: 300 700; }
+      :root { --bar: #000; --subtitle: #ede6da; --gold: #d9b26a; --serif: "Cormorant Garamond", serif; }
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      html, body { width: 1080px; height: 1920px; overflow: hidden; background: var(--bar); }
+      #root { position: relative; width: 100%; height: 100%; overflow: hidden; background: var(--bar); }
+      /* The grade: lower saturation, a touch of warmth, deeper blacks. On the picture, never on the text. */
+      #footage { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover;
+                 filter: contrast(1.12) saturate(0.85) brightness(0.9) sepia(0.12); }
+      /* Vignette on the frame edges only; the face stays clean. */
+      #vig { position: absolute; inset: 0; background: radial-gradient(ellipse at 50% 40%, transparent 45%, rgba(0, 0, 0, 0.55) 100%); }
+      .bar { position: absolute; left: 0; right: 0; height: 300px; background: var(--bar); }
+      .sub { position: absolute; left: 60px; right: 60px; bottom: 150px; text-align: center; font-family: var(--serif);
+             font-weight: 400; font-size: 56px; line-height: 1.2; letter-spacing: 0.3px; color: var(--subtitle); white-space: nowrap; }
+      .sub i { color: var(--gold); }
+    </style>
+  </head>
+  <body>
+    <div id="root" data-composition-id="main" data-start="0" data-duration="6" data-width="1080" data-height="1920">
+      <video id="footage" src="footage.mp4" data-start="0" data-duration="6" data-track-index="0" muted playsinline></video>
+      <div id="vig"></div>
+      <div class="bar" style="top: 0"></div>
+      <div class="bar" style="bottom: 0"></div>
+    </div>
+    <script>
+      // [line, in second, out second]. Keep each line to 36 characters or fewer.
+      const LINES = [["Most people plan the week. *Few protect it.*", 0.3, 3.0],
+                     ["The calendar is the *discipline.*", 3.3, 5.6]];
+      const FADE_IN = 0.5, FADE_OUT = 0.35;
+
+      const root = document.getElementById("root");
+      const esc = s => s.replace(/[&<>]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+      window.__timelines = window.__timelines || {};
+      const tl = gsap.timeline({ paused: true });
+      LINES.forEach(([text, from, to]) => {
+        const el = document.createElement("div"); el.className = "sub";
+        el.innerHTML = esc(text).replace(/\*([^*]+)\*/g, "<i>$1</i>");
+        root.appendChild(el);
+        gsap.set(el, { opacity: 0 });
+        tl.to(el, { opacity: 1, duration: FADE_IN, ease: "power2.out" }, from);
+        tl.to(el, { opacity: 0, duration: FADE_OUT, ease: "power2.in" }, to - FADE_OUT);
+      });
+      tl.set({}, {}, 6);
+      window.__timelines["main"] = tl;
+      tl.seek(0);
+    </script>
+  </body>
+</html>

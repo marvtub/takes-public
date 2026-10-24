@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=1080, height=1920" />
+    <!-- Bold figure: a navy studio card that cuts in with its title in a white label box, then one
+         row per item: a stroked caps label, a thick rounded bar and a big number. Rows pop in one
+         by one. The row that matters is yellow; the rest are white. Edit FIG below. -->
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+    <style>
+      @font-face { font-family: "Montserrat"; src: url("../../fonts/Montserrat-Variable.ttf"); font-weight: 100 900; }
+      :root { --navy: #0e2350; --hot: #ffe600; --win: #3cff6b; }
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      html, body { width: 1080px; height: 1920px; overflow: hidden; background: var(--navy); }
+      #root { position: relative; width: 100%; height: 100%; font-family: "Montserrat", sans-serif; text-transform: uppercase;
+              background: radial-gradient(ellipse 90% 60% at 50% 42%, #1a3a7a 0%, var(--navy) 70%); }
+      #label { position: absolute; left: 170px; right: 170px; top: 110px; background: #fff; border-radius: 22px; padding: 22px 30px;
+               text-align: center; font-weight: 900; font-size: 64px; line-height: 1.08; letter-spacing: -0.5px; color: #000;
+               box-shadow: 0 18px 40px rgba(0, 0, 0, 0.35); }
+      #rows { position: absolute; left: 90px; right: 90px; top: 520px; display: flex; flex-direction: column; gap: 90px; }
+      .row { transform-origin: 0 50%; }
+      .top { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 22px; }
+      .stroke { font-weight: 900; color: #fff; -webkit-text-stroke: 12px #000; paint-order: stroke fill; text-shadow: 0 8px 0 #000; }
+      .name { font-size: 64px; letter-spacing: -0.5px; }
+      .num { font-size: 120px; line-height: 0.9; letter-spacing: -1px; }
+      .track { height: 64px; border-radius: 32px; background: rgba(255, 255, 255, 0.12); }
+      .bar { height: 100%; border-radius: 32px; background: #fff; border: 6px solid #000; }
+      .hot .num { color: var(--hot); } .hot .bar { background: var(--hot); }
+      #foot { position: absolute; left: 90px; right: 90px; bottom: 340px; text-align: center; font-size: 92px; line-height: 1.04; }
+      #foot .g { color: var(--win); }
+    </style>
+  </head>
+  <body>
+    <div id="root" data-composition-id="main" data-start="0" data-duration="5" data-width="1080" data-height="1920">
+      <div id="label"></div>
+      <div id="rows"></div>
+      <div id="foot" class="stroke"></div>
+    </div>
+    <script>
+      // value: the bar's length is value / max. hot: the row that gets the yellow.
+      // foot: the punchline under the rows; wrap the win in <span class="g"> for green.
+      const FIG = {
+        title: "Where your\n5 hours go",
+        rows: [{ label: "Meetings", value: 3, text: "3 h", hot: true }, { label: "Email", value: 1.5, text: "1.5 h" }, { label: "Slack", value: 0.5, text: "30 m" }],
+        foot: 'Get <span class="g">5 hours</span> back',
+        at: { rows: 0.4, stagger: 0.35, foot: 2.0 },
+      };
+
+      document.getElementById("label").innerText = FIG.title;
+      document.getElementById("foot").innerHTML = FIG.foot;
+      const max = Math.max(...FIG.rows.map(r => r.value));
+      const rows = document.getElementById("rows");
+      FIG.rows.forEach(r => {
+        const el = document.createElement("div"); el.className = "row" + (r.hot ? " hot" : "");
+        el.innerHTML = '<div class="top"><span class="stroke name"></span><span class="stroke num"></span></div><div class="track"><div class="bar"></div></div>';
+        el.querySelector(".name").textContent = r.label;
+        el.querySelector(".num").textContent = r.text;
+        el.querySelector(".bar").style.width = Math.max(14, 100 * r.value / max) + "%";
+        rows.appendChild(el);
+      });
+
+      window.__timelines = window.__timelines || {};
+      const tl = gsap.timeline({ paused: true });
+      const pop = { opacity: 1, scale: 1, duration: 0.25, ease: "back.out(2.5)" };
+      // The card and its title cut in whole. Then each row, and the punchline pop in.
+      gsap.set([".row", "#foot"], { opacity: 0, scale: 0.6 });
+      document.querySelectorAll(".row").forEach((row, i) => tl.to(row, pop, FIG.at.rows + i * FIG.at.stagger));
+      tl.to("#foot", pop, FIG.at.foot);
+      tl.set({}, {}, 5);
+      window.__timelines["main"] = tl;
+      tl.seek(0);
+    </script>
+  </body>
+</html>

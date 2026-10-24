@@ -160,6 +160,15 @@ struct Tabs: View {
         .onAppear { take() }
         .onChange(of: quick.asked) { _, _ in take() }
         .onChange(of: model.phase) { _, _ in take() }
+        // The Mac's Public view (2026-10-22): leave a screen it hides.
+        .onChange(of: model.publicView) { _, _ in leaveHidden() }
+        .onChange(of: model.plugins) { _, _ in leaveHidden() }
+    }
+
+    private func leaveHidden() {
+        let gone = (tab == "comments" || tab == "performance") && !Features.socialBoards
+            || tab.hasPrefix("plugin:") && !model.plugins.contains { "plugin:" + $0.id == tab }
+        if gone { tab = "videos" }
     }
 
     /// A Home Screen quick action, once the app is open (after Face ID).

@@ -296,6 +296,13 @@ final class Model: ObservableObject {
                 loadingChat.insert(id)
                 Task { await self.loadChat(id); self.loadingChat.remove(id) }
             }
+        case "view":
+            let on = ev.public_view ?? false
+            guard on != publicView else { return }
+            UserDefaults.standard.set(on, forKey: Features.publicViewKey)
+            publicView = on
+            // The Mac lists other plugin screens now.
+            Task { await self.loadPlugins() }
         case "copilot":
             copilotTick += 1
         case "notices":
@@ -473,6 +480,8 @@ final class Model: ObservableObject {
 
     /// The Mac's plugin screens for this phone (GET /api/plugins). Empty from the public copy.
     @Published var plugins: [PluginInfo] = []
+    /// The Mac's Public view (2026-10-22): the phone hides the admin screens as the Mac does.
+    @Published var publicView = Features.publicView
 
     func loadPlugins() async {
         guard let d = try? await act("/api/plugins", [:], nil, method: "GET"),

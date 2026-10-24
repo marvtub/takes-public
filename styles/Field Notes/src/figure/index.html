@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=1080, height=1920" />
+    <!-- Field Notes map page: grained paper, a typewriter headline with the key number highlighted,
+         a hand-drawn map with a faint grid, a red dashed route that draws from A to B, typewriter
+         place labels, one red marker note on the route, and a taped polaroid from the footage.
+         The page cuts in whole; then only the route, the note and the polaroid move.
+         Put your clip next to this file as footage.mp4 (the polaroid shows it), and edit MAP. -->
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+    <style>
+      @font-face { font-family: "Courier Prime"; src: url("../../fonts/CourierPrime-Regular.ttf"); font-weight: 400; }
+      @font-face { font-family: "Courier Prime"; src: url("../../fonts/CourierPrime-Bold.ttf"); font-weight: 700; }
+      @font-face { font-family: "Caveat Brush"; src: url("../../fonts/CaveatBrush-Regular.ttf"); font-weight: 400; }
+      :root { --paper: #efe4cb; --land: #e7dab9; --coast: #5b4a33; --grid: #8c7a5e; --ink: #1b1712; --tag: #f2e8d3;
+              --marker: #e2231a; --hl: #ffe14d; }
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      html, body { width: 1080px; height: 1920px; overflow: hidden; background: var(--paper); }
+      #root { position: relative; width: 100%; height: 100%; background: var(--paper);
+        background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='300' height='300'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='3' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 0.35 0 0 0 0 0.28 0 0 0 0 0.18 0 0 0 .55 0'/></filter><rect width='300' height='300' filter='url(%23n)'/></svg>"); }
+      #head { position: absolute; left: 70px; right: 70px; top: 170px; font-family: "Courier Prime", monospace; font-weight: 700;
+        font-size: 70px; line-height: 1.15; color: var(--ink); }
+      #head .l { display: block; white-space: nowrap; }
+      mark { background: linear-gradient(transparent 16%, var(--hl) 16%, var(--hl) 90%, transparent 90%) no-repeat 0 0 / 0% 100%; color: inherit; }
+      #map { position: absolute; left: 0; top: 380px; width: 1080px; height: 1100px; }
+      .lbl { position: absolute; font-family: "Courier Prime", monospace; font-weight: 700; font-size: 34px; letter-spacing: 0.08em; color: var(--ink); white-space: nowrap; }
+      .lbl.to { font-size: 38px; background: var(--ink); color: var(--tag); padding: 6px 16px; }
+      #note { position: absolute; font-family: "Caveat Brush", cursive; font-size: 58px; color: var(--marker); text-transform: uppercase; white-space: nowrap; }
+      #pol { position: absolute; right: 80px; top: 1360px; width: 340px; background: #fff; padding: 18px 18px 74px; transform: rotate(5deg);
+        box-shadow: 0 18px 36px rgba(0, 0, 0, 0.3); }
+      #pol video { width: 100%; height: 330px; object-fit: cover; object-position: 50% 30%; display: block; }
+      #pol .cap { position: absolute; left: 0; right: 0; bottom: 14px; text-align: center; font-family: "Caveat Brush", cursive; font-size: 44px; color: #333; text-transform: uppercase; }
+      #pol .tape { position: absolute; left: 110px; top: -24px; width: 130px; height: 46px; background: rgba(255, 236, 170, 0.78); transform: rotate(-6deg); }
+    </style>
+  </head>
+  <body>
+    <div id="root" data-composition-id="main" data-start="0" data-duration="6" data-width="1080" data-height="1920">
+      <div id="head"></div>
+      <svg id="map" viewBox="0 0 1080 1100">
+        <g stroke="#8c7a5e" stroke-width="1.5" fill="none" opacity=".5"><path d="M0 200 H1080 M0 450 H1080 M0 700 H1080 M0 950 H1080 M200 0 V1100 M470 0 V1100 M740 0 V1100"/></g>
+        <g fill="#e7dab9" stroke="#5b4a33" stroke-width="3">
+          <path d="M120 300 C 180 220, 300 200, 380 240 C 440 200, 520 230, 560 290 C 640 270, 700 330, 690 400 C 760 430, 760 520, 690 560 C 700 640, 620 700, 540 670 C 480 730, 380 720, 340 660 C 260 690, 170 640, 180 560 C 100 520, 90 420, 150 380 Z"/>
+          <path d="M760 180 C 820 150, 900 170, 920 230 C 960 260, 950 320, 900 340 C 880 400, 800 390, 780 340 C 730 320, 720 240, 760 180 Z"/>
+          <path d="M800 700 C 860 680, 930 720, 920 790 C 960 840, 900 900, 840 880 C 780 900, 740 840, 770 790 C 740 750, 760 710, 800 700 Z"/>
+        </g>
+        <mask id="reveal"><path id="draw" d="M330 420 C 450 360, 600 360, 820 260" fill="none" stroke="#fff" stroke-width="20" stroke-linecap="round"/></mask>
+        <path d="M330 420 C 450 360, 600 360, 820 260" fill="none" stroke="#e2231a" stroke-width="7" stroke-dasharray="20 16" stroke-linecap="round" mask="url(#reveal)"/>
+        <circle id="a" cx="330" cy="420" r="18" fill="#e2231a"/>
+        <circle id="b" cx="820" cy="260" r="26" fill="#e2231a" stroke="#fff" stroke-width="6"/>
+      </svg>
+      <div class="lbl" id="from"></div>
+      <div class="lbl to" id="to"></div>
+      <div id="note"></div>
+      <div id="pol"><video src="footage.mp4" data-start="0" data-duration="6" data-track-index="0" muted playsinline></video><div class="cap"></div><span class="tape"></span></div>
+    </div>
+    <script>
+      // Positions are in frame pixels. The route and coasts are SVG paths in #map: redraw them for
+      // your places, and keep A and B on the route's two ends.
+      const MAP = {
+        lines: ["<mark>1,000 km</mark> north of", "the Arctic Circle."],
+        from: { text: "TROMSØ", x: 160, y: 760 },
+        to: { text: "LONGYEARBYEN", x: 620, y: 520 },
+        note: { text: "2 hrs by plane", x: 470, y: 840, rotate: -12 },
+        polaroid: "me, day one",
+      };
+
+      document.getElementById("head").innerHTML = MAP.lines.map(l => '<span class="l">' + l + "</span>").join("");
+      const place = (id, o) => { const el = document.getElementById(id); el.textContent = o.text; el.style.left = o.x + "px"; el.style.top = o.y + "px"; return el; };
+      place("from", MAP.from); place("to", MAP.to);
+      const note = place("note", MAP.note); note.style.transform = "rotate(" + MAP.note.rotate + "deg)";
+      document.querySelector("#pol .cap").textContent = MAP.polaroid;
+
+      window.__timelines = window.__timelines || {};
+      const tl = gsap.timeline({ paused: true });
+      const draw = document.getElementById("draw"), len = draw.getTotalLength();
+      gsap.set(draw, { strokeDasharray: len, strokeDashoffset: len });
+      gsap.set(["#b", "#to"], { opacity: 0 });
+      gsap.set("#note", { clipPath: "inset(-20% 100% -20% 0)" });
+      gsap.set("#pol", { opacity: 0, y: -60, rotation: 12 });
+      // Highlighter on the number, the route draws A to B, B lands, the marker note, then the polaroid is dropped on.
+      tl.to("mark", { backgroundSize: "100% 100%", duration: 0.35, ease: "power2.out" }, 0.4);
+      tl.to(draw, { strokeDashoffset: 0, duration: 1.1, ease: "power2.inOut" }, 0.8);
+      tl.fromTo("#b", { opacity: 0, scale: 0.4, transformOrigin: "50% 50%" }, { opacity: 1, scale: 1, duration: 0.35, ease: "back.out(2)", immediateRender: false }, 1.85);
+      tl.to("#to", { opacity: 1, duration: 0.01 }, 1.95);
+      tl.to("#note", { clipPath: "inset(-20% 0% -20% 0)", duration: 0.6, ease: "sine.inOut" }, 2.3);
+      tl.to("#pol", { opacity: 1, y: 0, rotation: 5, duration: 0.45, ease: "power3.out" }, 3.0);
+      tl.set({}, {}, 6);
+      window.__timelines["main"] = tl;
+      tl.seek(0);
+    </script>
+  </body>
+</html>

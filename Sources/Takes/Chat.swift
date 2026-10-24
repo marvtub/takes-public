@@ -32,6 +32,12 @@ struct ChatMessage: Codable, Identifiable, Hashable {
     /// The toolID of a line that says a job ended (Jobs.swift): its own tick line, never folded.
     static let jobNote = "takes-job"
     var isJobNote: Bool { role == .tool && toolID == Self.jobNote }
+    /// The toolID of a line for something the user did on a board (ClaudeChat.action): a button,
+    /// a toggle, a refresh and what came of it. Its own line too, never folded (2026-10-19).
+    static let actionNote = "takes-action"
+    var isActionNote: Bool { role == .tool && toolID == Self.actionNote }
+    /// A line of its own in the conversation, not a step of the agent's run.
+    var isOwnLine: Bool { isJobNote || isActionNote }
 
     init(role: Role, text: String, toolID: String? = nil, done: Bool = true) {
         self.role = role; self.text = text; self.toolID = toolID; self.done = done
@@ -70,6 +76,9 @@ struct ChatLog: Codable {
     var agent: String?
     /// Codex's own thread id, which `codex exec resume` takes. Claude Code uses `conversation`.
     var thread: String?
+    /// What the user did on the board since their last message (ClaudeChat.action), oldest first.
+    /// The agent gets them with the next message, so it knows what the user saw (2026-10-19).
+    var actions: [String]?
 }
 
 /// Tokens in Claude's context window, from the usage the CLI reports with each reply.
@@ -231,7 +240,7 @@ enum ChatItem: Identifiable, Hashable {
             run = []
         }
         for m in messages {
-            if m.role == .tool && !m.isJobNote { run.append(m) } else { flush(); items.append(.message(m)) }
+            if m.role == .tool && !m.isOwnLine { run.append(m) } else { flush(); items.append(.message(m)) }
         }
         flush()
         return items
@@ -279,6 +288,8 @@ final class ClaudeChat {
     @ObservationIgnored private var warm: WarmClaude?
     /// Ends a run whose background tasks ended without a new turn (Warm.quiet).
     @ObservationIgnored private var quietEnd: Task<Void, Never>?
+    /// The times of the run, for perf.txt (TurnClock).
+    @ObservationIgnored private var clock: TurnClock?
     /// Whether the last Claude message had a note on what the user looks at (nil: not known, as
     /// after a launch). The note stays in the conversation, so its end needs a note too.
     @ObservationIgnored private var lookNoted: Bool?
@@ -433,6 +444,16 @@ final class ClaudeChat {
     /// readers). 2026-10-03: agents opened a new tab for each post they read and left them open,
     /// so each one now gets exactly one tab, navigates it, and closes it at the end. The last tab
     /// stays (blank): closing it drops the tab group, and the next new tab then opens a window.
+    /// A preview server in the foreground held a chat until its time limit; "Ship it" waited in
+    /// the queue (2026-10-18).
+    nonisolated static let endlessCommands = """
+        A command that does not end on its own (a preview or dev server such as python3 -m \
+        http.server or npm run dev, a watcher, tail -f) runs in the background (Claude Code: Bash \
+        with run_in_background), never in the foreground: a foreground one holds this chat until \
+        its time limit, and what the user sends meanwhile waits in the queue. Stop it when you \
+        are done with it.
+        """
+
     nonisolated static let browserRules = """
         Browser rules, always: only the Claude in Chrome tools. One tab is yours: call \
         tabs_create_mcp once, at your first browser step, write down the tabId it returns and pass \
@@ -465,7 +486,17 @@ final class ClaudeChat {
         // The takes MCP loads its main tools at the start only for Takes' own chats (2026-10-10).
         env["TAKES_CHAT"] = "1"
         if let board { env["TAKES_BOARD"] = board } else { env["TAKES_BOARD"] = nil }
+        // The installed MCP sits in Contents/Resources, so it cannot find the repo's gtm/ next to itself.
+        if let r = Releaser.repo, FileManager.default.fileExists(atPath: r + "/gtm") { env["TAKES_GTM_DIR"] = r + "/gtm" }
         return env
+    }
+
+    /// Public view for a chat's takes server (2026-10-22): session chats and public boards (Styles,
+    /// public plugins) get it; Performance, Comments and the admin plugin boards never do.
+    nonisolated static func publicView(board: String?) -> Bool {
+        guard PublicView.on else { return false }
+        guard let board else { return true }
+        return board == "styles" || Plugins.built.contains { $0.id == board && !Plugins.adminOnly($0) }
     }
 
     /// The library folder, as Library.init finds it.
@@ -699,6 +730,7 @@ final class ClaudeChat {
         generation += 1
         let gen = generation
         running = true
+        clock = TurnClock(agent: agent.rawValue)
         if awake == nil {
             awake = ProcessInfo.processInfo.beginActivity(options: [.userInitiated, .idleSystemSleepDisabled], reason: "Takes is working")
         }
@@ -749,7 +781,8 @@ final class ClaudeChat {
             context = CopilotAsk.context
         } else if let plugin = Self.boardContexts[boardName] {
             context = plugin()
-        } else if let plugin = Plugins.chatPlugin(boardName)?.chatContext {
+        } else if let plugin = Plugins.builtChatPlugin(boardName)?.chatContext {
+            // The build's list (2026-10-22): in Public view a hidden board's chat still gets its own context.
             context = plugin()
         } else if boardName == "styles" {
             context = """
@@ -776,7 +809,8 @@ final class ClaudeChat {
         }
         if agent.adapter.browser, !boardName.hasPrefix("comments") || session != nil { context += "\n\n" + Self.browserRules }
         context += "\n\n" + ChatRefs.howTo
-        if let note = Releaser.agentNote { context += "\n\n" + note }
+        context += "\n\n" + Self.endlessCommands
+        if !PublicView.on, let note = Releaser.agentNote { context += "\n\n" + note }
         if let origin { notes.append(origin) }
         if let recap {
             notes.append("The earlier conversation in this panel could not be resumed. What it showed:\n" + recap)
@@ -789,6 +823,7 @@ final class ClaudeChat {
             }
             lookNoted = looks
         }
+        if !Self.isCompact(text), let done = takeActions() { notes.append(done) }
         var ask = text
         if !notes.isEmpty {
             if agent == .claude {
@@ -809,6 +844,10 @@ final class ClaudeChat {
         // The takes server knows the chat by it (rules seen, jobs). Claude Code sets its own
         // CLAUDE_CODE_SESSION_ID, the same id; pi hands its environment to its MCP servers.
         env["TAKES_CHAT_ID"] = log.conversation
+        // Public view (2026-10-22): the takes server hides the admin tools and text. Admin boards keep
+        // them, so their jobs run on. A flip changes the warm key, so it applies at the next message.
+        turn.publicView = Self.publicView(board: session == nil ? boardName : nil)
+        env[PublicView.envKey] = turn.publicView ? "1" : nil
         let args = agent.adapter.chatArguments(turn)
         turn.started = true  // the key leaves out how the process found the conversation
         let key = canWarm ? Warm.key(exe: claude, args: agent.adapter.chatArguments(turn), env: env, mcp: mcp, folder: Self.folder) : ""
@@ -820,6 +859,7 @@ final class ClaudeChat {
             warm?.timer = nil
             listen(w.process, output: w.output, errors: w.errors, lines: w.lines, gen: gen)
             if Warm.write(Warm.line(ask), to: w.input) {
+                clock?.process = "open"
                 process = w.process
                 pipes = [w.output, w.errors]
                 watch(gen)
@@ -851,6 +891,7 @@ final class ClaudeChat {
         process = p
         pipes = [output, errors]
         if canWarm {
+            clock?.process = "new"
             warm = WarmClaude(process: p, input: input.fileHandleForWriting, output: output, errors: errors, lines: lines, key: key)
             // A failed write: the process is gone, and its end settles the run.
             _ = Warm.write(Warm.line(ask), to: input.fileHandleForWriting)
@@ -1121,6 +1162,7 @@ final class ClaudeChat {
             return
         }
         for line in lines { parser?.consume(line) }
+        clock?.saw(lines)
         if parser?.compacted == true {
             forgetRules()
             parser?.compacted = false
@@ -1185,6 +1227,12 @@ final class ClaudeChat {
         warm?.timer?.cancel()
         warm = nil
         WarmPool.leave(self)
+    }
+
+    /// The agent's process while it is open, so the panel can show the commands it runs.
+    var agentPID: pid_t? {
+        guard let p = process ?? warm?.process, p.isRunning else { return nil }
+        return p.processIdentifier
     }
 
     /// The open process's id, for tests.
@@ -1268,6 +1316,11 @@ final class ClaudeChat {
         if let t = parser.thread { log.thread = t }
         messages = parser.messages
         context = parser.context
+        if let c = clock {
+            let outcome = stopped ? "stopped" : steer != nil ? "steered" : last?.role == .error ? "error" : "ok"
+            Perf.note(c.line(outcome: outcome))
+            clock = nil
+        }
         self.parser = nil
         process = nil
         running = false
@@ -1320,6 +1373,41 @@ final class ClaudeChat {
             case .error: return nil
             }
         }.joined(separator: "\n")
+    }
+
+    /// The user did something on the board (2026-10-19): The user wants every button, toggle and
+    /// refresh visible in the chat, and the agent to know about it, so he can talk about what
+    /// happened. The panel gets a line of its own; the agent gets `agent` (or the line) in front of
+    /// the next message, without a reply now. `running` shows a spinner until the same id is
+    /// updated with the result. A running line is not told to the agent: its result is.
+    @discardableResult
+    func action(_ line: String, agent: String? = nil, update id: UUID? = nil, running: Bool = false, failed: Bool = false,
+                now: Date = Date()) -> UUID {
+        var m = ChatMessage(role: .tool, text: line, toolID: ChatMessage.actionNote, done: !running)
+        m.failed = failed ? true : nil
+        if let id, let i = messages.firstIndex(where: { $0.id == id }) {
+            m.id = id
+            m.at = messages[i].at
+            messages[i] = m
+            if let j = parser?.messages.firstIndex(where: { $0.id == id }) { parser?.messages[j] = m }
+        } else {
+            messages.append(m)
+            if parser != nil { parser?.messages.append(m) }
+        }
+        if !running {
+            let time = now.formatted(date: .omitted, time: .shortened)
+            log.actions = Array(((log.actions ?? []) + ["\(time): \(agent ?? line)"]).suffix(40))
+        }
+        save()
+        return m.id
+    }
+
+    /// What the board actions say to the agent, once; nil when there were none.
+    func takeActions() -> String? {
+        guard let a = log.actions, !a.isEmpty else { return nil }
+        log.actions = nil
+        return "What the user did on this board since their last message (oldest first). They saw each line in the chat:\n"
+            + a.map { "- \($0)" }.joined(separator: "\n")
     }
 
     private func append(_ m: ChatMessage) {
@@ -1727,6 +1815,10 @@ private struct ChatPanel: View {
             header
             Rule()
             messages
+            // A plugin's card under its board chat (TakesPlugin.chatFoot): asked only on a board chat.
+            if chat.session == nil, let foot = Plugins.all.lazy.compactMap({ $0.chatFoot?(chat) }).first {
+                foot.padding(.horizontal, 14).padding(.vertical, 12).transition(.opacity)
+            }
             // Its own view: a typed letter or a dictated word redraws the box, not the panel and
             // its transcript (ChatPanel built 60 times in 10 s while the user dictated; 2026-10-03).
             ChatComposer(chat: chat, target: target, openComments: openComments)
@@ -2073,6 +2165,7 @@ private struct ChatComposer: View {
                 PendingFeedbackChip(store: app.copilot)
             }
             if let session = target.session { JobsRow(session: session) }
+            AgentCommandsRow(pid: chat.agentPID)
             ForEach(Array(chat.queued.enumerated()), id: \.offset) { i, q in
                 QueuedChip(text: CopilotAsk.shown(q), help: "Queued: sent when Takes is done") {
                     if i < chat.queued.count { chat.queued.remove(at: i) }
@@ -2648,6 +2741,8 @@ private struct ChatBubble: View, Equatable {
             ChatReply(text: message.text)
         case .tool where message.isJobNote:
             JobNoteLine(text: message.text)
+        case .tool where message.isActionNote:
+            ActionNoteLine(message: message)
         case .tool:
             StepTimeline(tools: [message], active: false, latest: false, end: nil)
         case .error:
@@ -2670,6 +2765,32 @@ private struct JobNoteLine: View {
             Text(text).font(Theme.sans(12, .medium)).foregroundStyle(Theme.muted)
                 .lineLimit(2)
         }
+    }
+}
+
+/// Something the user did on a board (ClaudeChat.action): a line of its own in the quiet ink,
+/// with a small spinner while it runs and a mark when it did not work.
+struct ActionNoteLine: View {
+    let message: ChatMessage
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 7) {
+            Group {
+                if !message.done {
+                    ProgressView().controlSize(.mini).scaleEffect(0.8)
+                } else {
+                    Image(systemName: message.failed == true ? "exclamationmark.circle" : "smallcircle.filled.circle")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(message.failed == true ? Theme.warn : Theme.faint)
+                }
+            }
+            .frame(width: 12, height: 12)
+            .alignmentGuide(.firstTextBaseline) { $0[VerticalAlignment.center] + 4 }
+            Text(message.text).font(Theme.sans(12, .medium)).foregroundStyle(Theme.muted)
+                .fixedSize(horizontal: false, vertical: true)
+                .textSelection(.enabled)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 

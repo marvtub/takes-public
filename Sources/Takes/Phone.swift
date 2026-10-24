@@ -1122,7 +1122,9 @@ final class PhoneServer: PhoneHandler, @unchecked Sendable {
     /// The boards' chats: "find" or "post" (Comments), "performance". The phone names them
     /// board:comments, board:comments-post and board:performance.
     static func lane(_ id: String?) -> String? {
-        switch id {
+        // Public view (2026-10-22): no Comments or Performance chats, as in the public copy.
+        if PublicView.on, ["board:comments", "board:comments-post", "board:performance"].contains(id ?? "") { return nil }
+        return switch id {
         case "board:comments": "find"
         case "board:comments-post": "post"
         case "board:performance": "performance"
@@ -1328,6 +1330,7 @@ final class PhoneServer: PhoneHandler, @unchecked Sendable {
         let root = app.library.root.standardizedFileURL
         var chats: [(String, ClaudeChat)] = [("board:comments", app.chats.comments), ("board:comments-post", app.chats.commentsPost),
                                               ("board:performance", app.chats.board), ("board:styles", app.chats.styles)]
+        if PublicView.on { chats = [("board:styles", app.chats.styles)] }  // Public view (2026-10-22)
         for c in app.chats.all {
             guard let s = c.session?.standardizedFileURL, s.path.hasPrefix(root.path + "/") else { continue }
             chats.append((String(s.path.dropFirst(root.path.count + 1)), c))
@@ -1358,6 +1361,12 @@ final class PhoneServer: PhoneHandler, @unchecked Sendable {
         if said["notices"] != sig {
             said["notices"] = sig
             broadcast(["type": "notices", "paths": notices])
+        }
+        // Public view (2026-10-22): the phone hides the admin screens too. A new phone hears it at once.
+        let view = PublicView.on ? "1" : "0"
+        if said["view"] != view {
+            said["view"] = view
+            broadcast(["type": "view", "public_view": PublicView.on])
         }
         if -lastBeat.timeIntervalSinceNow > 20 {
             lastBeat = Date()

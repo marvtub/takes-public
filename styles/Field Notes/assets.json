@@ -1,0 +1,22 @@
+{
+  "assets/Motion/captions-v1.mp4": {
+    "added": "2026-10-22",
+    "from": "shipped with Takes",
+    "note": "Torn paper strip captions with highlighter over footage (src/captions)."
+  },
+  "assets/Motion/figure-v1.mp4": {
+    "added": "2026-10-22",
+    "from": "shipped with Takes",
+    "note": "Map page: dashed route A to B, marker note, taped polaroid (src/figure)."
+  },
+  "assets/Motion/lower-third-v1.mp4": {
+    "added": "2026-10-22",
+    "from": "shipped with Takes",
+    "note": "Place tag with coordinates and a red marker note over footage (src/lower-third)."
+  },
+  "assets/Motion/title-card-v1.mp4": {
+    "added": "2026-10-22",
+    "from": "shipped with Takes",
+    "note": "Typewriter title card on field-book paper (src/title-card)."
+  }
+}

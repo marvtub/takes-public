@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=1080, height=1920" />
+    <!-- Clean Studio figure: a warm pastel page, a Fraunces headline with one italic accent word, and
+         two to four soft cards (number + label) that rise in one by one. The speaker stays in a small
+         rounded frame at the bottom right. Put your clip next to this file as footage.mp4 (or set
+         PIP to false), and edit FIG below. -->
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+    <style>
+      @font-face { font-family: "Fraunces"; src: url("../../fonts/Fraunces-Variable.ttf"); font-weight: 100 900; }
+      @font-face { font-family: "Fraunces"; src: url("../../fonts/Fraunces-Italic-Variable.ttf"); font-style: italic; font-weight: 100 900; }
+      @font-face { font-family: "Inter"; src: url("../../fonts/Inter-SemiBold.ttf"); font-weight: 600; }
+      :root { --ink: #1c1c22; --accent: #e2586f; --sky: #7cc4d8; --rose: #e2586f; --mint: #6cc59b; --sun: #f2b526;
+              --serif: "Fraunces", serif; --sans: "Inter", sans-serif; }
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      html, body { width: 1080px; height: 1920px; overflow: hidden; background: #fbd3c4; }
+      #root { position: relative; width: 100%; height: 100%; overflow: hidden;
+              background: linear-gradient(160deg, #fff1c9 0%, #fbd3c4 50%, #f6b9c9 100%); }
+      #title { position: absolute; left: 80px; right: 80px; top: 250px; text-align: center; font-family: var(--serif);
+               font-weight: 600; font-size: 92px; line-height: 1.08; color: var(--ink); font-optical-sizing: auto; }
+      #title i { color: var(--accent); font-weight: 500; }
+      .wd { display: inline-block; }
+      #cards { position: absolute; left: 60px; right: 60px; top: 700px; display: flex; justify-content: center; gap: 34px; }
+      .c { width: 250px; height: 360px; border-radius: 30px; box-shadow: 0 24px 50px rgba(120, 60, 60, 0.25); color: #fff;
+           font-family: var(--serif); font-weight: 600; font-size: 50px; display: flex; flex-direction: column;
+           justify-content: flex-end; padding: 30px; text-shadow: 0 1px 6px rgba(0, 0, 0, 0.12); }
+      .c span { font-family: var(--sans); font-weight: 600; font-size: 28px; opacity: 0.9; margin-bottom: auto; }
+      #pip { position: absolute; right: 80px; bottom: 150px; width: 300px; height: 380px; border-radius: 40px; overflow: hidden;
+             border: 8px solid #fff; box-shadow: 0 20px 40px rgba(0, 0, 0, 0.2); background: #fff; }
+      #pip video { width: 100%; height: 100%; object-fit: cover; object-position: 50% 20%; }
+    </style>
+  </head>
+  <body>
+    <div id="root" data-composition-id="main" data-start="0" data-duration="5" data-width="1080" data-height="1920">
+      <div id="title"></div>
+      <div id="cards"></div>
+      <div id="pip"><video id="footage" src="footage.mp4" data-start="0" data-duration="5" data-track-index="0" muted playsinline></video></div>
+    </div>
+    <script>
+      // Cards: n is the small number, label the word, color one of sky, rose, mint, sun. Tilt the
+      // outer cards a little; lift the middle one. Wrap the accent word of the title in <i>…</i>.
+      const FIG = {
+        title: "Three cards for<br>a <i>calm</i> week",
+        cards: [{ n: "01", label: "Plan", color: "sky", tilt: -6 },
+                { n: "02", label: "Protect", color: "rose", lift: 30 },
+                { n: "03", label: "Review", color: "mint", tilt: 6 }],
+        pip: true,
+      };
+      const AT = { title: 0.25, stagger: 0.08, cards: 1.0, cardGap: 0.22 };
+
+      const title = document.getElementById("title");
+      const words = [];
+      FIG.title.split("<br>").forEach((line, li) => {
+        if (li) title.appendChild(document.createElement("br"));
+        const tmp = document.createElement("div"); tmp.innerHTML = line;
+        tmp.childNodes.forEach(n => {
+          const parts = n.nodeType === 3 ? n.textContent.split(" ") : [n.outerHTML];
+          parts.forEach(w => {
+            if (!w) return;
+            const s = document.createElement("span"); s.className = "wd"; s.innerHTML = w;
+            title.appendChild(document.createTextNode(" ")); title.appendChild(s); words.push(s);
+          });
+        });
+      });
+      const cards = FIG.cards.map(c => {
+        const el = document.createElement("div"); el.className = "c";
+        el.style.background = `var(--${c.color})`;
+        el.innerHTML = "<span></span>"; el.firstChild.textContent = c.n;
+        el.appendChild(document.createTextNode(c.label));
+        document.getElementById("cards").appendChild(el);
+        return { el, rot: c.tilt || 0, y: -(c.lift || 0) };
+      });
+      if (!FIG.pip) document.getElementById("pip").remove();
+
+      window.__timelines = window.__timelines || {};
+      const tl = gsap.timeline({ paused: true });
+      // The page cuts in whole. The title words rise, then each card rises and settles into its tilt.
+      gsap.set(words, { opacity: 0, y: 24 });
+      words.forEach((s, i) => tl.to(s, { opacity: 1, y: 0, duration: 0.45, ease: "power3.out" }, AT.title + i * AT.stagger));
+      cards.forEach((c, i) => {
+        gsap.set(c.el, { opacity: 0, y: c.y + 80, rotate: c.rot * 2 });
+        tl.to(c.el, { opacity: 1, y: c.y, rotate: c.rot, duration: 0.6, ease: "power3.out" }, AT.cards + i * AT.cardGap);
+      });
+      tl.set({}, {}, 5);
+      window.__timelines["main"] = tl;
+      tl.seek(0);
+    </script>
+  </body>
+</html>

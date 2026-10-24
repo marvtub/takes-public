@@ -565,7 +565,9 @@ private struct PanelPresenter: ViewModifier {
 
     func body(content: Content) -> some View {
         content
-            .background(MenuAnchor(view: anchor))
+            // Snapshots (revealAtOnce) leave the anchor out: ImageRenderer draws an AppKit view as a
+            // yellow box, which showed at the corners of every eval card.
+            .background { if !revealAtOnce { MenuAnchor(view: anchor) } }
             .onChange(of: isPresented, initial: true) { _, on in
                 if on {
                     open(anchor) { isPresented = false }
@@ -699,7 +701,10 @@ final class ContextMenus {
         var best: (MenuRegionView, CGFloat)?
         for v in regions.allObjects where v.window === w && !v.isHiddenOrHasHiddenAncestor && v.content != nil {
             let pt = v.convert(e.locationInWindow, from: nil)
-            guard v.visibleRect.contains(pt) else { continue }
+            // In a scroll view visibleRect is the whole clip view, not the view's own frame, so
+            // every row of a list claimed every point and the shortest won: a right-click on a
+            // session opened its project's menu, and the user trashed the project (2026-10-22).
+            guard v.bounds.contains(pt), v.visibleRect.contains(pt) else { continue }
             let area = v.bounds.width * v.bounds.height
             if best == nil || area < best!.1 { best = (v, area) }
         }

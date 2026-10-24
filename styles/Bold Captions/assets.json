@@ -1,0 +1,22 @@
+{
+  "assets/Motion/captions-v1.mp4": {
+    "added": "2026-10-22",
+    "from": "shipped with Takes",
+    "note": "Stroked caps captions over footage, words pop in, key words coloured (src/captions)."
+  },
+  "assets/Motion/figure-v1.mp4": {
+    "added": "2026-10-22",
+    "from": "shipped with Takes",
+    "note": "Figure on a navy card: label box, three bars, a punchline (src/figure)."
+  },
+  "assets/Motion/lower-third-v1.mp4": {
+    "added": "2026-10-22",
+    "from": "shipped with Takes",
+    "note": "Name in a white label box and a yellow tag, over footage (src/lower-third)."
+  },
+  "assets/Motion/title-card-v1.mp4": {
+    "added": "2026-10-22",
+    "from": "shipped with Takes",
+    "note": "White label box title at the top, over footage (src/title-card)."
+  }
+}

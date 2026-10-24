@@ -68,6 +68,15 @@ struct ReleaseTests {
                               "Voiceover reads the script into a versioned wav with the voice noted"])
     }
 
+    @Test func unapprovedNotesStopTheReleaseBeforeTheTests() {
+        var r = feed(["▸ Getting the latest main", "▸ Checking the release notes", "Release notes not ready:",
+                      "- The notes are not approved (approved: no)."])
+        r.end(ok: false, at: Self.t0.addingTimeInterval(30))
+        #expect(r.failedStep?.title == "Checking the release notes")
+        #expect(r.failure.title == "The release notes are not approved yet")
+        #expect(r.failure.items.count == 1 && r.failure.items[0].hasPrefix("The notes are not approved"))
+    }
+
     @Test func swiftTestFailuresAndBuildErrorsReadPlainly() {
         var r = feed(["▸ Testing the copy", "✘ Test theNextArticleUsesALoadedPage() failed after 3.2 seconds with 1 issue.",
                       "✘ Test theNextArticleUsesALoadedPage() recorded an issue at A.swift:3:1"])

@@ -120,7 +120,7 @@ extension ChatRunTests {
             flow.show()
             flow.go(-1); #expect(flow.page == 0)
             flow.go(1); #expect(flow.page == 1 && flow.forward)
-            flow.go(2); flow.go(3); #expect(flow.page == 2)
+            flow.go(3); flow.go(4); #expect(flow.page == 3)
             flow.go(1); #expect(flow.page == 1 && !flow.forward)
             flow.show(); #expect(flow.page == 0, "the menu item starts it from the first page")
         }
@@ -152,11 +152,18 @@ extension ChatRunTests {
             ClaudeChat.claudeOverride = fake.path
             SessionMode.set(.post)
             flow.show(); flow.go(2)
+            flow.postOn = .shorts
 
             flow.write("   ", app: app)
             #expect(flow.shown && app.library.current == nil, "an empty idea does nothing")
 
+            // Takes writes while the look is picked: the welcome stays, the session is there.
             flow.write("  How I plan my week ", app: app)
+            #expect(flow.shown)
+            flow.write("How I plan my week", app: app)
+            #expect(app.library.sessions.count == 1, "the same idea twice makes one session")
+            flow.look = "Cinematic"
+            flow.done(app: app)
             #expect(!flow.shown)
             #expect(UserDefaults.standard.bool(forKey: Onboarding.doneKey))
             #expect(app.library.projects.map(\.name) == ["Inbox"])
@@ -167,20 +174,65 @@ extension ChatRunTests {
             #expect(UserDefaults.standard.string(forKey: "rightTab") == SessionMode.write.rawValue, "the script shows next to the chat")
             #expect(app.chats.open && app.chats.docked)
             let chat = app.chats.chat(doc.url)
-            #expect(chat.messages.first { $0.role == .user }?.text == Onboarding.ask("How I plan my week"))
+            #expect(chat.messages.first { $0.role == .user }?.text == Onboarding.ask("How I plan my week", on: .shorts))
+            #expect(Onboarding.ask("x", on: .shorts).contains("9:16"), "where it goes sets the shape and length")
+            let project = doc.url.deletingLastPathComponent()
+            let picked = StyleLib.json(StyleLib.project(project).appending(path: "project.json"))["style"] as? String
+            #expect(picked == "Cinematic", "the look goes to the project, so every video in it uses it")
             let end = Date().addingTimeInterval(10)
             while chat.running && Date() < end { try await Task.sleep(for: .milliseconds(50)) }
             #expect(!chat.running)
             #expect(chat.messages.contains { $0.role == .claude && $0.text == "Your script is in the session." })
         }
 
-        @Test func writeWaitsForSetup() throws {
+        /// Before setup is done the session is made and named; the ask waits and goes once the agent is ready.
+        @Test func writeWaitsForSetup() async throws {
             defer { cleanup() }
             let app = try fresh()
             setup.agent = .missing; setup.signedIn = .missing
             flow.show(); flow.go(2)
             flow.write("A tool I use every day", app: app)
-            #expect(flow.shown && app.library.current == nil)
+            let doc = try #require(app.library.sessions.first)
+            #expect(doc.title == "A tool I use every day")
+            let chat = app.chats.chat(doc.url)
+            #expect(!chat.messages.contains { $0.role == .user })
+            ClaudeChat.claudeOverride = "/usr/bin/false"
+            ready()
+            let end = Date().addingTimeInterval(4)
+            while !chat.messages.contains(where: { $0.role == .user }) && Date() < end { try await Task.sleep(for: .milliseconds(100)) }
+            #expect(chat.messages.first { $0.role == .user }?.text == Onboarding.ask("A tool I use every day", on: flow.postOn))
+        }
+
+        @Test func suggestionsReadTheAgentsLines() {
+            let got = Onboarding.parse("""
+            Here are three:
+            1. The one question I ask every new client | story | Easy to say on camera
+            - 3 tools that save my studio 5 hours | LIST | Good for Shorts
+            The biggest mistake of my first year | LESSON | LinkedIn likes these
+            A fourth one | LIST | too many
+            """)
+            #expect(got.map(\.title) == ["The one question I ask every new client", "3 tools that save my studio 5 hours",
+                                          "The biggest mistake of my first year"])
+            #expect(got.map(\.kind) == ["STORY", "LIST", "LESSON"])
+        }
+
+        /// "Your own": Done hands the dropped files to the Styles chat and the board's Making card.
+        @Test func yourOwnLookGoesToTheStylesChat() throws {
+            defer { cleanup(); UserDefaults.standard.removeObject(forKey: "styleMakingSince") }
+            let app = try fresh()
+            // Never the real Styles chat: its history is one file for the whole Mac.
+            var sent: [String] = []
+            Onboarding.askStyles = { _, text in sent.append(text) }
+            defer { Onboarding.askStyles = { app, text in app.chats.styles.send(text, title: "Styles", onStage: nil) } }
+            ready()
+            flow.show(); flow.go(3)
+            flow.look = nil
+            flow.ownFiles = [URL(fileURLWithPath: "/tmp/a.mov")]
+            flow.ownWords = "yellow words"
+            flow.done(app: app)
+            #expect(!flow.shown)
+            #expect(sent == [StylesBoard.makeAsk("/tmp/a.mov yellow words")])
+            #expect(UserDefaults.standard.double(forKey: "styleMakingSince") > 0)
         }
 
         @Test func recordWithoutAScriptOpensAnEmptySessionOnRecord() throws {

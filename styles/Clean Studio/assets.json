@@ -1,0 +1,22 @@
+{
+  "assets/Motion/captions-v1.mp4": {
+    "added": "2026-10-22",
+    "from": "shipped with Takes",
+    "note": "Karaoke caption pill over footage (src/captions)."
+  },
+  "assets/Motion/figure-v1.mp4": {
+    "added": "2026-10-22",
+    "from": "shipped with Takes",
+    "note": "Pastel page: headline and three cards, speaker in a small frame (src/figure)."
+  },
+  "assets/Motion/lower-third-v1.mp4": {
+    "added": "2026-10-22",
+    "from": "shipped with Takes",
+    "note": "Name panel over footage (src/lower-third)."
+  },
+  "assets/Motion/title-card-v1.mp4": {
+    "added": "2026-10-22",
+    "from": "shipped with Takes",
+    "note": "Hook on a white rounded panel over footage (src/title-card)."
+  }
+}

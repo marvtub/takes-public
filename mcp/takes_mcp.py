@@ -1458,6 +1458,11 @@ CHECKS = {
     "pauses": "No silence longer than {max} seconds (default 0.4), quieter than {floor} dB (default -35).",
     "length": "At most {max} seconds long.",
 }
+# Code checks on page drafts (2026-10-20, factory evals step 5): a site-page rule can carry one. Filled in the admin
+# build (PAGE_CHECKS in the KPIs section); check_draft runs them, set_rule and learn_from_change accept them.
+PAGE_CHECKS = {}
+# Functions run before get_rules reads the rules (the admin build moves the user's draft notes into rules there).
+RULE_SOURCES = []
 # The old "post" area at the split: these two are about LinkedIn ("see more", the first comment).
 SPLIT_POST = {"post-1": "post-linkedin", "post-2": "post-linkedin"}
 
@@ -1771,6 +1776,8 @@ def rule_view(r):
         v["by_user"] = True
     if r.get("merge"):
         v["waiting_merge"] = {"into": r["merge"].get("into"), "text": r["merge"].get("text")}
+    if r.get("backtest"):
+        v["backtest"] = r["backtest"]
     return v
 
 
@@ -1784,15 +1791,30 @@ def comment_ref(s, cid):
     return "%s#%s" % (os.path.relpath(s, root()), cid)
 
 
-def clean_check(c):
+def clean_check(c, area=None):
+    """A rule's check: an edit check (CHECKS), or on a site-page rule a page check (PAGE_CHECKS, admin build)."""
     if not c:
         return None
-    if not isinstance(c, dict) or c.get("kind") not in CHECKS:
-        raise ValueError("check.kind is one of: %s." % ", ".join(sorted(CHECKS)))
+    kinds = PAGE_CHECKS if area == "site-page" and PAGE_CHECKS else CHECKS
+    if not isinstance(c, dict) or c.get("kind") not in kinds:
+        raise ValueError("check.kind is one of: %s." % ", ".join(sorted(kinds)))
     out = {"kind": c["kind"]}
     for k in ("target", "tolerance", "max", "floor"):
         if c.get(k) is not None:
             out[k] = float(c[k])
+    if kinds is PAGE_CHECKS:
+        phrases = c.get("phrases")
+        if phrases is not None:
+            if isinstance(phrases, str):
+                phrases = [phrases]
+            phrases = [" ".join(str(x).split()) for x in phrases if " ".join(str(x).split())][:20]
+            if not phrases or any(len(x) > 80 for x in phrases):
+                raise ValueError("check.phrases is a list of 1 to 20 phrases, each at most 80 characters.")
+            out["phrases"] = phrases
+        if c["kind"] == "banned" and not out.get("phrases"):
+            raise ValueError("A banned check needs phrases: the words the user struck out.")
+        if c["kind"] != "banned" and out.get("max") is not None and out["max"] < 1:
+            raise ValueError("check.max is at least 1.")
     return out
 
 
@@ -1860,7 +1882,7 @@ def new_rule(d, area, text, check=None, by="takes", ref=None, details=None, merg
          "from": [ref] if ref else [], "repeats": []}
     if details:
         r["details"] = details
-    c = clean_check(check)
+    c = clean_check(check, area)
     if c:
         r["check"] = c
     if merge:
@@ -1875,6 +1897,8 @@ def new_rule(d, area, text, check=None, by="takes", ref=None, details=None, merg
 
 def t_get_rules(a):
     """The rules learned from the user's comments, the ones that are on."""
+    for f in RULE_SOURCES:
+        f()
     d = read_lessons()
     areas = a.get("area")
     if isinstance(areas, str):
@@ -1937,6 +1961,7 @@ def t_set_rule(a):
         d["rules"].remove(r)
         write_lessons(d)
         return {"removed": r["id"]}
+    was = (r.get("text"), r.get("check"))
     if "text" in a:
         text = " ".join((a["text"] or "").split())
         if not text or len(text) > RULE_MAX:
@@ -1949,13 +1974,17 @@ def t_set_rule(a):
         else:
             r.pop("details", None)
     if "check" in a:
-        c = clean_check(a["check"])
+        c = clean_check(a["check"], r["area"])
         if c:
             r["check"] = c
         else:
             r.pop("check", None)
     if "on" in a:
         r["on"] = bool(a["on"])
+    # 2026-10-20 (factory evals step 4): a backtest is about the rule as it was tested: a new check, or new text on a
+    # rule the judge tests, needs learn_from_change again. Until then the rule only advises.
+    if r.get("backtest") and (r.get("check") != was[1] or (not r.get("check") and r.get("text") != was[0])):
+        r.pop("backtest")
     r["changed"] = now_iso()
     write_lessons(d)
     return {"changed": rule_view(r)}
@@ -2484,12 +2513,19 @@ def _edges(e, sv, a, b, off):
     return lo, hi, good
 
 
-def grey_frames(path, start, dur, rate, size=(32, 18)):
-    """Small grey frames of path from start for dur seconds at rate per second: a list of byte strings."""
+# For a grab that runs beside others in a thread pool: one decoder thread. By default ffmpeg starts one
+# per core and decodes frames ahead it never uses; one thread used 40-50% less CPU (2026-10-22).
+ONE_THREAD = ["-threads", "1", "-filter_threads", "1", "-filter_complex_threads", "1"]
+
+
+def grey_frames(path, start, dur, rate, size=(32, 18), one_thread=False):
+    """Small grey frames of path from start for dur seconds at rate per second: a list of byte strings.
+    one_thread: ONE_THREAD, for a call that runs in a thread pool."""
     w, h = size
-    r = subprocess.run([need_ffmpeg(), "-v", "error", "-ss", "%.3f" % max(0.0, start), "-i", path,
-                        "-t", "%.3f" % dur, "-an", "-vf", "fps=%g,scale=%d:%d,format=gray" % (rate, w, h),
-                        "-f", "rawvideo", "-"], capture_output=True, timeout=120)
+    r = subprocess.run([need_ffmpeg(), "-v", "error"] + (ONE_THREAD if one_thread else [])
+                       + ["-ss", "%.3f" % max(0.0, start), "-i", path, "-t", "%.3f" % dur, "-an",
+                          "-vf", "fps=%g,scale=%d:%d,format=gray" % (rate, w, h), "-f", "rawvideo", "-"],
+                       capture_output=True, timeout=120)
     raw = r.stdout
     return [raw[i:i + w * h] for i in range(0, len(raw) - w * h + 1, w * h)]
 
@@ -2525,8 +2561,9 @@ def frame_stats(path, t, hdr=False, crop=None, size=None):
     graph = ("[0:v]%s%s%s,format=yuv420p,split[a][b];[a]signalstats,%smetadata=print:file=%s[m];"
              "[b]scale=64:36,format=gray[g]" % (tone, cut, scale, blur, meta.replace("\\", "/").replace(":", "\\:")))
     try:
-        r = subprocess.run([need_ffmpeg(), "-v", "error", "-ss", "%.3f" % max(0.0, t), "-i", path, "-frames:v", "1",
-                            "-filter_complex", graph, "-map", "[m]", "-f", "null", os.devnull,
+        # ONE_THREAD: chk_picture_drift runs four of these at once.
+        r = subprocess.run([need_ffmpeg(), "-v", "error"] + ONE_THREAD + ["-ss", "%.3f" % max(0.0, t), "-i", path,
+                            "-frames:v", "1", "-filter_complex", graph, "-map", "[m]", "-f", "null", os.devnull,
                             "-map", "[g]", "-frames:v", "1", "-f", "rawvideo", "-"], capture_output=True, timeout=60)
         text = read_text(meta) if os.path.exists(meta) else ""
     finally:
@@ -3075,79 +3112,122 @@ def clamp_region(r, size):
 
 
 REGION_PX = 240.0  # find_region: the take's long side in pixels for the search
+REGION_COARSE_PX = 80.0  # find_region's first pass: every size and place on a small frame, then 240 px near the best
 
 
 def find_region(edit, te, take, ts, edit_size, take_size):
     """(x, y, w, h in take pixels, correlation): where the edit's frame at te sits in the take's frame at ts.
     A reframe (a 9:16 cut of a 16:9 take, a punch-in) is a crop of the take, scaled: small grey frames,
-    every crop size from the full frame down to half of it, every place, the best correlation."""
+    every crop size from the full frame down to half of it, every place, the best correlation.
+    Every place at 240 px in pure Python took 5 s a check (2026-10-22), so a first pass looks at every
+    size and place on an 80 px frame, and 240 px looks only around the sizes and places that pass found."""
     import operator
     (ew, eh), (tw, th) = edit_size, take_size
-    k = REGION_PX / max(tw, th)
-    sw, sh = max(8, int(round(tw * k))), max(8, int(round(th * k)))
-    raw = grey_frames(take, ts, 0.25, 4, (sw, sh))
-    if not raw:
-        return None, 0.0
-    T = [list(raw[0][r * sw:(r + 1) * sw]) for r in range(sh)]
-    I1 = [[0.0] * (sw + 1) for _ in range(sh + 1)]
-    I2 = [[0.0] * (sw + 1) for _ in range(sh + 1)]
-    for r in range(sh):
-        a1 = a2 = 0.0
-        for c in range(sw):
-            v = T[r][c]
-            a1 += v
-            a2 += v * v
-            I1[r + 1][c + 1] = I1[r][c + 1] + a1
-            I2[r + 1][c + 1] = I2[r][c + 1] + a2
     a = float(ew) / eh
     w0, h0 = (th * a, float(th)) if a <= float(tw) / th else (float(tw), tw / a)
-    mul, edits = operator.mul, {}
+    mul = operator.mul
 
-    def score(f, x, y):
-        cw, ch = edits[f][0]
-        n = cw * ch
-        s1 = I1[y + ch][x + cw] - I1[y][x + cw] - I1[y + ch][x] + I1[y][x]
-        s2 = I2[y + ch][x + cw] - I2[y][x + cw] - I2[y + ch][x] + I2[y][x]
-        var = s2 - s1 * s1 / n
-        E, en = edits[f][1], edits[f][2]
-        if var <= 1e-6 or en <= 1e-6:
-            return -1.0
-        return sum(sum(map(mul, E[r], T[y + r][x:x + cw])) for r in range(ch)) / math.sqrt(var * en)
+    def level(px):
+        """The search at one size of the take: its long side px. None when the take gives no frame."""
+        k = px / max(tw, th)
+        sw, sh = max(8, int(round(tw * k))), max(8, int(round(th * k)))
+        raw = grey_frames(take, ts, 0.25, 4, (sw, sh))
+        if not raw:
+            return None
+        T = [list(raw[0][r * sw:(r + 1) * sw]) for r in range(sh)]
+        I1 = [[0.0] * (sw + 1) for _ in range(sh + 1)]
+        I2 = [[0.0] * (sw + 1) for _ in range(sh + 1)]
+        for r in range(sh):
+            a1 = a2 = 0.0
+            for c in range(sw):
+                v = T[r][c]
+                a1 += v
+                a2 += v * v
+                I1[r + 1][c + 1] = I1[r][c + 1] + a1
+                I2[r + 1][c + 1] = I2[r][c + 1] + a2
+        edits = {}
 
-    def prep(f):
-        """The edit's frame at the size of a crop of f of the take, mean taken off; None when too small."""
-        if f not in edits:
-            cw, ch = int(round(w0 * f * k)), int(round(h0 * f * k))
-            fr = grey_frames(edit, te, 0.25, 4, (cw, ch)) if 12 <= cw <= sw and 12 <= ch <= sh else None
-            if fr:
-                m = sum(fr[0]) / float(cw * ch)
-                E = [[fr[0][r * cw + c] - m for c in range(cw)] for r in range(ch)]
-                edits[f] = ((cw, ch), E, sum(v * v for row in E for v in row))
-            else:
-                edits[f] = None
-        return edits[f]
+        def score(f, x, y):
+            cw, ch = edits[f][0]
+            n = cw * ch
+            s1 = I1[y + ch][x + cw] - I1[y][x + cw] - I1[y + ch][x] + I1[y][x]
+            s2 = I2[y + ch][x + cw] - I2[y][x + cw] - I2[y + ch][x] + I2[y][x]
+            var = s2 - s1 * s1 / n
+            E, en = edits[f][1], edits[f][2]
+            if var <= 1e-6 or en <= 1e-6:
+                return -1.0
+            return sum(sum(map(mul, E[r], T[y + r][x:x + cw])) for r in range(ch)) / math.sqrt(var * en)
 
-    def places(f, xs=None, ys=None, step=2):
-        if not prep(f):
-            return []
-        cw, ch = edits[f][0]
-        xs = xs or range(0, sw - cw + 1, step)
-        ys = ys or range(0, sh - ch + 1, step)
-        return [(score(f, x, y), f, x, y) for x in xs if 0 <= x <= sw - cw for y in ys if 0 <= y <= sh - ch]
-    found = []
+        def prep(f):
+            """The edit's frame at the size of a crop of f of the take, mean taken off; None when too small."""
+            if f not in edits:
+                cw, ch = int(round(w0 * f * k)), int(round(h0 * f * k))
+                fr = grey_frames(edit, te, 0.25, 4, (cw, ch)) if 12 <= cw <= sw and 12 <= ch <= sh else None
+                if fr:
+                    m = sum(fr[0]) / float(cw * ch)
+                    E = [[fr[0][r * cw + c] - m for c in range(cw)] for r in range(ch)]
+                    edits[f] = ((cw, ch), E, sum(v * v for row in E for v in row))
+                else:
+                    edits[f] = None
+            return edits[f]
+
+        def places(f, xs=None, ys=None, step=1):
+            if not prep(f):
+                return []
+            cw, ch = edits[f][0]
+            xs = xs or range(0, sw - cw + 1, step)
+            ys = ys or range(0, sh - ch + 1, step)
+            return [(score(f, x, y), f, x, y) for x in xs if 0 <= x <= sw - cw for y in ys if 0 <= y <= sh - ch]
+
+        def near(f, mx, my, r):
+            """Every place within r pixels of the crop of f whose middle is at (mx, my)."""
+            if not (0.45 <= f <= 1.0 and prep(f)):
+                return []
+            x0, y0 = int(round(mx - edits[f][0][0] / 2.0)), int(round(my - edits[f][0][1] / 2.0))
+            return places(f, range(x0 - r, x0 + r + 1), range(y0 - r, y0 + r + 1))
+
+        def middle(v):
+            _, f, x, y = v
+            return (x + edits[f][0][0] / 2.0) / k, (y + edits[f][0][1] / 2.0) / k
+        return {"k": k, "places": places, "near": near, "middle": middle}
+
+    coarse, fine = level(REGION_COARSE_PX), level(REGION_PX)
+    if coarse is None or fine is None:
+        return None, 0.0
+
+    def again(v, r=4):
+        """A place found at 80 px, looked at again at 240 px: one pixel there is three here."""
+        mx, my = coarse["middle"](v)
+        return fine["near"](v[1], mx * fine["k"], my * fine["k"], r)
+    first, found = [], []
     for f in (1.0, 0.9, 0.8, 0.7, 0.6, 0.5):
-        found += places(f)
-        if f == 1.0 and found and max(found)[0] >= 0.99:
-            break  # the whole frame, or a full-height cut of it: the usual edit
+        here = coarse["places"](f)
+        first += here
+        if f == 1.0 and here:
+            found += again(max(here))
+            if found and max(found)[0] >= 0.99:
+                break  # the whole frame, or a full-height cut of it: the usual edit
+    if not first:
+        return None, 0.0
+    # The best place of the three best sizes, near the best of all, at 240 px too: a still frame
+    # matches its own middle as well, so the bigger crop must get its look.
+    if not (found and max(found)[0] >= 0.99):
+        best = {}
+        for v in first:
+            if v[0] > best.get(v[1], (-2.0,))[0]:
+                best[v[1]] = v
+        top = max(first)[0]
+        for v in sorted(best.values(), reverse=True)[:3]:
+            if v[0] >= top - 0.05 and v[1] != 1.0:
+                found += again(v)
     if not found:
         return None, 0.0
+    k = fine["k"]
     for step in (0.05, 0.025):  # finer: the sizes between two steps around the same middle, every pixel
-        _, bf, bx, by = max(found)
-        mx, my = bx + edits[bf][0][0] / 2.0, by + edits[bf][0][1] / 2.0
+        mx, my = fine["middle"](max(found))
+        bf = max(found)[1]
         for f in (round(bf - step, 3), bf, round(bf + step, 3)):
-            if 0.45 <= f <= 1.0 and prep(f):
-                x0, y0 = int(round(mx - edits[f][0][0] / 2.0)), int(round(my - edits[f][0][1] / 2.0))
-                found += places(f, range(x0 - 3, x0 + 4), range(y0 - 3, y0 + 4), 1)
+            found += fine["near"](f, mx * k, my * k, 3)
     top = max(found)
     # The biggest crop that matches as well wins: a still frame matches its own middle too.
     sc, f, x, y = max((v for v in found if v[0] >= top[0] - 0.005), key=lambda v: (v[1], v[0]))
@@ -3301,11 +3381,16 @@ def framing_samples(path, times, size):
     tmp = tempfile.mkdtemp(prefix="takes-faces-")
     try:
         def grab(t):
+            """The frame at t as a PNG for takes-faces and as grey bytes, from one ffmpeg: two took twice the
+            CPU, and the grey one's 0.04 s window at 25 fps found no frame at some times (2026-10-22)."""
             png = os.path.join(tmp, "%.2f.png" % t)
-            subprocess.run([need_ffmpeg(), "-v", "error", "-y", "-ss", "%.3f" % t, "-i", path, "-frames:v", "1",
-                            "-an", "-vf", "scale=640:-2", png], capture_output=True, timeout=60)
-            g = grey_frames(path, t, 0.04, 25, (w, h))[:1]
-            return t, png, (g[0] if g else None)
+            r = subprocess.run([need_ffmpeg(), "-v", "error", "-y"] + ONE_THREAD + [
+                "-ss", "%.3f" % t, "-i", path, "-an", "-filter_complex",
+                "[0:v]split[a][b];[a]scale=640:-2[p];[b]scale=%d:%d,format=gray[g]" % (w, h),
+                "-map", "[p]", "-frames:v", "1", png, "-map", "[g]", "-frames:v", "1", "-f", "rawvideo", "-"],
+                capture_output=True, timeout=60)
+            g = r.stdout[:w * h]
+            return t, png, (g if len(g) == w * h else None)
         with concurrent.futures.ThreadPoolExecutor(4) as ex:
             got = [x for x in ex.map(grab, times) if x[2] and os.path.exists(x[1])]
         boxes = face_boxes([png for _, png, _ in got])
@@ -3794,7 +3879,7 @@ def t_check_edit(a):
     review = start_review(s, path, watch)
     entry = check_file(s, rel, path, a.get("source"), lineage_rel(rec) if rec and rel.startswith(RENDERS + os.sep) else None)
     results = entry["results"]
-    rules = [r for r in read_lessons()["rules"] if r.get("on", True) and r.get("check")]
+    rules = [r for r in read_lessons()["rules"] if r.get("on", True) and (r.get("check") or {}).get("kind") in CHECKS]
     failed = [x for x in results if x["pass"] is False]
     idle = [x for x in results if x["pass"] is None]
     if failed:
@@ -3996,7 +4081,7 @@ def check_file(s, rel, path, source=None, as_rel=None):
     """Every check of one file, saved in checks.json. as_rel: the edits/ path whose line of versions the
     regression check reads (a render of render_edit is not in edits/ yet)."""
     results, ctx = run_builtin(s, rel, path, source, as_rel)
-    rules = [r for r in read_lessons()["rules"] if r.get("on", True) and r.get("check")]
+    rules = [r for r in read_lessons()["rules"] if r.get("on", True) and (r.get("check") or {}).get("kind") in CHECKS]
     for r in rules:
         try:
             res = run_check(path, r["check"])
@@ -8376,14 +8461,17 @@ def idea_thumb_state(idea_id):
     return state
 
 
-def gemini_text(system, ask):
-    """One short text answer from Gemini."""
+def gemini_text(system, ask, temperature=0.7, images=None):
+    """One short text answer from Gemini. A judge asks at temperature 0, so the same draft gets the same verdict.
+    images: PNG bytes sent before the text (the page judge's screenshots)."""
+    import base64
     import urllib.request
     key = gemini_key()
     if not key:
         raise ValueError("No Gemini key.")
-    body = {"contents": [{"parts": [{"text": ask}]}], "system_instruction": {"parts": [{"text": system}]},
-            "generationConfig": {"temperature": 0.7}}
+    pics = [{"inline_data": {"mime_type": "image/png", "data": base64.b64encode(b).decode()}} for b in images or []]
+    body = {"contents": [{"parts": pics + [{"text": ask}]}], "system_instruction": {"parts": [{"text": system}]},
+            "generationConfig": {"temperature": temperature}}
     req = urllib.request.Request("https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent" % DESCRIBE_MODEL,
                                  method="POST", data=json.dumps(body).encode(),
                                  headers={"x-goog-api-key": key, "Content-Type": "application/json"})
@@ -8551,6 +8639,265 @@ def t_update_idea(a):
     return idea_out(i)
 
 
+
+
+
+
+
+
+
+
+
+SFX_TOOLS = {"sfx_sounds", "make_sfx", "design_sfx"}
+SFX_RECIPES = {}  # recipe -> its default target, read once from earshot forge --list
+
+
+def sfx_python():
+    if os.environ.get("TAKES_EARSHOT"):
+        return os.environ["TAKES_EARSHOT"]
+    return next((p for p in SFX_PYS if os.path.exists(p)), SFX_PYS[0])
+
+
+def sfx_on():
+    """Plugins › Sound FX is on and earshot is installed."""
+    if not os.path.exists(sfx_python()):
+        return False
+    try:
+        off = subprocess.run(["defaults", "read", "de.marvinaziz.takes", "pluginsRemoved"],
+                             capture_output=True, text=True, timeout=5).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        off = ""
+    return "sfx" not in [x.strip() for x in off.split(",")]
+
+
+def sfx_need():
+    if not os.path.exists(sfx_python()):
+        raise ValueError("Sound FX is not installed. Ask the user to press Install in Takes (Plugins › Sound FX); "
+                         "it takes about a minute.")
+    if not sfx_on():
+        raise ValueError("Sound FX is off in Takes (Plugins › Sound FX). Ask the user to turn it on.")
+
+
+def sfx_env():
+    env = dict(os.environ, EARSHOT_OFFLINE="1", HF_HUB_OFFLINE="1", TRANSFORMERS_OFFLINE="1",
+               PYTHONWARNINGS="ignore")
+    if sfx_python().startswith(SFX_DIR + os.sep):
+        env.setdefault("EARSHOT_HOME", os.path.join(SFX_DIR, "home"))  # its model cache, where the card fetched it
+    return env
+
+
+def sfx_can_design():
+    """Sound design needs torch, the second install on the Sound FX card; the bank runs without it."""
+    lib = os.path.join(os.path.dirname(os.path.dirname(sfx_python())), "lib")
+    try:
+        return any(os.path.isdir(os.path.join(lib, v, "site-packages", "torch")) for v in os.listdir(lib))
+    except OSError:
+        return False
+
+
+def sfx_run(args, timeout=120):
+    """earshot <args> --json in its venv: the parsed JSON, or an error with its last line."""
+    r = subprocess.run([sfx_python(), "-m", "earshot"] + args + ["--json"], capture_output=True, text=True,
+                       timeout=timeout, env=sfx_env())
+    if r.returncode != 0:
+        err = [x for x in (r.stderr or "").splitlines() if x.strip()]
+        raise ValueError("earshot: %s" % (err[-1] if err else "it ended with code %d" % r.returncode))
+    return json.loads(r.stdout)
+
+
+SFX_BANK = []
+
+
+def sfx_bank():
+    if not SFX_BANK:
+        SFX_BANK.extend(sfx_run(["sfx", "list"])["sounds"])
+    return SFX_BANK
+
+
+def sfx_recipes():
+    if not SFX_RECIPES:
+        r = subprocess.run([sfx_python(), "-m", "earshot", "forge", "--list"], capture_output=True, text=True,
+                           timeout=60, env=sfx_env())
+        for line in r.stdout.splitlines():
+            m = re.match(r"\s+(\w+): (.+?)(?:\s+\[refset [\w ]+\])?$", line)
+            if m:
+                SFX_RECIPES[m.group(1)] = m.group(2)
+    return SFX_RECIPES
+
+
+def sfx_row(x):
+    pitch = (x.get("knobs") or {}).get("pitch")
+    return {"id": x["id"], "seconds": round(x["dur_s"], 3), "peak_s": round(x["peak_s"], 3),
+            "kinds": x.get("kinds") or [], "what": x.get("notes") or "",
+            "from": "a real recording, as code" if x.get("type") == "fit" else "made in code",
+            "pitch": pitch.get("note") if isinstance(pitch, dict) else None,
+            "apex": bool((x.get("knobs") or {}).get("apex"))}
+
+
+def t_sfx_sounds(a):
+    sfx_need()
+    q = (a.get("query") or "").lower().split()
+    rows = []
+    for x in sfx_bank():
+        hay = " ".join([x["id"], x.get("notes") or ""] + (x.get("kinds") or [])).lower()
+        if all(w in hay for w in q):
+            rows.append(sfx_row(x))
+    return {"sounds": rows, "count": len(rows), "recipes": sfx_recipes(),
+            "note": "make_sfx renders one by id in about a second (dur, apex, pitch, takes). design_sfx makes new "
+                    "ones from a recipe and a description in a few minutes. 'a real recording, as code' sounds "
+                    "read as real; 'made in code' ones can sound synthetic: pick those only when that fits."}
+
+
+def sfx_num(a, k, lo, hi):
+    if a.get(k) is None:
+        return None
+    try:
+        v = float(a[k])
+    except (TypeError, ValueError):
+        raise ValueError("%s is seconds, a number." % k)
+    if not lo <= v <= hi:
+        raise ValueError("%s must be %g to %g." % (k, lo, hi))
+    return v
+
+
+SFX_RENDER = r"""
+import json, sys
+from earshot.forge import sfx
+jobs = json.loads(sys.argv[1])
+out = []
+for j in jobs:
+    r = sfx.sfx_render(j.pop("sound"), j.pop("out"), **j)
+    m = r["meta"]
+    out.append({"seed": m.get("seed"), "onset_s": m.get("onset_s"), "peak_s": m.get("peak_s"),
+                "end_s": m.get("end_s"), "seconds": m.get("dur_s"), "lufs_max": m.get("lufs_m_max"),
+                "edits": m.get("edits"), "checks": (m.get("checks") or {}).get("summary"),
+                "clean": (m.get("checks") or {}).get("ok")})
+print(json.dumps(out))
+"""
+
+
+def t_make_sfx(a):
+    """Render a bank sound into generated/<name>-vN.wav, one file per take."""
+    sfx_need()
+    s = resolve_session(a["session"])
+    sound = (a.get("sound") or "").strip()
+    known = {x["id"]: x for x in sfx_bank()}
+    if sound not in known:
+        close = [i for i in known if sound and (sound in i or i.split("/")[0] == sound.split("/")[0])][:8]
+        raise ValueError("No sound %r. %s" % (sound, ("Close: " + ", ".join(close)) if close else
+                                              "sfx_sounds lists them (query whoosh, click, ...)."))
+    takes = int(a.get("takes") or 1)
+    if not 1 <= takes <= 12:
+        raise ValueError("takes is 1 to 12.")
+    knobs = {"dur": sfx_num(a, "dur", 0.02, 10), "apex": sfx_num(a, "apex", 0, 10)}
+    if a.get("pitch") not in (None, ""):
+        knobs["pitch"] = str(a["pitch"])
+    if knobs["apex"] is not None and not known[sound].get("knobs", {}).get("apex"):
+        raise ValueError("%s has no peak to aim (apex): only whooshes, risers and swells do." % sound)
+    name = slug(a.get("name") or sound.replace("/", "-")) or "sfx"
+    seed = int(a["seed"]) if a.get("seed") is not None else random.randrange(1, 1 << 30)  # earshot's own is 0
+    jobs, rels = [], []
+    for i in range(takes):
+        rel = next_generated(s, name, ".wav")
+        open(os.path.join(s, rel), "wb").close()  # hold the version while the next is picked
+        rels.append(rel)
+        j = dict({k: v for k, v in knobs.items() if v is not None}, sound=sound, out=os.path.join(s, rel))
+        j["seed"] = seed + i
+        jobs.append(j)
+    try:
+        r = subprocess.run([sfx_python(), "-I", "-c", SFX_RENDER, json.dumps(jobs)], capture_output=True,
+                           text=True, timeout=60 + 10 * takes, env=sfx_env())
+        if r.returncode != 0:
+            err = [x for x in (r.stderr or "").splitlines() if x.strip()]
+            raise ValueError("earshot: %s" % (err[-1] if err else "it ended with code %d" % r.returncode))
+        made = json.loads(r.stdout.strip().splitlines()[-1])
+    except Exception:
+        for rel in rels:
+            p = os.path.join(s, rel)
+            if os.path.exists(p) and os.path.getsize(p) == 0:
+                os.remove(p)
+        raise
+    files = []
+    for rel, m in zip(rels, made):
+        note_model(s, rel, "earshot · " + sound)
+        files.append(dict(m, file=rel))
+    return {"sound": sound, "from": sfx_row(known[sound])["from"], "files": files,
+            "note": "On the Assets tab. 48 kHz 24-bit, peak -1 dBFS. In render_edit put each in sfx with "
+                    "at = the cut time minus its peak_s (a hit or click: minus onset_s), and gain_db."}
+
+
+def sfx_ref(s, f):
+    """A reference recording for design_sfx: a session file, a name from list_music (SFX/...), or @library/..."""
+    f = str(f or "").strip()
+    if f.startswith(LIB_REF):
+        p = lib_path(f)
+    else:
+        p = next((c for c in (f if os.path.isabs(f) else os.path.join(s, f), os.path.join(audio_dir(), f),
+                              os.path.join(audio_dir(), "SFX", f)) if os.path.isfile(c)), None)
+    if not p or not os.path.isfile(p):
+        raise ValueError("No file %r. Give a session file, a list_music file (SFX/...), or @library/..." % f)
+    return p
+
+
+def t_design_sfx(a):
+    """earshot forge as a job: new sounds from a recipe and a description, into generated/."""
+    sfx_need()
+    if not sfx_can_design():
+        raise ValueError("Sound design is not installed. Ask the user to press Add next to Sound design in Takes "
+                         "(Plugins › Sound FX, about 1.5 GB); make_sfx works now.")
+    s = job_session(a.get("session"))
+    recipes = sfx_recipes()
+    recipe = (a.get("recipe") or "").strip()
+    if recipe not in recipes:
+        raise ValueError("No recipe %r. Recipes: %s." % (recipe, ", ".join(sorted(recipes))))
+    target = " ".join(str(a.get("describe") or recipes[recipe]).split())
+    budget = int(a.get("budget") or 96)
+    if not 24 <= budget <= 400:
+        raise ValueError("budget is 24 to 400 candidates (96 takes about a minute).")
+    keep = int(a.get("variants") or 3)
+    if not 1 <= keep <= 6:
+        raise ValueError("variants is 1 to 6.")
+    refs = [sfx_ref(s, f) for f in a.get("like") or []]
+    alts = [" ".join(str(x).split()) for x in a.get("not_like") or [] if str(x).strip()]
+    name = slug(a.get("name") or recipe) or recipe
+    first = next_generated(s, name, ".wav")
+    job_id = new_job_id(s)
+    work = os.path.join(WORK_DIR, "sfx-" + job_id)
+    q = shlex.quote
+    cmd = [q(sfx_python()), "-m", "earshot", "forge", q(recipe), "--target", q(target), "--budget", str(budget),
+           "--variants", str(keep), "--dir", q(work)]
+    if alts:
+        cmd += ["--alts"] + [q(x) for x in alts]
+    if refs:
+        cmd += ["--refs"] + [q(x) for x in refs]
+    home = sfx_env().get("EARSHOT_HOME")
+    cmd = ("export EARSHOT_OFFLINE=1 HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 PYTHONWARNINGS=ignore%s; "
+           % (" EARSHOT_HOME=" + q(home) if home else "") + " ".join(cmd) + " && " + " ".join(q(x) for x in [sys.executable, os.path.abspath(__file__),
+                                                             "--sfx-finish", work, name, recipe, first]))
+    job = start_job(s, cmd, [first], "Design %s" % name, estimate_s=30 + budget // 2, job_id=job_id)
+    return {"job": job["id"], "status": job["status"], "recipe": recipe, "describe": target, "first": first,
+            "work": work,
+            "note": "Up to %d new sounds land as %s and the next versions in generated/. %s/report.md says what "
+                    "each one sounds like and how far it is from the references: read it, then run again with "
+                    "a sharper describe, not_like or like if they are off. Wait with get_job wait_s=50."
+                    % (keep, first, work)}
+
+
+def sfx_finish(work, name, recipe, first):
+    """End of a design_sfx job (cwd: the session): copy the picks into generated/, best first."""
+    s = os.getcwd()
+    rep = json.load(open(os.path.join(work, "report.json")))
+    picks = [os.path.join(work, os.path.basename(p["file"])) for p in rep.get("picks") or []]
+    picks = [p for p in picks if os.path.exists(p)]
+    if not picks:
+        sys.exit("earshot kept no sound. Read %s/report.md." % work)
+    os.makedirs(os.path.join(s, GENERATED_DIR), exist_ok=True)
+    for i, p in enumerate(picks):
+        rel = first if i == 0 else next_generated(s, name, ".wav")
+        shutil.copyfile(p, os.path.join(s, rel))
+        note_model(s, rel, "earshot · designed %s" % recipe)
+        print("%s <- %s" % (rel, os.path.basename(p)))
+# </private>
 
 
 # ---------- phone videos (AirDropped into Downloads) ----------
@@ -13214,13 +13561,14 @@ def norm_post_url(u):
     return u.lower()
 
 
-def lint_comment(text):
-    """The anti-slop gate. Returns None when it passes, else the linter's complaints.
+def lint_comment(text, platform="comment"):
+    """The anti-slop gate. Returns None when it passes, else the linter's complaints. platform "eng-blog" is the
+    long-form rule set for web pages (2026-10-20: the comment rules cap a text at 6 sentences, so no page passed).
     TAKES_LINT points at another linter (tests); a missing linter lets the draft through."""
     linter = os.environ.get("TAKES_LINT") or os.path.expanduser("~/.claude/shared/anti-slop/lint.py")
     if not os.path.exists(linter):
         return None
-    out = subprocess.run([sys.executable, linter, "--platform", "comment"], input=text,
+    out = subprocess.run([sys.executable, linter, "--platform", platform], input=text,
                          capture_output=True, text=True, timeout=30)
     if out.returncode == 0:
         return None
@@ -14451,6 +14799,8 @@ PARAM_DOC = {
     "set_comment_stats.id": "Suggestion id from list_comment_suggestions.", "screen_path": "Path to the screen recording of the same take.",
     "check": "{kind, target, tolerance, max, floor}.",
 }
+# Tools listed only while their check passes (an admin plugin that is off).
+TOOL_GATES = {}
 READ_ONLY = {"get_comment_context", "list_comment_suggestions", "list_projects", "list_sessions", "get_session",
              "post_history", "get_post_queue", "get_plan", "get_comments", "get_rules", "script_history",
              "get_script_version", "get_performance", "list_broll", "search_media", "list_music", "get_library",
@@ -14683,7 +15033,8 @@ def core_only():
 
 
 def shown_tool(name):
-    return not core_only() or name in CORE_TOOLS
+    gate = TOOL_GATES.get(name)
+    return (not core_only() or name in CORE_TOOLS) and (gate is None or gate())
 
 
 # ---------- agent setup ----------

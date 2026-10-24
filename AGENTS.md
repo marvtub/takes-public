@@ -55,7 +55,7 @@ rest with `grep`. Most files start with a comment that says what they are for.
 | Image, video and voice models | `Gemini.swift`, `Higgsfield.swift`, `Replicate.swift`, `ElevenLabs.swift`, `ModelBrowser.swift` |
 | Plugins | `Plugins/Plugins.swift` (the board and the hooks), `Plugins/Feedback.swift` (rules, comments per video) |
 | The iPhone's server | `Phone.swift`, `PhoneHTTP.swift`, and the `Phone*.swift` files beside them |
-| Agents and updates | `AgentSetup.swift` (MCP server and skills at launch), `Updater.swift`, `Namer.swift` |
+| Agents and updates | `AgentSetup.swift` (MCP server and skills at launch), `Updater.swift` (`InstallRef.swift`: the install code of a download with a source), `Namer.swift` |
 | First run | `Onboarding.swift`, `FirstTake.swift`, `Setup.swift` |
 | Speed | `Perf.swift` |
 | Private features (`Features.socialBoards`) | `Copilot.swift`, `CopilotView.swift` (LinkedIn comments), `Performance.swift`, `Social.swift`, `SocialWeek.swift` |
@@ -101,6 +101,14 @@ no process runs in it, and its branch is merged into `origin/main`.
 session, of the whole library, or of the app) is yours to remove when you are done. Copy video
 with `cp -c`: an APFS clone takes no space until one side changes. On 2026-10-11 such leftovers
 held 65 GB of the user's disk.
+
+**Board actions show in the chat (2026-10-19).** Every button, toggle, refresh or background
+run on a board with a chat writes a line in that chat with `ClaudeChat.action`: what started (a
+spinner with `running: true`), then what came of it (the same id with `update:`), or why it did
+not work (`failed: true`). Pass `agent:` with the full result (the ideas, the numbers, the
+answers), so the agent can talk about it: it gets every action in front of the user's next
+message, without a reply now. A board action that runs an agent out of sight of the chat, or
+changes what the board shows without a line, is a bug. Site stats does it through `SiteActivity`.
 
 **Agents.** Takes must work with Claude Code, Codex or pi, whichever the user has. A feature
 that asks an agent goes through `Agents.run(AgentRequest(...))` in `Sources/Takes/Agents/`; never
@@ -186,6 +194,11 @@ has its own checks: read `ios/AGENTS.md`.
 - **A flaky test is a bug.** Find why it fails under load and fix that. Do not run it again until
   it passes. A test that times real playback or streaming goes in `TIMED` in `test.sh`: those run
   alone after the rest.
+- **Cheap on CPU.** Builds and the parallel tests run at utility priority (`LOW` in
+  `scripts/test-queue.sh`), so the user's apps come first. Each phase prints `Took N s, CPU N s`.
+  Compare CPU, not times: on a busy Mac a run mostly waits. `python3 mcp/tests/run_parallel.py
+  --cpu` lists the test classes that use the most. Make a test video small and short, and a
+  frame grab that runs in a thread pool uses `ONE_THREAD`.
 - **The docs are tested.** `AgentDocsTests` fails when an `AGENTS.md` names a file that is not in
   the repo. When you rename or delete a file, fix the docs in the same commit.
 

@@ -344,6 +344,62 @@ struct ChatRefTests {
     }
 }
 
+struct AgentCommandTests {
+    @Test func aClaudeCodeShellShowsTheCommandItRuns() {
+        let line = #"/bin/zsh -c source /Users/m/.claude/shell-snapshots/snapshot-zsh-1.sh 2>/dev/null || true && setopt NO_EXTENDED_GLOB 2>/dev/null || true && eval 'cd $TMPDIR/site/public && python3 -m http.server 4391 --bind 127.0.0.1' < /dev/null && pwd -P >| /tmp/claude-d961-cwd"#
+        #expect(AgentCommands.shown(line) == "python3 -m http.server 4391 --bind 127.0.0.1")
+        #expect(AgentCommands.shown(#"/bin/zsh -c eval 'echo '\''hi'\'' && sleep 60' < /dev/null"#) == "echo 'hi' && sleep 60")
+        #expect(AgentCommands.shown("/usr/bin/python3 /x/takes_mcp.py") == nil)
+    }
+
+    @Test func elapsedTimesAndClock() {
+        #expect(AgentCommands.seconds("04:12") == 252)
+        #expect(AgentCommands.seconds("1-02:00:05") == 93605)
+        #expect(AgentCommands.clock(252) == "4:12")
+        #expect(AgentCommands.clock(3729) == "1:02:09")
+    }
+
+    @Test func aRealServerUnderAParentShowsWithItsPort() async throws {
+        // A shell under this test process stands in for the agent's Bash call.
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/bin/zsh")
+        p.arguments = ["-c", "eval 'python3 -m http.server 47391 --bind 127.0.0.1' < /dev/null"]
+        p.standardOutput = FileHandle.nullDevice; p.standardError = FileHandle.nullDevice
+        try p.run()
+        defer { if p.isRunning { p.terminate() } }
+        try await Task.sleep(for: .seconds(Double(AgentCommands.shownAfter) + 1.5))
+        let found = AgentCommands.list(under: getpid()).first { $0.pid == p.processIdentifier }
+        #expect(found?.command == "python3 -m http.server 47391 --bind 127.0.0.1")
+        #expect(found?.port == 47391)
+        AgentCommands.stop(p.processIdentifier)
+        try await Task.sleep(for: .seconds(1))
+        #expect(!p.isRunning)
+    }
+
+    /// TAKES_SNAPSHOT=<dir> writes the row above the message box, light and dark.
+    @MainActor @Test func commandRowSnapshot() throws {
+        guard let dir = ProcessInfo.processInfo.environment["TAKES_SNAPSHOT"] else { return }
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().appending(path: "../../assets")
+        for f in (try? FileManager.default.contentsOfDirectory(at: root.appending(path: "fonts"), includingPropertiesForKeys: nil)) ?? []
+        where f.pathExtension == "ttf" { CTFontManagerRegisterFontsForURL(f as CFURL, .process, nil) }
+        for (name, appearance) in [("light", NSAppearance.Name.aqua), ("dark", .darkAqua)] {
+            NSAppearance.current = NSAppearance(named: appearance)
+            let v = VStack(spacing: 6) {
+                AgentCommandChip(command: AgentCommand(pid: 1, command: "python3 -m http.server 4391 --bind 127.0.0.1", seconds: 252, port: 4391)) {}
+                AgentCommandChip(command: AgentCommand(pid: 2, command: "npx hyperframes render comp.html --out edits/hook-v3.mp4", seconds: 1325)) {}
+                QueuedChip(text: "shipt it") {}
+            }
+            .frame(width: 470).padding(20).background(Theme.raised)
+            .environment(\.colorScheme, name == "dark" ? .dark : .light)
+            let r = ImageRenderer(content: v)
+            r.scale = 2
+            let cg = try #require(r.cgImage)
+            let data = try #require(NSBitmapImageRep(cgImage: cg).representation(using: .png, properties: [:]))
+            try data.write(to: URL(fileURLWithPath: dir).appending(path: "chat-commands-\(name).png"))
+        }
+    }
+}
+
 struct ChatParagraphTests {
     @Test func blankLinesAndListsSplitBlocks() {
         let t = "Intro line\nmore\n\n- one\n- two\nAfter the list"
@@ -801,7 +857,9 @@ struct ChatRunTests {
         try fake(#"if [ $n = 1 ]; then sleep 20; fi"#)
         let chat = ClaudeChat(session: session)
         chat.send("Find posts", title: "T", onStage: nil)
-        try? await Task.sleep(for: .milliseconds(300))
+        // Steer once run 1 counted (2026-10-21): a steer before bash saved ask-1 made the next run
+        // number 1 again, and it slept 20 s.
+        await until { runs == 1 }
         chat.send("Still on it?!", title: "T", onStage: nil, now: true)
         await until { runs == 2 && !chat.running }
         #expect(!chat.running)
@@ -816,6 +874,30 @@ struct ChatRunTests {
         chat.send("Hi", title: "T", onStage: nil)
         await until(5) { !chat.running }
         #expect(!chat.running)
+    }
+
+    /// 2026-10-19: what the user does on a board shows as its own line, and the agent gets it once,
+    /// with the next message, without a reply of its own.
+    @Test func boardActionsShowAndReachTheAgentOnce() async throws {
+        defer { cleanup() }
+        try fake("")
+        let chat = ClaudeChat(session: session)
+        let id = chat.action("Suggest now: picking three searches", running: true)
+        #expect(chat.messages.count == 1 && !chat.messages[0].done && chat.messages[0].isActionNote)
+        chat.action("Suggest now picked “a”, “b” and “c”", agent: "Picked a, b and c, because of the numbers", update: id)
+        chat.action("Showing 7 days: 10 visits")
+        #expect(chat.messages.map(\.text) == ["Suggest now picked “a”, “b” and “c”", "Showing 7 days: 10 visits"])
+        #expect(chat.messages.allSatisfy { $0.done && $0.isActionNote })
+        #expect(ChatItem.group(Array(repeating: chat.messages[1], count: 6)).count == 6, "own lines, never folded into steps")
+        #expect(runs == 0, "an action starts no reply")
+        chat.send("What happened?", title: "T", onStage: nil)
+        await until { runs == 1 && !chat.running }
+        let first = ask(1) ?? ""
+        #expect(first.contains("Picked a, b and c, because of the numbers") && first.contains("Showing 7 days: 10 visits"))
+        #expect(!first.contains("picking three searches"), "a running line is not told; its result is")
+        chat.send("And now?", title: "T", onStage: nil)
+        await until { runs == 2 && !chat.running }
+        #expect(!(ask(2) ?? "").contains("Showing 7 days"), "told once")
     }
 
     @Test func compactQueuesAloneAndRunsFirst() async throws {
@@ -839,7 +921,8 @@ struct ChatRunTests {
         let chat = ClaudeChat(session: session)
         chat.send("Find posts", title: "T", onStage: nil)
         chat.send("Later", title: "T", onStage: nil)
-        try? await Task.sleep(for: .milliseconds(300))
+        // Until the first run started: a fixed 300 ms stopped it before it ran on a busy Mac (2026-10-20).
+        await until { runs == 1 }
         chat.stop()
         await until { !chat.running }
         #expect(!chat.running)

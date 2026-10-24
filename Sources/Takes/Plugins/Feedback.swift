@@ -32,8 +32,20 @@ enum Feedback {
     The user reads your replies in a narrow panel: keep them short, no tables, no headings.
     """
 
-    /// In the order of the content journey: plan, make, package, publish. The MCP has the same list.
-    static let areas: [(id: String, title: String, icon: String)] = [
+    /// In the order of the content journey: plan, make, package, publish, then the admin build's own areas
+    /// (PrivatePlugins.ruleAreas: Site page, Site reply). The MCP has the same list.
+    static let areas: [(id: String, title: String, icon: String)] = journey + PrivatePlugins.ruleAreas
+    /// The areas the rules board shows: Public view hides the admin ones (2026-10-22). `areas` stays
+    /// whole: the rule files are read and written through it.
+    static var shownAreas: [(id: String, title: String, icon: String)] { PublicView.on ? journey : areas }
+    /// The rules in the shown areas: counts, merges and search skip the hidden admin rules (2026-10-22).
+    /// Writes keep the whole store.
+    static func inShownAreas(_ rules: [LearnedRule]) -> [LearnedRule] {
+        guard PublicView.on else { return rules }
+        let ids = Set(shownAreas.map(\.id))
+        return rules.filter { ids.contains($0.area) }
+    }
+    private static let journey: [(id: String, title: String, icon: String)] = [
         ("storyboard", "Storyboard", "rectangle.split.3x1"), ("script", "Script", "text.alignleft"),
         ("sound", "Sound", "waveform"), ("cut", "Cut", "scissors"), ("picture", "Picture", "camera.filters"),
         ("captions", "Captions", "captions.bubble"), ("graphics", "Graphics", "square.on.circle"),
@@ -57,8 +69,11 @@ struct RuleCheck: Codable, Hashable {
     var tolerance: Double?
     var max: Double?
     var floor: Double?
+    /// A page check's words the user struck out (banned, 2026-10-20).
+    var phrases: [String]?
 
-    /// "Pauses ≤ 0.25 s", in a few words.
+    /// "Pauses ≤ 0.25 s", in a few words. The page checks (2026-10-20, factory evals step 5) have the MCP's
+    /// defaults (WORK_PAGE_CHECK_MAX).
     var label: String {
         func n(_ v: Double) -> String { v.formatted(.number.precision(.fractionLength(0...2))) }
         switch kind {
@@ -66,8 +81,39 @@ struct RuleCheck: Codable, Hashable {
         case "peak": return "Peak ≤ \(n(max ?? -1)) dBTP"
         case "pauses": return "Pauses ≤ \(n(max ?? 0.4)) s"
         case "length": return "Length ≤ \(n(max ?? 0)) s"
+        case "lede_words": return "Under the title ≤ \(n(max ?? 60)) words"
+        case "page_words": return max.map { "Page ≤ \(n($0)) words" } ?? "Page words, no limit"
+        case "plan_steps": return "How ≤ \(n(max ?? 5)) numbered steps"
+        case "banned": return "Never “\((phrases ?? []).joined(separator: "”, “"))”"
         default: return kind
         }
+    }
+}
+
+/// How a rule did on the drafts the user already judged (MCP learn_from_change, 2026-10-20): it must fail the draft its
+/// note was about and pass at least 90% of the good pages. A rule that passed blocks drafts; one that failed advises.
+struct RuleBacktest: Codable, Hashable {
+    var pass: Bool?
+    /// "code" (the rule's check) or "judge" (Gemini on the rule's words).
+    var by: String?
+    var failsOwn: Bool?
+    var good: Int?
+    var of: Int?
+    var why: String?
+    var at: String?
+
+    enum CodingKeys: String, CodingKey {
+        case pass, by, good, of, why, at
+        case failsOwn = "fails_own"
+    }
+
+    var blocks: Bool { pass == true }
+    /// The tag on the Feedback board.
+    var state: String { blocks ? "Blocks drafts" : "Advises only" }
+    /// The line under it: why, with a capital first letter ("Fails the draft the note was about and passes 5 of 5 good pages").
+    var reason: String {
+        let w = (why ?? "").trimmingCharacters(in: .whitespaces)
+        return w.prefix(1).uppercased() + w.dropFirst()
     }
 }
 
@@ -90,9 +136,11 @@ struct LearnedRule: Codable, Identifiable, Hashable {
     var merge: RuleMerge?
     /// Merged into this rule. Kept off, so the comments that point at it still find it.
     var mergedInto: String?
+    /// A site rule's test on the drafts the user judged (2026-10-20). Kept here, or the board's next write drops it.
+    var backtest: RuleBacktest?
 
     enum CodingKeys: String, CodingKey {
-        case id, area, text, on, by, made, changed, from, repeats, check, details, merge
+        case id, area, text, on, by, made, changed, from, repeats, check, details, merge, backtest
         case mergedInto = "merged_into"
     }
 
@@ -528,7 +576,7 @@ struct FeedbackPage: View {
                 .arrive(0)
             tile("Comments you left", "\(s.comments)", note: "on \(s.videos) video\(s.videos == 1 ? "" : "s")")
                 .arrive(1)
-            tile("Learned", "\(s.learned)", note: "\(store.rules.filter(\.isOn).count) rules · \(s.oneOff) one-off")
+            tile("Learned", "\(s.learned)", note: "\(Feedback.inShownAreas(store.rules).filter(\.isOn).count) rules · \(s.oneOff) one-off")
                 .help("Comments that became a rule or matched one. One-off: a fix for that video only.")
                 .arrive(2)
             tile("Same mistake again", "\(s.repeats)", note: s.learned > 0 ? "of \(s.learned) learned" : "none yet",
@@ -804,9 +852,9 @@ struct RulesCard: View {
     }
 
     var body: some View {
-        let rules = Lessons.shown(store.rules)
+        let rules = Feedback.inShownAreas(Lessons.shown(store.rules))
         let waiting = rules.filter { $0.merge != nil }
-        let areas = Feedback.areas.filter { a in rules.contains { $0.area == a.id } }
+        let areas = Feedback.shownAreas.filter { a in rules.contains { $0.area == a.id } }
         let area = areas.contains { $0.id == picked } ? picked : areas.first?.id ?? "cut"
         let query = search.trimmingCharacters(in: .whitespacesAndNewlines)
         return VStack(alignment: .leading, spacing: 16) {
@@ -885,7 +933,7 @@ struct RulesCard: View {
     private var searchField: some View {
         HStack(spacing: 6) {
             Image(systemName: "magnifyingglass").font(.system(size: 11, weight: .medium)).foregroundStyle(Theme.faint)
-            TextField("", text: $search, prompt: Text("Search \(Lessons.shown(store.rules).filter(\.counts).count) rules").foregroundStyle(Theme.faint))
+            TextField("", text: $search, prompt: Text("Search \(Feedback.inShownAreas(Lessons.shown(store.rules)).filter(\.counts).count) rules").foregroundStyle(Theme.faint))
                 .textFieldStyle(.plain).font(Theme.sans(12.5)).foregroundStyle(Theme.ink)
                 .focused($searching)
                 .onExitCommand { search = ""; searching = false }
@@ -1063,7 +1111,7 @@ private struct SearchResults: View {
                 Text("No rule says “\(query)”.").font(Theme.sans(12.5)).foregroundStyle(Theme.muted)
                     .padding(.horizontal, 10)
             }
-            ForEach(Feedback.areas.filter { a in hits.contains { $0.area == a.id } }, id: \.id) { a in
+            ForEach(Feedback.shownAreas.filter { a in hits.contains { $0.area == a.id } }, id: \.id) { a in
                 VStack(alignment: .leading, spacing: 0) {
                     SectionLabel(text: a.title).padding(.horizontal, 10).padding(.bottom, 6)
                     Rule()
@@ -1130,7 +1178,7 @@ private struct RuleComposer: View {
         VStack(alignment: .leading, spacing: 12) {
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 6) {
-                    ForEach(Feedback.areas, id: \.id) { a in
+                    ForEach(Feedback.shownAreas, id: \.id) { a in
                         AreaChip(title: a.title, icon: a.icon, count: 0, on: area == a.id) { area = a.id }
                     }
                 }
@@ -1269,6 +1317,21 @@ private struct RuleRow: View {
                         .onTapGesture { detailsDraft = details; editingDetails = true; detailsFocused = true }
                         .help("More about this rule. Click to change it.")
                 }
+                if !editing, rule.check != nil || rule.backtest != nil {
+                    HStack(spacing: 6) {
+                        if let c = rule.check { MetaTag(text: c.label, icon: "ruler") }
+                        if let b = rule.backtest {
+                            MetaTag(text: b.state, icon: b.blocks ? "checkmark.shield" : "info.circle",
+                                    tint: b.blocks ? Theme.accentInk : Theme.muted)
+                                .help(b.blocks ? "Tested on the drafts you judged: Takes fails a draft that breaks it."
+                                               : "Tested on the drafts you judged, and not sure enough to block. Takes reads it before it writes.")
+                        }
+                    }
+                    if let b = rule.backtest, !b.reason.isEmpty {
+                        Text(b.reason).font(Theme.sans(11.5)).foregroundStyle(Theme.faint)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
             }
             if rule.merge != nil && !editing {
                 Button(action: openMerges) {
@@ -1326,7 +1389,7 @@ private struct RuleRow: View {
                     detailsDraft = rule.details ?? ""; editingDetails = true; detailsFocused = true
                 }
                 MenuGroup("Move to area", icon: "arrow.right") {
-                    for a in Feedback.areas where a.id != rule.area {
+                    for a in Feedback.shownAreas where a.id != rule.area {
                         let full = store.rules.filter { $0.area == a.id && $0.counts }.count >= Feedback.areaMax
                         MenuButton(a.title, detail: full ? "full" : nil, enabled: !full) {
                             let id = rule.id, root = root, to = a.id

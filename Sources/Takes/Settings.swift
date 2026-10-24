@@ -21,7 +21,8 @@ struct SettingsView: View {
             case .gemini: return "Gemini"
             case .usage: return "Usage"
             case .archived: return "Archived"
-            case .privacy: return "Private"
+            // In Public view the tab is only the way back: it names the switch (2026-10-22).
+            case .privacy: return PublicView.on ? "Public view" : "Private"
             }
         }
         var icon: String {
@@ -32,7 +33,7 @@ struct SettingsView: View {
             case .gemini: return "key"
             case .usage: return "chart.bar"
             case .archived: return "archivebox"
-            case .privacy: return "lock"
+            case .privacy: return PublicView.on ? "eye" : "lock"
             }
         }
         /// Private shows only where there is a list (the admin build).
@@ -164,6 +165,8 @@ private struct ArchivedRow: View {
 /// What is private and what is public (2026-10-07), from Plugins/Private/FeatureMap.swift.
 struct PrivatePage: View {
     let features: [FeatureEntry]
+    @Environment(AppModel.self) var app
+    @Bindable private var view = PublicView.shared
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -174,6 +177,29 @@ struct PrivatePage: View {
             }
             .padding(20)
             Rule()
+            publicViewRow
+            Rule()
+            // In Public view only the switch shows: the list names the admin parts (2026-10-22).
+            if !view.isOn { list }
+            Spacer(minLength: 0)
+        }
+    }
+
+    /// Public view (2026-10-22): see Takes as a user of the public copy sees it.
+    private var publicViewRow: some View {
+        HStack(alignment: .top, spacing: 12) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text("Public view").font(Theme.sans(13, .semibold)).foregroundStyle(Theme.ink)
+                Text("Hide the admin parts and use Takes as the public app. Your data and jobs stay. Chats change at their next message.")
+                    .font(Theme.sans(12)).foregroundStyle(Theme.muted).fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 8)
+            TakesSwitch(selection: PublicView.binding(app), options: [(false, "Off"), (true, "On")])
+        }
+        .padding(.horizontal, 20).padding(.vertical, 14)
+    }
+
+    private var list: some View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 22) {
                     ForEach(FeatureEntry.Kind.allCases, id: \.self) { kind in
@@ -183,7 +209,6 @@ struct PrivatePage: View {
                 }
                 .padding(20)
             }
-        }
     }
 
     private func group(_ kind: FeatureEntry.Kind, _ rows: [FeatureEntry]) -> some View {

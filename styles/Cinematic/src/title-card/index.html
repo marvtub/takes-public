@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=1080, height=1920" />
+    <!-- Cinematic chapter card: the footage dims and softens behind the card, then a gold small-caps
+         kicker, a serif headline whose second line is gold italic, and a thin gold rule that draws
+         from the centre. Slow fades, a long hold, then the card fades and the picture comes back.
+         Starts from HyperFrames' titlecard-calm (Apache-2.0), changed for this style.
+         Put your clip next to this file as footage.mp4, and edit TEXT and AT. -->
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+    <style>
+      @font-face { font-family: "Cormorant Garamond"; src: url("../../fonts/CormorantGaramond-Variable.ttf"); font-weight: 300 700; }
+      @font-face { font-family: "Cormorant Garamond"; src: url("../../fonts/CormorantGaramond-Italic-Variable.ttf"); font-style: italic; font-weight: 300 700; }
+      :root { --bar: #000; --title: #f3ede2; --gold: #d9b26a; --serif: "Cormorant Garamond", serif; }
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      html, body { width: 1080px; height: 1920px; overflow: hidden; background: var(--bar); }
+      #root { position: relative; width: 100%; height: 100%; overflow: hidden; background: var(--bar); }
+      #footage { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover;
+                 filter: contrast(1.12) saturate(0.85) brightness(0.9) sepia(0.12); }
+      #vig { position: absolute; inset: 0; background: radial-gradient(ellipse at 50% 40%, transparent 45%, rgba(0, 0, 0, 0.55) 100%); }
+      .bar { position: absolute; left: 0; right: 0; height: 300px; background: var(--bar); }
+      #card { position: absolute; left: 60px; right: 60px; top: 700px; text-align: center; }
+      #kicker { font-family: var(--serif); font-weight: 500; font-size: 30px; letter-spacing: 12px; text-transform: uppercase; color: var(--gold); }
+      .hl { font-family: var(--serif); font-weight: 400; font-size: 128px; line-height: 1.02; color: var(--title); white-space: nowrap; }
+      #l1 { margin-top: 34px; }
+      #l2 { font-style: italic; color: var(--gold); }
+      #rule { width: 120px; height: 2px; background: var(--gold); margin: 50px auto 0; }
+    </style>
+  </head>
+  <body>
+    <div id="root" data-composition-id="main" data-start="0" data-duration="6" data-width="1080" data-height="1920">
+      <video id="footage" src="footage.mp4" data-start="0" data-duration="6" data-track-index="0" muted playsinline></video>
+      <div id="vig"></div>
+      <div class="bar" style="top: 0"></div>
+      <div class="bar" style="bottom: 0"></div>
+      <div id="card"><div id="kicker"></div><div class="hl" id="l1"></div><div class="hl" id="l2"></div><div id="rule"></div></div>
+    </div>
+    <script>
+      // The text, and when each part arrives (seconds). OUT is when the card starts to leave.
+      const TEXT = { kicker: "Chapter II", l1: "Discipline is", l2: "a calendar." };
+      const AT = { dim: 0.2, kicker: 0.7, l1: 1.1, l2: 1.6, rule: 2.1, out: 5.0 };
+
+      document.getElementById("kicker").textContent = TEXT.kicker;
+      document.getElementById("l1").textContent = TEXT.l1;
+      document.getElementById("l2").textContent = TEXT.l2;
+
+      window.__timelines = window.__timelines || {};
+      const tl = gsap.timeline({ paused: true });
+      const fade = { opacity: 1, duration: 0.9, ease: "power2.out" };
+      // The graded picture, and the dimmed, softened one under the card.
+      const GRADE = "contrast(1.12) saturate(0.85) brightness(0.9) sepia(0.12) blur(0px)";
+      const DIM = "contrast(1.1) saturate(0.7) brightness(0.42) sepia(0.12) blur(2px)";
+      gsap.set("#footage", { filter: GRADE });
+      gsap.set(["#kicker", "#l1", "#l2"], { opacity: 0 });
+      gsap.set("#rule", { scaleX: 0 });
+      // In: the picture dims, then each line fades up in turn and the rule draws from the centre.
+      tl.to("#footage", { filter: DIM, duration: 0.8, ease: "power2.inOut" }, AT.dim);
+      tl.to("#kicker", fade, AT.kicker);
+      tl.to("#l1", fade, AT.l1);
+      tl.to("#l2", fade, AT.l2);
+      tl.to("#rule", { scaleX: 1, duration: 1.0, ease: "power3.out" }, AT.rule);
+      // Out: the card fades as one, then the picture comes back. About half as long as the way in.
+      tl.to("#card", { opacity: 0, duration: 0.5, ease: "power2.in" }, AT.out);
+      tl.to("#footage", { filter: GRADE, duration: 0.6, ease: "power2.inOut" }, AT.out + 0.3);
+      tl.set({}, {}, 6);
+      window.__timelines["main"] = tl;
+      tl.seek(0);
+    </script>
+  </body>
+</html>

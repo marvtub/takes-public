@@ -1,0 +1,22 @@
+{
+  "assets/Motion/captions-v1.mp4": {
+    "added": "2026-10-22",
+    "from": "shipped with Takes",
+    "note": "Film subtitles in the bottom letterbox bar, over graded footage (src/captions)."
+  },
+  "assets/Motion/figure-v1.mp4": {
+    "added": "2026-10-22",
+    "from": "shipped with Takes",
+    "note": "Figure over dimmed footage: two thin bars with serif numerals (src/figure)."
+  },
+  "assets/Motion/lower-third-v1.mp4": {
+    "added": "2026-10-22",
+    "from": "shipped with Takes",
+    "note": "Opening credit in the bottom letterbox bar (src/lower-third)."
+  },
+  "assets/Motion/title-card-v1.mp4": {
+    "added": "2026-10-22",
+    "from": "shipped with Takes",
+    "note": "Chapter card over dimmed, softened footage with a gold rule (src/title-card)."
+  }
+}

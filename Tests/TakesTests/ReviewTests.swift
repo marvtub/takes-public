@@ -125,9 +125,13 @@ struct IdleTests {
             Thread.isMainThread ? seen.hit() : offMain.hit()
         }
         defer { NotificationCenter.default.removeObserver(token) }
-        try await Task.sleep(for: .milliseconds(300))
-        try Data("x".utf8).write(to: dir.appending(path: "comments.json"))
-        for _ in 0..<40 where !seen.value { try await Task.sleep(for: .milliseconds(100)) }
+        // The stream starts on its own queue, and fseventsd can take seconds to start it and to send
+        // an event: one write 300 ms in was missed in about 1 run in 6 (2026-10-20). Write again
+        // every half second and wait up to 20 s (one run needed 7 s on a busy Mac).
+        for i in 0..<200 where !seen.value {
+            if i % 5 == 0 { try Data("x\(i)".utf8).write(to: dir.appending(path: "comments.json")) }
+            try await Task.sleep(for: .milliseconds(100))
+        }
         #expect(seen.value)
         #expect(!offMain.value)
     }

@@ -143,6 +143,8 @@ final class AppModel {
     /// Opens the board, or shuts it when it is already open.
     func toggle(_ b: Board) {
         if !Features.socialBoards, b == .performance || b == .comments { return }
+        // Public view: a hidden plugin's board stays shut, e.g. from its menu shortcut (2026-10-22).
+        if case .plugin(let id) = b, Plugins.named(id) == nil { return }
         Perf.mark("board \(b)"); board = board == b ? nil : b
     }
     /// The file the Styles board plays on its left, for comments.
@@ -371,8 +373,9 @@ final class AppModel {
         // archives the live Comments chat and starts a new one (audit #37, 2026-10-11).
         if !Self.testing {
             chats.resume()
-            if Features.socialBoards { scout.start(chats) }
-            for p in Plugins.all { p.start?(self) }
+            // The build's own lists, not the shown ones: in Public view the admin jobs run on, unseen (2026-10-22).
+            if Features.Built.socialBoards { scout.start(chats) }
+            for p in Plugins.built where Plugins.isInstalled(p.id) { p.start?(self) }
         }
         // The camera runs only while you can see it.
         for name in [NSWindow.didChangeOcclusionStateNotification, NSApplication.didHideNotification,

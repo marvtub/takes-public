@@ -48,6 +48,22 @@ extension ChatRunTests {
         #expect(!chat.messages.contains { $0.role == .error })
     }
 
+    /// 2026-10-19: a parked comment scout held "Updating…" for minutes.
+    @Test func anUpdateDoesNotWaitForAWaitingProcessAndEndsIt() async throws {
+        let chat = ClaudeChat(session: session)
+        defer { chat.dropWarm(); cleanup() }
+        try warmFake()
+        chat.send("One", title: "T", onStage: nil)
+        await until { runs == 1 && !chat.running }
+        let pid = try #require(chat.warmPID)
+        #expect(WarmPool.idlePIDs.contains(pid), "the update does not wait for it")
+        WarmPool.dropIdle()
+        await until { gone(pid) }
+        #expect(gone(pid))
+        #expect(chat.warmPID == nil)
+        #expect(!WarmPool.idlePIDs.contains(pid))
+    }
+
     @Test func stopEndsTheWarmProcessAndTheNextMessageStartsANewOne() async throws {
         let chat = ClaudeChat(session: session)
         defer { chat.dropWarm(); cleanup() }

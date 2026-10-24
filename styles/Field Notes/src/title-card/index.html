@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=1080, height=1920" />
+    <!-- Field Notes title card: grained field-book paper, a small typewriter dateline, a typewriter
+         headline that types on letter by letter, yellow highlighter on the key words, and one red
+         marker note under it. Hard cut in and out.
+         Starts from HyperFrames' titlecard-calm (Apache-2.0), changed for this style.
+         Edit TEXT and AT below. Wrap the highlighted words in <mark>. Keep each line 15 characters
+         or fewer. -->
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+    <style>
+      @font-face { font-family: "Courier Prime"; src: url("../../fonts/CourierPrime-Regular.ttf"); font-weight: 400; }
+      @font-face { font-family: "Courier Prime"; src: url("../../fonts/CourierPrime-Bold.ttf"); font-weight: 700; }
+      @font-face { font-family: "Caveat Brush"; src: url("../../fonts/CaveatBrush-Regular.ttf"); font-weight: 400; }
+      :root { --paper: #efe4cb; --ink: #1b1712; --muted: #6b5b45; --marker: #e2231a; --hl: #ffe14d; --grid: #8c7a5e; }
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      html, body { width: 1080px; height: 1920px; overflow: hidden; background: var(--paper); }
+      #root { position: relative; width: 100%; height: 100%; background: var(--paper);
+        background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='300' height='300'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='3' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 0.35 0 0 0 0 0.28 0 0 0 0 0.18 0 0 0 .55 0'/></filter><rect width='300' height='300' filter='url(%23n)'/></svg>"); }
+      #lockup { position: absolute; left: 90px; right: 90px; top: 680px; font-family: "Courier Prime", monospace; color: var(--ink); }
+      #dateline { font-size: 30px; font-weight: 400; color: var(--muted); letter-spacing: 0.08em; text-transform: uppercase;
+        padding-bottom: 18px; border-bottom: 2px dashed rgba(140, 122, 94, 0.6); margin-bottom: 48px; }
+      #head { font-size: 104px; font-weight: 700; line-height: 1.12; letter-spacing: -0.01em; }
+      #head .l { display: block; white-space: nowrap; }
+      mark { background: linear-gradient(transparent 16%, var(--hl) 16%, var(--hl) 90%, transparent 90%) no-repeat 0 0 / 0% 100%; color: inherit; }
+      #note { margin-top: 60px; margin-left: 320px; font-family: "Caveat Brush", cursive; font-size: 72px; line-height: 1;
+        color: var(--marker); text-transform: uppercase; transform: rotate(-6deg); white-space: nowrap; display: inline-block; }
+    </style>
+  </head>
+  <body>
+    <div id="root" data-composition-id="main" data-start="0" data-duration="3.5" data-width="1080" data-height="1920">
+      <div id="lockup"><div id="dateline"></div><div id="head"></div><div id="note"></div></div>
+    </div>
+    <script>
+      // The text, and when it starts (seconds). type: seconds per letter.
+      const TEXT = { dateline: "Day 01 · Longyearbyen", lines: ["The town", "where <mark>dying</mark>", "is illegal."], note: "(really)" };
+      const AT = { dateline: 0.1, head: 0.35, type: 0.035, note: 2.2 };
+
+      document.getElementById("dateline").textContent = TEXT.dateline;
+      document.getElementById("note").textContent = TEXT.note;
+      const head = document.getElementById("head");
+      const chars = [], marks = [];
+      TEXT.lines.forEach(html => {
+        const l = document.createElement("span"); l.className = "l"; l.innerHTML = html; head.appendChild(l);
+        // Wrap each letter so it can be typed on; keep <mark> around its letters.
+        const walk = node => [...node.childNodes].forEach(n => {
+          if (n.nodeType === 3) {
+            const frag = document.createDocumentFragment();
+            [...n.textContent].forEach(c => { const s = document.createElement("span"); s.textContent = c; frag.appendChild(s); chars.push(s); });
+            n.replaceWith(frag);
+          } else { if (n.tagName === "MARK") marks.push(n); walk(n); }
+        });
+        walk(l);
+      });
+
+      window.__timelines = window.__timelines || {};
+      const tl = gsap.timeline({ paused: true });
+      gsap.set(chars, { opacity: 0 });
+      gsap.set("#dateline", { opacity: 0 });
+      gsap.set("#note", { clipPath: "inset(-20% 100% -20% 0)" });
+      tl.set("#dateline", { opacity: 1 }, AT.dateline);
+      // Typewriter: each letter appears whole, no fade.
+      chars.forEach((c, i) => tl.set(c, { opacity: 1 }, AT.head + i * AT.type));
+      const typed = AT.head + chars.length * AT.type;
+      marks.forEach((m, i) => tl.to(m, { backgroundSize: "100% 100%", duration: 0.3, ease: "power2.out" }, typed + 0.1 + i * 0.15));
+      tl.to("#note", { clipPath: "inset(-20% 0% -20% 0)", duration: 0.45, ease: "sine.inOut" }, Math.max(AT.note, typed + 0.3));
+      tl.set({}, {}, 3.5);
+      window.__timelines["main"] = tl;
+      tl.seek(0);
+    </script>
+  </body>
+</html>

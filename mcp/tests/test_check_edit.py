@@ -836,6 +836,17 @@ class Reframe(Base):
         for got, want in zip(region, (656, 0, 608, 1080)):
             self.assertAlmostEqual(got, want, delta=24)
 
+    def test_find_region_at_the_left_edge(self):
+        # A 9:16 cut near the take's left edge: the search that looked at every place at 240 px found a
+        # smaller crop lower down (486x864 at 0.972, 2026-10-22).
+        e = os.path.join(self.w, "edits", "r916left-v1.mp4")
+        if not os.path.exists(e):
+            m.cut(os.path.join(self.w, "take-01-camera.mov"), e, self.segs, vf="crop=608:1080:40:0,scale=1080:1920")
+        region, score = t.find_region(e, 3.0, os.path.join(self.w, "take-01-camera.mov"), 4.0, (1080, 1920), (1920, 1080))
+        self.assertGreater(score, 0.99)
+        for got, want in zip(region, (40, 0, 608, 1080)):
+            self.assertAlmostEqual(got, want, delta=16)
+
     def test_recipe_crop_skips_the_search(self):
         name = "rec-v1.mp4"
         m.cut(os.path.join(self.w, "take-01-camera.mov"), os.path.join(self.w, "edits", name), self.segs,

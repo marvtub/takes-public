@@ -19,6 +19,8 @@ struct ChatTurn {
     var access: String
     /// A chat without a session: its board.
     var board: String?
+    /// Public view (2026-10-22): the takes server shows only what the public copy has.
+    var publicView = false
     /// Claude Code: the file with the only MCP servers to load (ChatMCP). Nil loads every server.
     var mcpConfig: String? = nil
     /// Claude Code: the process stays open and reads message after message (ChatWarm).
@@ -170,11 +172,11 @@ extension CodexAdapter: ChatAdapter {
 
     func chatArguments(_ t: ChatTurn) -> [String] {
         Self.chatArguments(context: t.context, model: t.model, thread: t.started ? t.thread : nil, chat: t.conversation,
-                           board: t.board, access: t.access, takesInCodex: Self.hasTakes)
+                           board: t.board, access: t.access, takesInCodex: Self.hasTakes, publicView: t.publicView)
     }
 
     static func chatArguments(context: String, model: String, thread: String?, chat: String, board: String?,
-                              access: String, takesInCodex: Bool) -> [String] {
+                              access: String, takesInCodex: Bool, publicView: Bool = false) -> [String] {
         var a = ["exec"]
         if thread != nil { a.append("resume") }
         a += ["--json", "--skip-git-repo-check", "-m", model,
@@ -184,6 +186,11 @@ extension CodexAdapter: ChatAdapter {
         if takesInCodex {
             a += ["-c", "mcp_servers.takes.env.TAKES_CHAT=\"1\"", "-c", "mcp_servers.takes.env.TAKES_CHAT_ID=" + toml(chat)]
             if let board { a += ["-c", "mcp_servers.takes.env.TAKES_BOARD=" + toml(board)] }
+            if publicView { a += ["-c", "mcp_servers.takes.env.TAKES_PUBLIC_VIEW=\"1\""] }
+            // Codex hands its MCP servers only the env it is told: the repo's gtm/, as Chat.environment sets it.
+            if let r = Releaser.repo, FileManager.default.fileExists(atPath: r + "/gtm") {
+                a += ["-c", "mcp_servers.takes.env.TAKES_GTM_DIR=" + toml(r + "/gtm")]
+            }
         }
         if let thread { a.append(thread) }
         a.append("-")

@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=1080, height=1920" />
+    <!-- Cinematic lower third: an opening credit in the bottom letterbox bar. A serif name, a thin
+         gold rule that draws from the centre, and one gold small-caps line. No captions while it shows.
+         Starts from HyperFrames' lt-side-rule (Apache-2.0): centred in the bar here, and the type is
+         this style's. Put your clip next to this file as footage.mp4, and edit TEXT and AT. -->
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+    <style>
+      @font-face { font-family: "Cormorant Garamond"; src: url("../../fonts/CormorantGaramond-Variable.ttf"); font-weight: 300 700; }
+      @font-face { font-family: "Cormorant Garamond"; src: url("../../fonts/CormorantGaramond-Italic-Variable.ttf"); font-style: italic; font-weight: 300 700; }
+      :root { --bar: #000; --title: #f3ede2; --gold: #d9b26a; --serif: "Cormorant Garamond", serif; }
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      html, body { width: 1080px; height: 1920px; overflow: hidden; background: var(--bar); }
+      #root { position: relative; width: 100%; height: 100%; overflow: hidden; background: var(--bar); }
+      #footage { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover;
+                 filter: contrast(1.12) saturate(0.85) brightness(0.9) sepia(0.12); }
+      #vig { position: absolute; inset: 0; background: radial-gradient(ellipse at 50% 40%, transparent 45%, rgba(0, 0, 0, 0.55) 100%); }
+      .bar { position: absolute; left: 0; right: 0; height: 300px; background: var(--bar); }
+      #lt { position: absolute; left: 60px; right: 60px; top: 1662px; text-align: center; }
+      #name { font-family: var(--serif); font-weight: 400; font-size: 68px; line-height: 1; color: var(--title); white-space: nowrap; }
+      #rule { width: 120px; height: 2px; background: var(--gold); margin: 26px auto 24px; }
+      #line { font-family: var(--serif); font-weight: 500; font-size: 28px; letter-spacing: 9px; text-transform: uppercase; color: var(--gold); white-space: nowrap; }
+    </style>
+  </head>
+  <body>
+    <div id="root" data-composition-id="main" data-start="0" data-duration="5" data-width="1080" data-height="1920">
+      <video id="footage" src="footage.mp4" data-start="0" data-duration="5" data-track-index="0" muted playsinline></video>
+      <div id="vig"></div>
+      <div class="bar" style="top: 0"></div>
+      <div class="bar" style="bottom: 0"></div>
+      <div id="lt"><div id="name"></div><div id="rule"></div><div id="line"></div></div>
+    </div>
+    <script>
+      const TEXT = { name: "Your Name", line: "What you do, in four words" };
+      const AT = { in: 0.4, out: 4.2 };
+
+      document.getElementById("name").textContent = TEXT.name;
+      document.getElementById("line").textContent = TEXT.line;
+      window.__timelines = window.__timelines || {};
+      const tl = gsap.timeline({ paused: true });
+      gsap.set(["#name", "#line"], { opacity: 0 });
+      gsap.set("#rule", { scaleX: 0 });
+      // In: the name fades up, the rule draws from the centre, then the line. Out: all together, faster.
+      tl.to("#name", { opacity: 1, duration: 0.9, ease: "power2.out" }, AT.in);
+      tl.to("#rule", { scaleX: 1, duration: 1.0, ease: "power3.out" }, AT.in + 0.3);
+      tl.to("#line", { opacity: 1, duration: 0.9, ease: "power2.out" }, AT.in + 0.6);
+      tl.to(["#name", "#rule", "#line"], { opacity: 0, duration: 0.45, ease: "power2.in" }, AT.out);
+      tl.set({}, {}, 5);
+      window.__timelines["main"] = tl;
+      tl.seek(0);
+    </script>
+  </body>
+</html>

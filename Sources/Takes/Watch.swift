@@ -192,8 +192,9 @@ enum HangWatch {
     /// Starts `sample` on Takes in the background and returns the file name at once, or nil when
     /// one runs already or ran less than 2 minutes ago. 10 ms between looks, not 1 ms, so the
     /// sampler holds Takes still less often. A stuck `sample` is killed after 30 s.
+    /// seconds: how long it samples (a launch: the whole first 8 s). done gets the file when it ends.
     @discardableResult
-    static func sample(prefix: String = "hang") -> String? {
+    static func sample(prefix: String = "hang", seconds: Int = 2, done: (@Sendable (URL) -> Void)? = nil) -> String? {
         let now = CACurrentMediaTime()
         let go = sampling.withLock {
             guard !running, prefix == "hang" || now - lastStart > 120 else { return false }
@@ -208,11 +209,13 @@ enum HangWatch {
         let name = "\(prefix)-\(f.string(from: Date())).txt"
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/usr/bin/sample")
-        p.arguments = [String(ProcessInfo.processInfo.processIdentifier), "2", "10", "-mayDie", "-file", folder.appending(path: name).path]
+        p.arguments = [String(ProcessInfo.processInfo.processIdentifier), String(seconds), "10", "-mayDie", "-file", folder.appending(path: name).path]
         p.standardOutput = FileHandle.nullDevice
         p.standardError = FileHandle.nullDevice
+        let file = folder.appending(path: name)
         p.terminationHandler = { _ in
             sampling.withLock { running = false }
+            done?(file)
             // Keep the newest ten of each kind.
             let old = ((try? fm.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil)) ?? [])
                 .filter { $0.lastPathComponent.hasPrefix(prefix + "-") }
@@ -221,7 +224,7 @@ enum HangWatch {
             for u in old { try? fm.removeItem(at: u) }
         }
         guard (try? p.run()) != nil else { sampling.withLock { running = false }; return nil }
-        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 30) { if p.isRunning { p.terminate() } }
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + .seconds(seconds + 28)) { if p.isRunning { p.terminate() } }
         return name
     }
 }

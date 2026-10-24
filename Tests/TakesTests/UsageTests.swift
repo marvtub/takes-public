@@ -20,7 +20,8 @@ struct UsageTests {
 
         let r = Usage.report(id: "3F2A1B4C-1111-2222-3333-444455556666", version: "v2026.10.10", os: "26.1",
                              root: root, projects: 1, sessions: [(a, 7, true), (b, 2, false)],
-                             plugins: ["voices", "feedback"], phone: true)
+                             plugins: ["voices", "feedback"], phone: true,
+                             boards: root.appending(path: "boards"), crashes: root.appending(path: "crashes"))
         #expect(r.counts.projects == 1 && r.counts.sessions == 2 && r.counts.takes == 9 && r.counts.edits == 2)
         #expect(r.counts.storyboards == 1 && r.counts.published == 1 && r.counts.phone == 1)
         #expect(r.plugins == ["feedback", "voices"])
@@ -58,8 +59,12 @@ struct UsageTests {
         #expect(Usage.tokens(d).count == 2)
         let raw = String(decoding: d.data(forKey: Usage.tokensKey) ?? Data(), as: UTF8.self)
         #expect(!raw.contains("secret"))
-        let r = Usage.report(id: "3F2A1B4C-1111-2222-3333-444455556666", version: "", os: "", root: FileManager.default.temporaryDirectory,
-                             projects: 0, sessions: [], plugins: [], phone: false, tokens: Usage.tokens(d), now: now)
+        // An empty root of its own (2026-10-21): the whole temp folder held every parallel test's
+        // folders, and reading each one's posts held the main actor ~60 s in a full run.
+        let root = FileManager.default.temporaryDirectory.appending(path: "usage-tokens-\(UUID().uuidString)")
+        let r = Usage.report(id: "3F2A1B4C-1111-2222-3333-444455556666", version: "", os: "", root: root,
+                             projects: 0, sessions: [], plugins: [], phone: false, tokens: Usage.tokens(d),
+                             boards: root.appending(path: "boards"), crashes: root.appending(path: "crashes"), now: now)
         #expect(r.counts.tokens_7d == 7 && r.counts.out_tokens_7d == 1)
     }
 

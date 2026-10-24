@@ -507,6 +507,8 @@ struct LiveEvent: Decodable {
     var paths: [String]?
     /// How full Claude's context is now. From a Mac before 2026-10-03: nil.
     var context: ContextUse?
+    /// "view": the Mac's Public view is on (2026-10-22).
+    var public_view: Bool?
 }
 
 /// What GET /api/update says: empty when nothing waits.

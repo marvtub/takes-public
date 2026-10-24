@@ -659,16 +659,21 @@ struct StylesBoard: View {
     private func make() {
         let x = (dropped.map(\.path) + [example]).joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
         guard !x.isEmpty else { return }
-        ask("""
-        Make a new style from this example: \(x)
-        Call create_style (name it yourself, 1-3 words) and follow every step it returns: the guide, the \
-        tokens, the parts (each kept with save_to_library), and preview.mp4 + preview.png from the shared sample.
-        """)
+        ask(Self.makeAsk(x))
         example = ""
         dropped = []
         asking = false
         makingSince = Date().timeIntervalSince1970
         checkMaking()
+    }
+
+    /// What the Styles chat hears for a new style. The welcome's "Your own" sends it too.
+    static func makeAsk(_ example: String) -> String {
+        """
+        Make a new style from this example: \(example)
+        Call create_style (name it yourself, 1-3 words) and follow every step it returns: the guide, the \
+        tokens, the parts (each kept with save_to_library), and preview.mp4 + preview.png from the shared sample.
+        """
     }
 
     /// The new style has its preview: the Making card becomes the style's own card.

@@ -152,6 +152,14 @@ final class Releaser {
     /// A ready ask for an agent in the Takes repo: where it stopped, why and where the log is.
     var agentAsk: String {
         guard let r = run else { return "" }
+        // No approved notes (2026-10-18): not a bug to fix, a text to write with the user.
+        if r.failedStep?.title == "Checking the release notes" {
+            return "The Takes public release needs its release notes first. In \(Self.repo ?? "the Takes repo"), follow "
+                + "\"Release notes\" in AGENTS.md: run scripts/public/export.py --draft-notes, rewrite the notes for "
+                + "people who use Takes, show them to me, and after my yes set approved: yes, push to main and run "
+                + "Takes > Release to GitHub again."
+                + (r.failure.items.isEmpty ? "" : "\n\nWhat the check said:\n" + r.failure.items.map { "- \($0)" }.joined(separator: "\n"))
+        }
         var s = "The Takes public release stopped at \"\(r.failedStep?.title ?? "the start")\"."
         let why = r.failure
         if !why.items.isEmpty { s += " \(why.title):\n" + why.items.map { "- \($0)" }.joined(separator: "\n") }
@@ -165,7 +173,8 @@ final class Releaser {
     /// One line for the chat agents, so "release Takes" works from any chat.
     nonisolated static var agentNote: String? {
         guard available, let repo else { return nil }
-        return "To release Takes to its public GitHub repo (only when asked), run in bash: \(command(repo)). It copies "
+        return "To release Takes to its public GitHub repo (only when asked), first write the release notes with the "
+            + "user (\"Release notes\" in AGENTS.md: export.py --draft-notes, their yes, approved: yes), then run in bash: \(command(repo)). It copies "
             + "origin/main without personal data, tests the copy and pushes it, then prints the result. "
             + "Never edit or build the public copy by hand."
     }
@@ -291,6 +300,11 @@ struct ReleaseRun: Equatable {
 
     /// The reason in plain words: the failed tests by name, build errors, personal data left.
     var failure: (title: String, items: [String]) {
+        // The notes check (2026-10-18) prints "Release notes not ready:" and one "- " line per problem.
+        if let i = errors.firstIndex(where: { $0.hasPrefix("Release notes not ready") }) {
+            let items = errors[(i + 1)...].filter { $0.hasPrefix("- ") }.map { String($0.dropFirst(2)) }
+            return ("The release notes are not approved yet", Array(items.prefix(6)))
+        }
         var tests: [String] = []
         var other: [String] = []
         for l in errors {

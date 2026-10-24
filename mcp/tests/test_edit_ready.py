@@ -339,9 +339,13 @@ class Prepare(Base):
         self.add_take()
         self.words(self.WORDS)
         os.environ["TAKES_TEST_SLEEP"] = "1.5"
+        log = os.environ["TAKES_TEST_LOG"] = os.path.join(self.root, "log")
         th = threading.Thread(target=t.prepare_take, args=(self.s, 1))
         th.start()
-        time.sleep(0.8)
+        # Rename while the stand-in runs, not while ffmpeg still reads the take (slow on a busy Mac).
+        end = time.time() + 30
+        while not (os.path.exists(log) and "start" in open(log).read()) and time.time() < end:
+            time.sleep(0.02)
         t.t_rename_take({"session": self.s, "take": 1, "name": "Intro"})
         th.join()
         self.assertTrue(os.path.exists(os.path.join(self.s, "take-01-intro-camera.words.json")))
@@ -374,11 +378,16 @@ class Prepare(Base):
         try:
             p = subprocess.Popen([sys.executable, SERVER, "--prepare-run", self.s, "1"], cwd=self.s,
                                  stdout=subprocess.PIPE, text=True, env=dict(os.environ))
-            time.sleep(1.5)
+            # Until it says it waits: a fixed 1.5 s was too short on a busy Mac (2026-10-20).
+            head = ""
+            while "Waits for the recording" not in head:
+                line = p.stdout.readline()
+                if not line: break
+                head += line
             self.assertIsNone(p.poll(), "it waits while the take records")
             self.assertFalse(os.path.exists(os.path.join(self.s, "take-01-camera.words.json")))
             os.remove(marker)
-            out = p.communicate(timeout=30)[0]
+            out = head + p.communicate(timeout=30)[0]
             self.assertIn("Waits for the recording to end.", out)
             self.assertTrue(os.path.exists(os.path.join(self.s, "take-01-camera.words.json")))
             # A marker of a dead app is stale.

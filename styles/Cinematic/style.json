@@ -1,0 +1,6 @@
+{
+  "template": "cinematic",
+  "description": "Film-look talking head for vertical video: dark moody grade, black letterbox bars, Cormorant Garamond subtitles, muted-gold chapter cards.",
+  "source": "Made by hand in Takes; parts adapted from HyperFrames blocks and claude-motion's motion rules.",
+  "shipped": true
+}

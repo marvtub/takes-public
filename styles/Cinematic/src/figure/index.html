@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=1080, height=1920" />
+    <!-- Cinematic figure: over the dimmed, softened picture, a gold small-caps kicker, a serif title,
+         and two rows, each a thin bar with a big serif numeral. The gold goes on the number that
+         matters; the other row stays cream. The source is a muted line under it. Edit FIG below.
+         Put your clip next to this file as footage.mp4. -->
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+    <style>
+      @font-face { font-family: "Cormorant Garamond"; src: url("../../fonts/CormorantGaramond-Variable.ttf"); font-weight: 300 700; }
+      @font-face { font-family: "Cormorant Garamond"; src: url("../../fonts/CormorantGaramond-Italic-Variable.ttf"); font-style: italic; font-weight: 300 700; }
+      :root { --bar: #000; --title: #f3ede2; --gold: #d9b26a; --muted: #a39886; --rule: rgba(243, 237, 226, 0.22);
+              --serif: "Cormorant Garamond", serif; }
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      html, body { width: 1080px; height: 1920px; overflow: hidden; background: var(--bar); }
+      #root { position: relative; width: 100%; height: 100%; overflow: hidden; background: var(--bar); color: var(--title); }
+      #dim { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover;
+             filter: contrast(1.1) saturate(0.7) brightness(0.42) blur(2px); }
+      #vig { position: absolute; inset: 0; background: radial-gradient(ellipse at 50% 40%, transparent 45%, rgba(0, 0, 0, 0.55) 100%); }
+      .bar { position: absolute; left: 0; right: 0; height: 300px; background: var(--bar); }
+      .label { font-family: var(--serif); font-weight: 500; font-size: 28px; letter-spacing: 10px; text-transform: uppercase; }
+      #kicker { position: absolute; left: 96px; right: 96px; top: 880px; text-align: center; color: var(--gold); }
+      #title { position: absolute; left: 96px; right: 96px; top: 932px; text-align: center; font-family: var(--serif); font-size: 92px; line-height: 1.04; }
+      #title em { font-style: italic; color: var(--gold); }
+      #rows { position: absolute; left: 96px; right: 96px; top: 1160px; }
+      .row { padding: 22px 0 20px; border-top: 1px solid var(--rule); }
+      .row .top { display: flex; justify-content: space-between; align-items: baseline; }
+      .row .label { color: var(--muted); }
+      .num { font-family: var(--serif); font-weight: 400; font-size: 120px; line-height: 0.9; white-space: nowrap; }
+      .line { height: 2px; background: var(--title); margin-top: 18px; transform-origin: 0 50%; opacity: 0.85; }
+      .hot .num { color: var(--gold); }
+      .hot .line { background: var(--gold); opacity: 1; }
+      #foot { position: absolute; left: 96px; right: 96px; top: 1530px; text-align: center; font-family: var(--serif); font-style: italic; font-size: 30px; color: var(--muted); }
+    </style>
+  </head>
+  <body>
+    <div id="root" data-composition-id="main" data-start="0" data-duration="6" data-width="1080" data-height="1920">
+      <video id="dim" src="footage.mp4" data-start="0" data-duration="6" data-track-index="0" muted playsinline></video>
+      <div id="vig"></div>
+      <div class="bar" style="top: 0"></div>
+      <div class="bar" style="bottom: 0"></div>
+      <div id="kicker" class="label"></div>
+      <div id="title"></div>
+      <div id="rows"></div>
+      <div id="foot"></div>
+    </div>
+    <script>
+      // value: the bar's length is value / max. hot: the row that gets the gold.
+      const FIG = {
+        kicker: "Fig. I — Hours in a week",
+        title: "Planned is not<br><em>protected.</em>",
+        rows: [{ label: "Planned", value: 40, text: "40 h" }, { label: "Protected", value: 6, text: "6 h", hot: true }],
+        source: "From one founder's calendar, four weeks.",
+      };
+
+      document.getElementById("kicker").textContent = FIG.kicker;
+      document.getElementById("title").innerHTML = FIG.title;
+      document.getElementById("foot").textContent = FIG.source;
+      const max = Math.max(...FIG.rows.map(r => r.value));
+      const rows = document.getElementById("rows");
+      FIG.rows.forEach(r => {
+        const el = document.createElement("div"); el.className = "row" + (r.hot ? " hot" : "");
+        el.innerHTML = '<div class="top"><span class="label"></span><span class="num"></span></div><div class="line"></div>';
+        el.querySelector(".label").textContent = r.label;
+        el.querySelector(".num").textContent = r.text;
+        el.querySelector(".line").style.width = (100 * r.value / max) + "%";
+        rows.appendChild(el);
+      });
+
+      window.__timelines = window.__timelines || {};
+      const tl = gsap.timeline({ paused: true });
+      const fade = { opacity: 1, duration: 0.9, ease: "power2.out" };
+      // The page fades up slowly; then each bar draws and its numeral fades in. Then a long hold.
+      gsap.set(["#kicker", "#title", ".row", "#foot"], { opacity: 0 });
+      gsap.set(".line", { scaleX: 0 });
+      gsap.set(".num", { opacity: 0 });
+      tl.to("#kicker", fade, 0.2);
+      tl.to("#title", fade, 0.5);
+      document.querySelectorAll(".row").forEach((row, i) => {
+        const t = 1.2 + i * 0.7;
+        tl.to(row, { opacity: 1, duration: 0.6, ease: "power2.out" }, t);
+        tl.to(row.querySelector(".line"), { scaleX: 1, duration: 1.0, ease: "power3.out" }, t + 0.1);
+        tl.to(row.querySelector(".num"), fade, t + 0.4);
+      });
+      tl.to("#foot", fade, 2.8);
+      tl.set({}, {}, 6);
+      window.__timelines["main"] = tl;
+      tl.seek(0);
+    </script>
+  </body>
+</html>

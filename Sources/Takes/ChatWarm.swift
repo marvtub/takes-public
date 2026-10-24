@@ -99,4 +99,15 @@ enum WarmPool {
     static func leave(_ chat: ClaudeChat) { waiting.removeAll { $0.chat == nil || $0.chat === chat } }
 
     static var count: Int { waiting.filter { $0.chat != nil }.count }
+
+    /// The processes that only wait for a next message. An update does not wait for them
+    /// (2026-10-19: a parked comment scout held "Updating…" for minutes).
+    static var idlePIDs: Set<pid_t> {
+        Set(waiting.compactMap { e in e.chat.flatMap { $0.running ? nil : $0.warmPID } })
+    }
+
+    /// Ends every waiting process (Takes quits for an update). A chat that runs keeps its own.
+    static func dropIdle() {
+        for e in waiting { if let c = e.chat, !c.running { c.dropWarm() } }
+    }
 }

@@ -286,7 +286,8 @@ struct SessionsView: View {
     /// Performance, Comments, the plugins and Styles: the Mac's sidebar foot, inside the Takes menu
     /// so the sessions keep the screen. Search starts from Find a session (2026-10-11).
     @ViewBuilder private var pages: some View {
-        if Features.socialBoards {
+        // model.publicView: the Mac's Public view redraws this (2026-10-22).
+        if Features.socialBoards && !model.publicView {
             footRow("Performance", icon: "chart.bar.xaxis") { tab?.wrappedValue = "performance" }
             footRow("Comments", icon: "text.bubble") { tab?.wrappedValue = "comments" }
         }
@@ -298,7 +299,8 @@ struct SessionsView: View {
     private var foot: some View {
         VStack(spacing: 1) {
             // Admin only: Ideas' bar, so an idea is one tap away (2026-10-11). Nothing in the public copy.
-            PrivatePhone.homeBar { tab?.wrappedValue = $0 }
+            // Not in the Mac's Public view (2026-10-22).
+            if !model.publicView { PrivatePhone.homeBar { tab?.wrappedValue = $0 } }
             UpdatePill()
             OutboxBar(outbox: model.outbox)
         }

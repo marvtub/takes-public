@@ -24,7 +24,7 @@ Paste this in Terminal:
 curl -fsSL https://gettakes.app/install | bash
 ```
 
-It installs Takes, ffmpeg and Apple's developer tools, then opens Takes. Takes works with Claude Code, Codex or pi: when one of them is on your Mac, the script uses it and helps you sign in. With none, it installs Claude Code. Run it again to update. You can [read the script](https://gettakes.app/install) first: it is 124 lines.
+It installs Takes, ffmpeg and Apple's developer tools, then opens Takes. Takes works with Claude Code, Codex or pi: when one of them is on your Mac, the script uses it and helps you sign in. With none, it installs Claude Code. Run it again to update. You can [read the script](https://gettakes.app/install) first: it is 133 lines.
 
 <details>
 <summary>Other ways to install</summary>

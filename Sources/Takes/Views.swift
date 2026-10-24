@@ -7,6 +7,8 @@ import UniformTypeIdentifiers
 struct TakesApp: App {
     /// The Plugins board can turn a plugin off: draw again without it.
     @AppStorage(Plugins.removedKey) private var pluginsRemoved = ""
+    /// Public view hides admin menu items: draw the menus again when it flips (2026-10-22).
+    @AppStorage(PublicView.key) private var publicViewStored = false
     @NSApplicationDelegateAdaptor private var delegate: AppDelegate
     @State private var app = AppModel()
 
@@ -47,9 +49,13 @@ struct TakesApp: App {
         .commands {
             CommandGroup(replacing: .appInfo) {
                 AboutButton()
-                if Releaser.available {
+                if Releaser.available && !PublicView.on {
                     Button(Releaser.shared.menuTitle) { Releaser.shared.confirmAndRun { app.show(toast: $0) } }
                         .disabled(Releaser.shared.running)
+                }
+                // Public view (2026-10-22): only the user's build has the switch.
+                if Plugins.own {
+                    Toggle("Public View", isOn: PublicView.binding(app)).keyboardShortcut("p", modifiers: [.command, .option])
                 }
             }
             CommandGroup(after: .windowArrangement) {
@@ -62,13 +68,7 @@ struct TakesApp: App {
                 }
                 Button("Styles") { app.toggle(.styles) }.keyboardShortcut("y", modifiers: [.command, .shift])
                 Button("Plugins") { app.toggle(.plugins) }.keyboardShortcut("p", modifiers: [.command, .shift])
-                Button("Chat with Takes") {
-                    // Record: the chat takes the script's column, and goes again.
-                    if app.chats.docked, UserDefaults.standard.string(forKey: "rightTab") == "script", app.board == nil {
-                        if app.chats.onRecord && app.chats.open { app.chats.onRecord = false }
-                        else { app.chats.onRecord = true; app.chats.open = true }
-                    } else { app.chats.open.toggle() }
-                }.keyboardShortcut("l", modifiers: [.command, .shift])
+                Button("Chat with Takes") { app.toggleChat() }.keyboardShortcut("l", modifiers: [.command, .shift])
             }
             CommandGroup(before: .sidebar) {
                 Button("Toggle Sidebar") { app.toggleSidebars() }.keyboardShortcut("b")
@@ -87,12 +87,23 @@ struct TakesApp: App {
                     .keyboardShortcut("0")
                 Divider()
             }
-            CommandGroup(after: .help) {
+            // "Takes Help" said help isn't available (2026-10-22). Ask Takes and Send Feedback have
+            // no shortcut here: ⇧⌘L and ⇧⌘E already belong to the Window menu.
+            CommandGroup(replacing: .help) {
+                HelpButton(title: "Takes Help", page: .guide).keyboardShortcut("?", modifiers: .command)
+                HelpButton(title: "Keyboard Shortcuts", page: .shortcuts).keyboardShortcut("/", modifiers: .command)
+                Link("What’s New in Takes", destination: HelpCenter.releases)
+                Divider()
+                Button("Take the Quick Tour") { SessionMode.set(.record); NotchPanel.shared.tour(app) }
+                    .disabled(app.isRecording)
                 Button("Show Welcome Again") { Onboarding.shared.show() }
                 Button("Add the Demo Session") { Task { await Demo.shared.add(app.library) } }
                     .disabled(Demo.shared.working || app.isRecording)
                 Button("Show First Take Again") { if let doc = app.library.current { FirstTake.shared.show(doc) } }
                     .disabled(app.library.current?.meta.takes.isEmpty ?? true || app.isRecording)
+                Divider()
+                Button("Ask Takes…") { app.openChat() }
+                Link("Send Feedback…", destination: HelpCenter.newIssue)
             }
             CommandGroup(replacing: .newItem) {
                 Button("New Session") { app.library.createSession() }.keyboardShortcut("n")
@@ -125,6 +136,12 @@ struct TakesApp: App {
         }
         .windowStyle(.hiddenTitleBar)
         .defaultSize(width: 960, height: 600)
+        Window("Takes Help", id: "help") {
+            HelpView().environment(app).tint(Theme.accent).foregroundStyle(Theme.ink)
+        }
+        .windowStyle(.hiddenTitleBar)
+        .windowResizability(.contentSize)
+        .defaultPosition(.center)
         Window("About Takes", id: "about") {
             AboutView().environment(app).tint(Theme.accent).foregroundStyle(Theme.ink)
         }
@@ -410,7 +427,7 @@ struct BoardRows: View {
         VStack(alignment: .leading, spacing: 2) {
             SetupButton()
             UpdateButton(library: app.library)
-            ReleaseRow()
+            if PublicView.on { PublicViewPill() } else { ReleaseRow() }
         }
     }
 }
@@ -541,6 +558,8 @@ struct SessionList: View {
     @AppStorage("openPublished") private var openPublished = ""
     @State private var showNewProject = false
     @State private var newProject = ""
+    /// The project waiting for "Move to Trash" in the confirm (2026-10-22: one click trashed it).
+    @State private var trashing: Project?
 
     var body: some View {
         let _ = Perf.body("SessionList")
@@ -599,6 +618,14 @@ struct SessionList: View {
             TakesConfirm(title: "New project", confirm: "Create", field: $newProject, fieldPrompt: "Name",
                          onConfirm: { showNewProject = false; library.createProject(newProject) },
                          onCancel: { showNewProject = false })
+        }
+        .sheet(item: $trashing) { p in
+            let n = library.grouped[p.url]?.count ?? 0
+            TakesConfirm(title: "Move \u{201C}\(p.name)\u{201D} to the Trash?",
+                         message: n == 0 ? "The project is empty." : "Its \(n == 1 ? "session goes" : "\(n) sessions go") with it. You can put it back from the Trash in Finder.",
+                         confirm: "Move to Trash", danger: true,
+                         onConfirm: { trashing = nil; library.trashProject(p.url) },
+                         onCancel: { trashing = nil })
         }
         .overlay {
             if library.projects.isEmpty {
@@ -715,8 +742,8 @@ struct SessionList: View {
                 MenuButton("Rename\u{2026}", icon: "pencil") { startRename(p) }
                 MenuButton("Reveal in Finder", icon: "folder") { library.reveal(p.url) }
                 MenuDivider()
-                MenuButton("Move project to Trash", icon: "trash", enabled: !(busy || recording), danger: true) {
-                    library.trashProject(p.url)
+                MenuButton("Move project to Trash\u{2026}", icon: "trash", enabled: !(busy || recording), danger: true) {
+                    trashing = p
                 }
             }
             .simultaneousGesture(TapGesture(count: 2).onEnded { startRename(p) })
@@ -2154,12 +2181,19 @@ struct BulkView: View {
     }
 }
 
-/// Hover highlight for rows that hold their own buttons.
+/// Hover highlight for rows that hold their own buttons. The hover lives here, not in the list: a
+/// list's hover state redrew the whole list each time a row passed under the pointer (2026-10-22).
 struct HoverBackground: View {
+    var fill = Theme.surface
+    var radius = Theme.radius
+    var style: RoundedCornerStyle = .circular
+    /// Filled without the pointer too (an open row, the picked one).
+    var on = false
+    var onFill: Color? = nil
     @State private var hover = false
     var body: some View {
-        RoundedRectangle(cornerRadius: Theme.radius)
-            .fill(hover ? Theme.surface : .clear)
+        RoundedRectangle(cornerRadius: radius, style: style)
+            .fill(on ? onFill ?? fill : hover ? fill : .clear)
             .onHover { hover = $0 }
     }
 }

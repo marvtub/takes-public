@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=1080, height=1920" />
+    <!-- Field Notes captions: a torn paper strip low in the frame, typewriter text (Courier Prime
+         Bold), one phrase at a time (28 characters or fewer). Karaoke: each word goes from 35% to
+         100% opacity on its spoken time. Words marked with * get the yellow highlighter, which
+         sweeps on as the word is spoken. Put your clip next to this file as footage.mp4 and the
+         words with their start times (from the transcript) in WORDS. -->
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+    <style>
+      @font-face { font-family: "Courier Prime"; src: url("../../fonts/CourierPrime-Bold.ttf"); font-weight: 700; }
+      :root { --tag: #f2e8d3; --ink: #1b1712; --hl: #ffe14d; }
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      html, body { width: 1080px; height: 1920px; overflow: hidden; background: #1b1712; }
+      #root { position: relative; width: 100%; height: 100%; overflow: hidden; }
+      #footage { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+      .strip { position: absolute; left: 60px; top: 1500px; max-width: 960px; padding: 34px 44px; background: var(--tag);
+        background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='300' height='300'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='3' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 0.35 0 0 0 0 0.28 0 0 0 0 0.18 0 0 0 .5 0'/></filter><rect width='300' height='300' filter='url(%23n)'/></svg>");
+        font-family: "Courier Prime", monospace; font-weight: 700; font-size: 52px; line-height: 1.2; color: var(--ink);
+        white-space: nowrap; transform: rotate(-1.5deg); filter: drop-shadow(0 12px 22px rgba(0, 0, 0, 0.4));
+        clip-path: polygon(0 6%,3% 0,9% 4%,15% 0,24% 5%,33% 1%,41% 4%,52% 0,61% 5%,70% 1%,80% 5%,89% 0,96% 4%,100% 2%,100% 95%,96% 100%,88% 96%,78% 100%,67% 95%,57% 100%,46% 96%,36% 100%,25% 95%,14% 100%,6% 96%,0 100%); }
+      .strip:nth-child(even) { transform: rotate(1deg); }
+      mark { background: linear-gradient(transparent 14%, var(--hl) 14%, var(--hl) 90%, transparent 90%) no-repeat 0 0 / 0% 100%; color: inherit; }
+    </style>
+  </head>
+  <body>
+    <div id="root" data-composition-id="main" data-start="0" data-duration="6" data-width="1080" data-height="1920">
+      <video id="footage" src="footage.mp4" data-start="0" data-duration="6" data-track-index="0" muted playsinline></video>
+    </div>
+    <script>
+      // [word, start second]. A * before a word marks it for the highlighter. A phrase ends after a
+      // word that ends in . , ? ! or when the next word would pass MAX characters.
+      const WORDS = [["Up", 0.15], ["here,", 0.35], ["*nobody", 0.8], ["*is", 1.15], ["*allowed", 1.35], ["to", 1.8], ["die.", 2.0],
+                     ["The", 2.8], ["ground", 3.0], ["never", 3.4], ["thaws,", 3.7], ["so", 4.2], ["*nothing", 4.4], ["*rots.", 4.8]];
+      const MAX = 28, END = 5.7;
+
+      const phrases = [];
+      let cur = [];
+      WORDS.forEach(w => {
+        const len = cur.map(x => x[0].replace("*", "")).join(" ").length;
+        if (cur.length && len + 1 + w[0].replace("*", "").length > MAX) { phrases.push(cur); cur = []; }
+        cur.push(w);
+        if (/[.,?!]$/.test(w[0])) { phrases.push(cur); cur = []; }
+      });
+      if (cur.length) phrases.push(cur);
+
+      window.__timelines = window.__timelines || {};
+      const tl = gsap.timeline({ paused: true });
+      const root = document.getElementById("root");
+      phrases.forEach((p, k) => {
+        const el = document.createElement("div"); el.className = "strip"; root.appendChild(el);
+        // Words in a row that are marked share one <mark>, so the highlighter runs through the spaces.
+        const runs = [];
+        const spans = p.map(([w], i) => {
+          const hl = w[0] === "*", s = document.createElement("span"); s.textContent = w.replace("*", "");
+          let parent = el;
+          if (hl) {
+            const prev = runs[runs.length - 1];
+            if (prev && prev.last === i - 1) { parent = prev.el; prev.last = i; }
+            else { const m = document.createElement("mark"); el.appendChild(m); runs.push({ el: m, first: i, last: i }); parent = m; }
+          }
+          if (i > 0) parent.appendChild(document.createTextNode(" "));
+          parent.appendChild(s); return s;
+        });
+        const from = p[0][1], to = k + 1 < phrases.length ? phrases[k + 1][0][1] : END;
+        gsap.set(el, { opacity: 0 });
+        gsap.set(spans, { opacity: 0.35 });
+        // The strip is slapped on: a short drop, no fade-in to read through.
+        tl.fromTo(el, { opacity: 0, y: -14 }, { opacity: 1, y: 0, duration: 0.16, ease: "power3.out", immediateRender: false }, from - 0.08);
+        spans.forEach((s, i) => tl.set(s, { opacity: 1 }, p[i][1]));
+        // The highlighter sweeps over a run from its first spoken word to its last.
+        runs.forEach(r => tl.to(r.el, { backgroundSize: "100% 100%", duration: Math.max(0.22, p[r.last][1] - p[r.first][1] + 0.2), ease: "sine.inOut" }, p[r.first][1]));
+        tl.set(el, { opacity: 0 }, to - 0.08);
+      });
+      tl.set({}, {}, 6);
+      window.__timelines["main"] = tl;
+      tl.seek(0);
+    </script>
+  </body>
+</html>

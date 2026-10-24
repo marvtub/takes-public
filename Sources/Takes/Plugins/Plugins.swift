@@ -42,6 +42,9 @@ struct TakesPlugin: Identifiable {
     /// Runs once when the app starts, for work on a schedule that must not wait for the board
     /// (2026-10-13, a weekly check). The plugin shows the schedule on its board.
     var start: (@MainActor (AppModel) -> Void)? = nil
+    /// Cards under a chat's last message (2026-10-19): the plugin returns a view for the chats it knows, nil for the
+    /// rest. The chat panel draws it below the transcript, so a card can carry buttons that act on the board.
+    var chatFoot: (@MainActor (ClaudeChat) -> AnyView?)? = nil
 }
 
 /// A plugin's part of the phone server. `route` answers the requests it knows (with the library
@@ -103,7 +106,10 @@ struct PostSide: Identifiable {
 
 enum Plugins {
     /// Every plugin this build has, on or off: the public ones, then the user's.
-    static var available: [TakesPlugin] { [Feedback.plugin, Consistency.plugin, ReplicatePage.plugin, HiggsfieldPage.plugin, VoicesPage.plugin, SkillsPlugin.plugin] + PrivatePlugins.list }
+    static var built: [TakesPlugin] { [Feedback.plugin, Consistency.plugin, ReplicatePage.plugin, HiggsfieldPage.plugin, VoicesPage.plugin, SoundFXPage.plugin, SkillsPlugin.plugin] + PrivatePlugins.list }
+    /// The plugins the app shows: in Public view (2026-10-22) only the public ones. Background
+    /// jobs and board chats use `built`, so the admin plugins keep running unseen.
+    static var available: [TakesPlugin] { PublicView.on ? built.filter { !adminOnly($0) } : built }
     /// The plugin the Plugins board shows.
     static let pickedKey = "pluginsPicked"
     /// The installed ones. Read from UserDefaults (not an observed model), so the phone server can
@@ -125,6 +131,11 @@ enum Plugins {
     static func named(_ id: String) -> TakesPlugin? { all.first { $0.id == id } }
     /// An installed plugin whose board chat the phone may open.
     static func chatPlugin(_ id: String) -> TakesPlugin? { named(id).flatMap { $0.chatContext == nil ? nil : $0 } }
+    /// The same, hidden ones too: a board chat's context while Public view hides its board (2026-10-22).
+    /// Site stats and Ideas send to their chats in the background.
+    static func builtChatPlugin(_ id: String) -> TakesPlugin? {
+        built.first { $0.id == id && !removed.contains($0.id) && $0.chatContext != nil }
+    }
     static var postSides: [PostSide] { all.flatMap(\.postSides) }
     static var recordHooks: [RecordHook] { all.compactMap(\.record) }
     static var phoneHooks: [PhoneHook] { all.compactMap(\.phone) }
@@ -139,6 +150,9 @@ enum Plugins {
     static var own: Bool { !PrivatePlugins.list.isEmpty }
     /// Only in the user's build: the public copy leaves Plugins/Private out (2026-10-08).
     static func adminOnly(_ p: TakesPlugin) -> Bool { PrivatePlugins.list.contains { $0.id == p.id } }
+    /// Admin-only things the screen shows (2026-10-22): The user's build, not in Public view. `own`
+    /// stays the check for his data and paths, which Public view does not change.
+    static var showsAdmin: Bool { own && !PublicView.on }
 }
 
 /// The sidebar row of a plugin, like Performance and Comments above it.
@@ -197,7 +211,7 @@ struct PluginsBoard: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text("Plugins").font(Theme.display(22)).foregroundStyle(Theme.ink)
                     .padding(.horizontal, 10).padding(.bottom, 12)
-                if Plugins.own {
+                if Plugins.showsAdmin {
                     // The user's build: public and admin-only plugins apart, so he sees what ships (2026-10-08).
                     group("Public", list.filter { !Plugins.adminOnly($0) }, current)
                     group("Admin only", list.filter(Plugins.adminOnly), current).padding(.top, 14)
@@ -263,7 +277,7 @@ struct PluginsBoard: View {
                         .background(Theme.accentSoft, in: RoundedRectangle(cornerRadius: 11))
                     VStack(alignment: .leading, spacing: 4) {
                         Text(p.title).font(Theme.display(26)).foregroundStyle(Theme.ink)
-                        if Plugins.own { scope(p).padding(.bottom, 2) }
+                        if Plugins.showsAdmin { scope(p).padding(.bottom, 2) }
                         Text(p.help).font(Theme.sans(12.5)).foregroundStyle(Theme.muted)
                             .fixedSize(horizontal: false, vertical: true)
                     }

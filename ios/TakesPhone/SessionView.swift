@@ -1407,8 +1407,9 @@ struct PostView: View {
                 if !sideOn.isEmpty {
                     LaunchPhone.pane(sessionID: sessionID, posts: sideOn, reload: reload)
                 } else {
-                    if let other, other.platform == "article", Features.blog {
+                    if let other, other.platform == "article", Features.blog, !model.publicView {
                         // The blog's own page, as the Mac's Article side (admin, Features.blog).
+                        // model.publicView: the Mac's Public view redraws this (2026-10-22).
                         ArticlePhone.pane(sessionID: sessionID, post: other, reload: reload)
                     } else if let other { platformPost(other) } else { linkedIn }
                     if (post != nil || other != nil) && other?.platform != "article" { covers }

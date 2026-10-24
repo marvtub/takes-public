@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=1080, height=1920" />
+    <!-- Clean Studio captions: a white pill under the face, Inter 600, one phrase at a time (24
+         characters or fewer). Karaoke: each word goes from soft grey to ink as it is spoken. The pill
+         rises in gently and fades out. Put your clip next to this file as footage.mp4 and the words
+         with their start times (from the transcript) in WORDS. -->
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+    <style>
+      @font-face { font-family: "Inter"; src: url("../../fonts/Inter-Medium.ttf"); font-weight: 500; }
+      @font-face { font-family: "Inter"; src: url("../../fonts/Inter-SemiBold.ttf"); font-weight: 600; }
+      :root { --ink: #1c1c22; --soon: #9a9aa2; --panel: rgba(255, 255, 255, 0.94); }
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      html, body { width: 1080px; height: 1920px; overflow: hidden; background: #f7f4ef; }
+      #root { position: relative; width: 100%; height: 100%; overflow: hidden; }
+      #footage { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+      .cp { position: absolute; left: 0; right: 0; margin: 0 auto; width: max-content; top: 1460px; white-space: nowrap;
+            background: var(--panel); border-radius: 999px; padding: 18px 40px; box-shadow: 0 12px 30px rgba(0, 0, 0, 0.18);
+            font-family: "Inter", sans-serif; font-weight: 600; font-size: 52px; line-height: 1.2; }
+      .cp .w { color: var(--soon); }
+    </style>
+  </head>
+  <body>
+    <div id="root" data-composition-id="main" data-start="0" data-duration="6" data-width="1080" data-height="1920">
+      <video id="footage" src="footage.mp4" data-start="0" data-duration="6" data-track-index="0" muted playsinline></video>
+    </div>
+    <script>
+      // [word, start second]. A phrase ends after a word that ends in . , ? ! or when the next
+      // word would pass MAX characters.
+      const WORDS = [["Most", 0.3], ["weeks", 0.55], ["get", 0.85], ["loud.", 1.05],
+                     ["Plan", 2.1], ["it", 2.35], ["on", 2.5], ["Sunday,", 2.7], ["then", 3.4], ["protect", 3.6],
+                     ["the", 3.95], ["plan.", 4.1]];
+      const MAX = 24, END = 5.6;
+
+      const phrases = [];
+      let cur = [];
+      WORDS.forEach(w => {
+        const len = cur.map(x => x[0]).join(" ").length;
+        if (cur.length && len + 1 + w[0].length > MAX) { phrases.push(cur); cur = []; }
+        cur.push(w);
+        if (/[.,?!]$/.test(w[0])) { phrases.push(cur); cur = []; }
+      });
+      if (cur.length) phrases.push(cur);
+
+      window.__timelines = window.__timelines || {};
+      const tl = gsap.timeline({ paused: true });
+      const root = document.getElementById("root");
+      phrases.forEach((p, k) => {
+        const el = document.createElement("div"); el.className = "cp"; root.appendChild(el);
+        const spans = p.map(([w], i) => {
+          const s = document.createElement("span"); s.className = "w"; s.textContent = w; el.appendChild(s);
+          if (i < p.length - 1) el.appendChild(document.createTextNode(" "));
+          return s;
+        });
+        const from = p[0][1], to = k + 1 < phrases.length ? phrases[k + 1][0][1] : END;
+        gsap.set(el, { opacity: 0 });
+        tl.fromTo(el, { opacity: 0, y: 16 }, { opacity: 1, y: 0, duration: 0.3, ease: "power3.out", immediateRender: false }, from - 0.1);
+        spans.forEach((s, i) => tl.to(s, { color: "#1c1c22", duration: 0.12, ease: "power2.out" }, p[i][1]));
+        tl.to(el, { opacity: 0, duration: 0.12, ease: "power2.in" }, to - 0.14);
+      });
+      tl.set({}, {}, 6);
+      window.__timelines["main"] = tl;
+      tl.seek(0);
+    </script>
+  </body>
+</html>

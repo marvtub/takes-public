@@ -1,7 +1,7 @@
 #!/bin/bash
 # Keeps Takes alive on the iPhone with a free Apple ID. A free signing profile stops after 7 days,
 # so this gets a new one and installs the app again before that. It runs every hour (LaunchAgent);
-# it only builds when the profile has less than 3 days left and the iPhone answers (Wi-Fi or cable).
+# it only builds when the profile has less than 5 days left and the iPhone answers (Wi-Fi or cable).
 #   ./refresh.sh          check now, renew if needed
 #   ./refresh.sh --force  renew now
 #   ./refresh.sh --setup  install the hourly LaunchAgent
@@ -12,7 +12,7 @@ export PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
 BUNDLE=de.marvinaziz.takes.phone
 LABEL=de.marvinaziz.takes.phone-refresh
 PROFILES="$HOME/Library/Developer/Xcode/UserData/Provisioning Profiles"
-RENEW_DAYS=3
+RENEW_DAYS=5   # 5 days of slack: the phone was out of reach for 4 days (2026-10-16 to 20)
 # When the profile on the iPhone stops (epoch seconds), written after each install.
 STATE="$HOME/Library/Application Support/Takes/phone-app-expires"
 # Why the last renew failed, for the phone to show. Removed after a renew works.
@@ -74,9 +74,9 @@ DEVICE=$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1]))["result"]["
 rm -f "$J"
 if [[ -z "$DEVICE" ]] || ! xcrun devicectl device info details --device "$DEVICE" --timeout 30 >/dev/null 2>&1; then
   log "iPhone not reachable; profile has ${left}h left. Trying again in an hour."
-  # Warn once a day in the last day, at 9 in the morning.
-  if (( left >= 0 && left < 24 )) && [[ "$(date +%H)" == "09" ]]; then
-    notify "Takes stops on the iPhone in ${left}h. Put the iPhone on the Mac's Wi-Fi, unlocked."
+  # Warn once a day in the last two days, at 9 in the morning.
+  if (( left >= 0 && left < 48 )) && [[ "$(date +%H)" == "09" ]]; then
+    notify "Takes stops on the iPhone in ${left}h. Plug the iPhone into the Mac, unlocked."
   fi
   exit 0
 fi

@@ -43,7 +43,9 @@ if [[ "${SKIP_TESTS:-}" == 1 ]]; then :
 elif passed_has "$(tree_now)"; then echo "Tests passed on this tree already: not run again."
 else ./test.sh --quiet
 fi
-swift build -c release
+took "tests"
+"${LOW[@]}" swift build -c release
+took "release build"
 # A .noindex folder: Spotlight skips it, so macOS never registers this copy and never opens it
 # in place of ~/Applications/Takes.app (old copies kept opening, 2026-10-01).
 APP=build.noindex/Takes.app
@@ -59,8 +61,12 @@ mkdir -p "$APP/Contents/Resources/Fonts" && cp assets/fonts/*.ttf "$APP/Contents
 # The fonts' licenses (SIL OFL) must go with every copy of the fonts.
 mkdir -p "$APP/Contents/Resources/Licenses" && cp assets/fonts/*-OFL.txt "$APP/Contents/Resources/Licenses/"
 mkdir -p "$APP/Contents/Resources/Onboarding" && cp assets/onboarding/creator.jpg "$APP/Contents/Resources/Onboarding/"
+# Page 4 of the welcome: one made-up creator in each look the app ships (styles/).
+mkdir -p "$APP/Contents/Resources/Onboarding/styles" && cp assets/onboarding/styles/*.jpg "$APP/Contents/Resources/Onboarding/styles/"
 mkdir -p "$APP/Contents/Resources/Article"
 mkdir -p "$APP/Contents/Resources/Agents" && cp assets/agents/*.svg assets/agents/*.png "$APP/Contents/Resources/Agents/"
+# Sound FX: six sounds the page plays before earshot is installed (assets/sfx/README.md).
+mkdir -p "$APP/Contents/Resources/SFX" && cp assets/sfx/*.m4a "$APP/Contents/Resources/SFX/"
 mkdir -p "$APP/Contents/Resources/Brand" && cp assets/brand/mascot-512.png "$APP/Contents/Resources/Brand/mascot.png" && cp assets/brand/mascot-body-512.png "$APP/Contents/Resources/Brand/mascot-body.png"
 cp Info.plist "$APP/Contents/Info.plist"
 # The search helper (embed/, ⌘K by meaning). MLX needs Xcode and its Metal toolchain, which
@@ -68,10 +74,21 @@ cp Info.plist "$APP/Contents/Info.plist"
 # file names and transcripts only. The model itself is never in the app: Takes downloads it.
 XCODE=/Applications/Xcode.app/Contents/Developer
 if [[ -d embed && -d "$XCODE" ]] && DEVELOPER_DIR="$XCODE" xcrun metal --version >/dev/null 2>&1; then
-  (cd embed && DEVELOPER_DIR="$XCODE" xcodebuild -quiet -scheme TakesEmbed -configuration Release \
-    -destination 'platform=macOS,arch=arm64' -derivedDataPath .build-xcode build > .build-xcode.log 2>&1) \
-    || { tail -30 embed/.build-xcode.log; echo "The search helper did not build (embed/.build-xcode.log)." >&2; exit 1; }
-  E=embed/.build-xcode/Build/Products/Release
+  # A cold MLX build takes 10 to 50 min, and every new worktree starts cold. So keep the built
+  # helper per commit of embed/ in one cache all worktrees share; a changed embed/ builds again.
+  E="$HOME/Library/Caches/Takes/embed/$(git rev-parse HEAD:embed)"
+  if [[ -n "$(git status --porcelain embed)" || ! -x "$E/takes-embed" ]]; then
+    (cd embed && DEVELOPER_DIR="$XCODE" "${LOW[@]}" xcodebuild -quiet -scheme TakesEmbed -configuration Release \
+      -destination 'platform=macOS,arch=arm64' -derivedDataPath .build-xcode build > .build-xcode.log 2>&1) \
+      || { tail -30 embed/.build-xcode.log; echo "The search helper did not build (embed/.build-xcode.log)." >&2; exit 1; }
+    took "search helper build"
+    E=embed/.build-xcode/Build/Products/Release
+    if [[ -z "$(git status --porcelain embed)" ]]; then
+      C="$HOME/Library/Caches/Takes/embed/$(git rev-parse HEAD:embed)"
+      rm -rf "$C.tmp" && mkdir -p "$C.tmp" && cp "$E/takes-embed" "$C.tmp/" && cp -R "$E"/*.bundle "$C.tmp/" \
+        && rm -rf "$C" && mv "$C.tmp" "$C"
+    fi
+  fi
   cp "$E/takes-embed" "$APP/Contents/MacOS/takes-embed"
   for b in "$E"/*.bundle; do cp -R "$b" "$APP/Contents/Resources/"; done
   mkdir -p "$APP/Contents/Resources/Licenses/takes-embed" && cp embed/licenses/* "$APP/Contents/Resources/Licenses/takes-embed/"
@@ -80,6 +97,13 @@ else
 fi
 # Skills for Claude Code that the app installs at launch (the public copy ships them in skills/).
 [[ -d skills ]] && cp -R skills "$APP/Contents/Resources/skills"
+# Admin-only skills (admin/skills): the public copy has no admin/ folder, so this adds nothing there.
+if [[ -d admin/skills ]]; then
+  mkdir -p "$APP/Contents/Resources/skills"
+  for d in admin/skills/*/; do
+    [[ -f "$d/SKILL.md" ]] && cp -R "${d%/}" "$APP/Contents/Resources/skills/"
+  done
+fi
 # Default styles, copied into the library at launch (StyleLib.seed). Only what a style needs.
 if [[ -d styles ]]; then
   mkdir -p "$APP/Contents/Resources/styles"
@@ -87,7 +111,7 @@ if [[ -d styles ]]; then
 fi
 # The skills the Skills plugin lists: Takes' own (scripts/public/skills, or skills/ in the public copy).
 mkdir -p "$APP/Contents/Resources/plugin-skills"
-for d in skills/*/ scripts/public/skills/*/; do
+for d in skills/*/ scripts/public/skills/*/ admin/skills/*/; do
   if [[ -f "$d/SKILL.md" ]]; then cp -R "${d%/}" "$APP/Contents/Resources/plugin-skills/"; fi  # if, not &&: a glob with no match ends the loop non-zero under set -e
 done
 # The stamp tells a running Takes that a staged build is new; the changes go in the Update tooltip.

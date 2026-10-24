@@ -83,6 +83,7 @@ extension AppModel {
 
     private func exists(_ s: NavSpot) -> Bool {
         if case .plugin(let id)? = s.board { return Plugins.named(id)?.board != nil }
+        if s.board == .performance || s.board == .comments { return Features.socialBoards }  // Public view (2026-10-22)
         return s.session.map { FileManager.default.fileExists(atPath: $0.path) } ?? true
     }
 

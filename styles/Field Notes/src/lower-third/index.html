@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=1080, height=1920" />
+    <!-- Field Notes place tag: a paper tag with typewriter coordinates and the place name, tilted
+         like it was stuck on, and one red marker note that writes itself on, left to right.
+         Use it the first time a new place is on screen. Keep the note off the face: it goes in the
+         sky or the background, never across the eyes or the mouth.
+         Starts from HyperFrames' lt-side-rule (Apache-2.0): its two-line lockup is the tag here.
+         Put your clip next to this file as footage.mp4, and edit TEXT and AT. -->
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+    <style>
+      @font-face { font-family: "Courier Prime"; src: url("../../fonts/CourierPrime-Regular.ttf"); font-weight: 400; }
+      @font-face { font-family: "Courier Prime"; src: url("../../fonts/CourierPrime-Bold.ttf"); font-weight: 700; }
+      @font-face { font-family: "Caveat Brush"; src: url("../../fonts/CaveatBrush-Regular.ttf"); font-weight: 400; }
+      :root { --tag: #f2e8d3; --ink: #1b1712; --muted: #6b5b45; --marker: #e2231a; }
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      html, body { width: 1080px; height: 1920px; overflow: hidden; background: #1b1712; }
+      #root { position: relative; width: 100%; height: 100%; overflow: hidden; }
+      #footage { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+      #tag { position: absolute; left: 70px; top: 150px; padding: 24px 32px 22px; background: var(--tag);
+        background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='300' height='300'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='3' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 0.35 0 0 0 0 0.28 0 0 0 0 0.18 0 0 0 .5 0'/></filter><rect width='300' height='300' filter='url(%23n)'/></svg>");
+        transform: rotate(-2deg); box-shadow: 0 10px 24px rgba(0, 0, 0, 0.35); font-family: "Courier Prime", monospace; white-space: nowrap; }
+      #coords { font-size: 26px; font-weight: 400; color: var(--muted); letter-spacing: 0.04em; }
+      #place { font-size: 48px; font-weight: 700; color: var(--ink); margin-top: 6px; }
+      #note { position: absolute; right: 62px; top: 236px; font-family: "Caveat Brush", cursive; font-size: 58px; line-height: 0.95;
+        color: var(--marker); text-transform: uppercase; text-align: right; transform: rotate(5deg); white-space: nowrap;
+        text-shadow: 0 2px 8px rgba(255, 255, 255, 0.45); }
+      #note .ln { display: block; }
+    </style>
+  </head>
+  <body>
+    <div id="root" data-composition-id="main" data-start="0" data-duration="5" data-width="1080" data-height="1920">
+      <video id="footage" src="footage.mp4" data-start="0" data-duration="5" data-track-index="0" muted playsinline></video>
+      <div id="tag"><div id="coords"></div><div id="place"></div></div>
+      <div id="note"></div>
+    </div>
+    <script>
+      // note: one or two short lines, 16 characters or fewer each.
+      const TEXT = { coords: "78.2232° N, 15.6267° E", place: "Svalbard, Norway", note: ["the coldest", "town on earth"] };
+      const AT = { tag: 0.3, note: 1.0, out: 4.4 };
+
+      document.getElementById("coords").textContent = TEXT.coords;
+      document.getElementById("place").textContent = TEXT.place;
+      const lines = TEXT.note.map(t => {
+        const s = document.createElement("span"); s.className = "ln"; s.textContent = t;
+        document.getElementById("note").appendChild(s); return s;
+      });
+
+      window.__timelines = window.__timelines || {};
+      const tl = gsap.timeline({ paused: true });
+      // In: the tag is stuck on (a short drop and settle), then the marker writes each line.
+      gsap.set("#tag", { opacity: 0, y: -24, rotation: -5 });
+      gsap.set(lines, { clipPath: "inset(-20% 100% -20% 0)" });
+      tl.to("#tag", { opacity: 1, y: 0, rotation: -2, duration: 0.4, ease: "power3.out" }, AT.tag);
+      lines.forEach((l, i) => tl.to(l, { clipPath: "inset(-20% 0% -20% 0)", duration: 0.55, ease: "sine.inOut" }, AT.note + i * 0.6));
+      // Out: about half as long, all together.
+      tl.to(["#tag", "#note"], { opacity: 0, y: -10, duration: 0.22, ease: "power2.in" }, AT.out);
+      tl.set({}, {}, 5);
+      window.__timelines["main"] = tl;
+      tl.seek(0);
+    </script>
+  </body>
+</html>

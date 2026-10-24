@@ -131,12 +131,15 @@ final class Updater {
     /// and counts the check: this version, the macOS version and whether an iPhone used this Mac
     /// in the last 7 days. `from` is set on the first check of a new version: the version before
     /// it (an update), or "new" (a first install). No ID. GitHub itself is the fallback.
-    nonisolated static func checkURL(own: String, phone: Bool, from: String? = nil) -> URL {
+    /// `ref` (2026-10-20): the random install code from a download link that named its source
+    /// (InstallRef), sent only with a first install's check.
+    nonisolated static func checkURL(own: String, phone: Bool, from: String? = nil, ref: String? = nil) -> URL {
         let v = ProcessInfo.processInfo.operatingSystemVersion
         var c = URLComponents(string: "https://gettakes.app/latest")!
         c.queryItems = [.init(name: "v", value: own), .init(name: "os", value: "\(v.majorVersion).\(v.minorVersion)"),
                         .init(name: "phone", value: phone ? "1" : "0")]
         if let from { c.queryItems?.append(.init(name: "from", value: from)) }
+        if from == "new", let ref, InstallRef.isCode(ref) { c.queryItems?.append(.init(name: "ref", value: ref)) }
         return c.url!
     }
 
@@ -155,12 +158,19 @@ final class Updater {
         guard let own = ownRelease, !fetching, !applying else { return }
         fetching = true
         let github = URL(string: "https://api.github.com/repos/\(Self.releaseRepo)/releases/latest")!
-        let api = Self.checkURL(own: own, phone: PhoneServer.usedRecently(), from: Self.checkFrom(own: own))
+        let from = Self.checkFrom(own: own), phone = PhoneServer.usedRecently()
         let stage = waiting.deletingLastPathComponent(), skip = staged?.release, id = Bundle.main.bundleIdentifier ?? ""
         Task { @MainActor in
             defer { fetching = false }
-            // Counted once gettakes.app answered, so an offline launch keeps the update to tell.
-            let counted: @Sendable () -> Void = { UserDefaults.standard.set(own, forKey: Self.checkedKey) }
+            // Only a first install looks for an install code (it runs hdiutil, so off the main thread).
+            let ref = from == "new" ? await Task.detached { InstallRef.find() }.value : nil
+            let api = Self.checkURL(own: own, phone: phone, from: from, ref: ref)
+            // Counted once gettakes.app answered, so an offline launch keeps the update to tell. The
+            // code went with that check (or is no use after it), so its file goes too.
+            let counted: @Sendable () -> Void = {
+                UserDefaults.standard.set(own, forKey: Self.checkedKey)
+                try? FileManager.default.removeItem(at: InstallRef.file)
+            }
             if await Self.fetchRelease(api: api, fallback: github, own: own, skip: skip, bundleID: id, into: stage, answered: counted) != nil {
                 lastRead = nil; check()
             }
@@ -291,6 +301,7 @@ final class Updater {
         if recording() { return "the recording" }
         // Claude replies, exports and voice cleanup run as child processes. The ⌘K search helper
         // runs all the time and only holds an index it saves as it goes, so it does not count.
+        // Nor does a chat process that only waits for the next message: its answer is saved.
         let p = Process()
         let out = Pipe()
         p.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
@@ -300,9 +311,10 @@ final class Updater {
         guard (try? p.run()) != nil else { return nil }
         let data = out.fileHandleForReading.readDataToEndOfFile()
         p.waitUntilExit()
-        let helper = MediaSearch.shared.helperPID
+        var ignore = WarmPool.idlePIDs
+        if let helper = MediaSearch.shared.helperPID { ignore.insert(helper) }
         let kids = String(decoding: data, as: UTF8.self).split(whereSeparator: \.isNewline).compactMap { Int32($0) }
-        return kids.contains { $0 != helper } ? "a chat reply or an export" : nil
+        return kids.contains { !ignore.contains($0) } ? "a chat reply or an export" : nil
     }
 
     /// Waits until nothing records or runs, then a small shell swaps the bundles after this
@@ -317,6 +329,7 @@ final class Updater {
             }
             waitingFor = nil
             MediaSearch.shared.stopHelper()   // it saves its index and quits
+            WarmPool.dropIdle()
             let old = waiting.deletingLastPathComponent().appendingPathComponent("previous.app")
             let script = """
             while kill -0 \(getpid()) 2>/dev/null; do sleep 0.2; done

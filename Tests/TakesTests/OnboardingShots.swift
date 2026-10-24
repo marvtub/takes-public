@@ -91,6 +91,7 @@ let onboardingDir = ProcessInfo.processInfo.environment["TAKES_ONBOARDING"]
         where f.pathExtension == "ttf" { CTFontManagerRegisterFontsForURL(f as CFURL, .process, nil) }
         NSApp.applicationIconImage = NSImage(contentsOf: repo.appending(path: "assets/Takes.icns"))
         Onboarding.creator = NSImage(contentsOf: repo.appending(path: "assets/onboarding/creator.jpg"))
+        Onboarding.tiles = repo.appending(path: "assets/onboarding/styles")
         Look.shared.palette = .graphite
         defer { Look.shared.reset() }
         let d = UserDefaults.standard
@@ -113,12 +114,22 @@ let onboardingDir = ProcessInfo.processInfo.environment["TAKES_ONBOARDING"]
                 flow.page = p
                 if p == 2 {
                     // A new Mac: nothing installed yet.
+                    flow.hasIdea = true; flow.idea = "How I plan my week"
                     setup.agent = .missing; setup.signedIn = .missing; setup.ffmpeg = .missing; setup.devTools = .missing
                     await shoot("3-start-setup\(tag)", window(), dark: dark)
                     setup.agent = .ok; setup.signedIn = .ok; setup.ffmpeg = .ok; setup.devTools = .ok; setup.devTools = .ok
                     await shoot("3-start-ready\(tag)", window(), dark: dark)
+                    flow.hasIdea = false; flow.idea = ""
+                    await shoot("3-suggest\(tag)", window(), dark: dark)
+                    flow.hasIdea = true
+                } else if p == 3 {
+                    flow.ownStage = false; flow.look = "Magazine"
+                    await shoot("4-look\(tag)", window(), dark: dark)
+                    flow.ownStage = true; flow.look = nil
+                    await shoot("4-own\(tag)", window(), dark: dark)
+                    flow.ownStage = false; flow.look = "Magazine"
                 } else {
-                    await shoot(p == 0 ? "1-welcome\(tag)" : "2-how\(tag)", window(), dark: dark)
+                    await shoot(p == 0 ? "1-welcome\(tag)" : "2-idea\(tag)", window(), dark: dark)
                 }
             }
         }
@@ -142,13 +153,14 @@ let onboardingDir = ProcessInfo.processInfo.environment["TAKES_ONBOARDING"]
         ClaudeChat.claudeOverride = fake.path
         defer { ClaudeChat.claudeOverride = nil }
         flow.write("How I plan my week", app: app)
+        flow.done(app: app)
         let doc = try #require(app.library.current)
         let chat = app.chats.chat(doc.url)
         let end = Date().addingTimeInterval(10)
         while chat.running && Date() < end { try await Task.sleep(for: .milliseconds(50)) }
         app.library.reload()
         for dark in [true, false] {
-            await shoot("4-after-write\(dark ? "" : "-light")", window(), dark: dark)
+            await shoot("5-after-write\(dark ? "" : "-light")", window(), dark: dark)
         }
     }
 }

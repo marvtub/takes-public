@@ -14,7 +14,13 @@ WORDS = ("so the next thing we build is a small tool that reads every take and f
 
 
 def ff(*args):
-    subprocess.run([FF, "-v", "error", "-y"] + [str(a) for a in args], check=True)
+    args = [str(a) for a in args]
+    # Test videos encode at veryfast: at the default preset their encodes were half of Reframe's CPU
+    # (2026-10-22). A call that names its own preset keeps it.
+    if "libx264" in args and "-preset" not in args:
+        i = args.index("libx264") + 1
+        args[i:i] = ["-preset", "veryfast"]
+    subprocess.run([FF, "-v", "error", "-y"] + args, check=True)
 
 
 def voice_gate(path, seconds=20.0, seed=7, rate=1000):

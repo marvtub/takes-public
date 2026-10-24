@@ -246,7 +246,10 @@ class Jobs(unittest.TestCase):
         t.write_job(t.job_path(self.s, "job-cccccc"), dict(young, started=ago(seconds=31)))
         self.assertEqual(t.read_job(self.s, "job-cccccc")["status"], "lost")
         for pid in subprocess.run(["pgrep", "-f", "sleep 30.0173"], capture_output=True, text=True).stdout.split():
-            os.kill(int(pid), signal.SIGTERM)
+            try:
+                os.kill(int(pid), signal.SIGTERM)
+            except ProcessLookupError:  # it ended between pgrep and here
+                pass
 
     def test_timeout(self):
         os.environ["TAKES_JOB_TIMEOUT"] = "1"
@@ -359,7 +362,12 @@ class Jobs(unittest.TestCase):
     def test_list_shows_running_and_recent_and_writes_no_told(self):
         a = self.run_job("sleep 3")["job"]
         b = self.run_job("true", label="Quick")["job"]
-        time.sleep(1)
+        end = time.time() + 30  # a running and b done, not a fixed second: slow on a busy Mac
+        while time.time() < end:  # the list, not get_job by id: that one writes .told
+            now = {j["job"]: j["status"] for j in t.t_get_job({"session": self.s})["jobs"]}
+            if (now.get(a), now.get(b)) == ("running", "done"):
+                break
+            time.sleep(0.05)
         t.write_job(t.job_path(self.s, "job-dddddd"), {"v": 1, "id": "job-dddddd", "label": "Old", "status": "done",
                                                        "started": ago(days=2), "ended": ago(days=2)})
         jobs = t.t_get_job({"session": self.s})["jobs"]

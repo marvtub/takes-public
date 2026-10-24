@@ -338,9 +338,17 @@ private struct MiniPhone: View {
     }
 }
 
-/// Private for now (2026-10-04), like Features on the Mac: the public export turns it off.
+/// Private for now (2026-10-04), like Features on the Mac: the public export turns the Built values off.
 enum Features {
-    static let socialBoards = false
-    /// The blog's Article side of the Post tab (2026-10-09), as the Mac's Features.blog.
-    static let blog = false
+    /// What this build has (2026-10-22).
+    enum Built {
+        static let socialBoards = false
+        /// The blog's Article side of the Post tab (2026-10-09), as the Mac's Features.blog.
+        static let blog = false
+    }
+    /// The Mac's Public view (2026-10-22): its last word, saved, so an offline start agrees.
+    static let publicViewKey = "macPublicView"
+    static var publicView: Bool { UserDefaults.standard.bool(forKey: publicViewKey) }
+    static var socialBoards: Bool { Built.socialBoards && !publicView }
+    static var blog: Bool { Built.blog && !publicView }
 }
