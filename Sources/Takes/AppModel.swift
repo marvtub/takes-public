@@ -77,6 +77,9 @@ final class AppModel {
     /// The script shows in the notch panel. Record then shows a small stand-in, not a second
     /// prompter that scrolls along with it.
     var notchOpen = false
+    /// The screen pill is up. It has record, stop and the notch button, so the notch shows only
+    /// the words and keeps its own controls for when you point at it (2026-10-29).
+    var screenPillOpen = false
     /// A plugin's clip on the Record stage: its width over its height, so the stage can frame it.
     var stageAspect: CGFloat = 16.0 / 9.0
     /// The notch's quick tour runs: the main window goes dark, so the eye goes to the notch.
@@ -393,6 +396,15 @@ final class AppModel {
     /// while they do, so a request never changes the screen or plays a video: it waits as a notice
     /// (the pill on the stage, a dot in the sidebar) until he clicks it (2026-10-01).
     func handle(url: URL) {
+        // takes://new?text=<words>&title=<page title>: the browser extension. A new Inbox session,
+        // shown as a notice like an agent's request.
+        if url.scheme == "takes", url.host == "new" {
+            let q = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+            let value = { (name: String) in q.first { $0.name == name }?.value ?? "" }
+            guard let made = library.addSession(script: value("text"), title: value("title")) else { return }
+            notices.append(AgentNotice(path: made, session: made))
+            return
+        }
         guard url.scheme == "takes",
               let path = URLComponents(url: url, resolvingAgainstBaseURL: false)?
                 .queryItems?.first(where: { $0.name == "path" })?.value else { return }

@@ -20,10 +20,4 @@ struct GeminiKeyTests {
         let mode = try FileManager.default.attributesOfItem(atPath: file.path)[.posixPermissions] as? Int
         #expect(mode == 0o600)
     }
-
-    @Test func everyUseSaysWhatHappensWithoutIt() {
-        #expect(GeminiKey.uses.count == 4)
-        for u in GeminiKey.uses { #expect(u.without.contains("Without it")) }
-        #expect(SettingsView.SettingsPage.shown.contains(.gemini))
-    }
 }

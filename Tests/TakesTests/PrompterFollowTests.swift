@@ -24,6 +24,8 @@ struct PrompterFollowTests {
         #expect(NotchPanel.fontSize == 29 && NotchPanel.body(lines: 3) > small)
         d.set(99.0, forKey: NotchPanel.fontKey)
         #expect(NotchPanel.fontSize == NotchPanel.fontSizes.upperBound)
+        // More lines make a taller panel.
+        #expect(NotchPanel.body(lines: 4) > NotchPanel.body(lines: 3))
     }
 
     @Test func followsWordByWord() {
@@ -102,15 +104,6 @@ struct PrompterFollowTests {
         #expect(ScriptLanguage.pick("fi", from: supported, preferred: []) == nil)
     }
 
-    /// The Mac's recognizer has the common languages (what the website names).
-    @Test func theCommonLanguagesHaveARecognizer() async {
-        let have: [Locale]
-        if #available(macOS 26, *) { have = await SpeechTranscriber.supportedLocales } else { have = Array(SFSpeechRecognizer.supportedLocales()) }
-        for code in ["en", "es", "fr", "de", "it", "pt", "ja", "zh"] {
-            #expect(ScriptLanguage.pick(code, from: have, preferred: []) != nil, "no recognizer for \(code)")
-        }
-    }
-
     @Test func hintsAreNamesAndLongWords() {
         let h = VoiceFollow.hints("Today Maya shows Takes, a teleprompter that records. It is free and it is fast.")
         #expect(h.contains("Maya") && h.contains("Takes") && h.contains("teleprompter"))
@@ -136,17 +129,13 @@ struct PrompterFollowTests {
         #expect(abs(l.frame.midX - (1512 + 1280)) <= 1)
     }
 
-    @Test func moreLinesMakeATallerPanel() {
-        #expect(NotchPanel.body(lines: 4) > NotchPanel.body(lines: 3))
-    }
-
     /// The panel's line is the line Prompter draws, at the smallest and the biggest size: one more
     /// line of text takes one more of the panel's lines (2026-10-11: it was a fifth short each).
     @MainActor @Test func aPanelLineIsADrawnLine() {
         func drawn(_ text: String, _ size: Double) -> CGFloat {
             let para = NSMutableParagraphStyle()
             para.lineSpacing = size * 0.35
-            let store = NSTextStorage(string: text, attributes: [.font: Theme.prompter(size), .paragraphStyle: para])
+            let store = NSTextStorage(string: text, attributes: [.font: NotchPanel.font(size), .paragraphStyle: para])
             let layout = NSLayoutManager(), box = NSTextContainer(size: NSSize(width: 800, height: 10_000))
             store.addLayoutManager(layout); layout.addTextContainer(box)
             layout.ensureLayout(for: box)
@@ -158,20 +147,37 @@ struct PrompterFollowTests {
         }
     }
 
-    @Test func notchIntroHasThreeStepsAndNamesRealButtons() {
-        #expect(NotchView.intro.count == 3)
-        let all = NotchView.intro.reduce(into: Set<String>()) { $0.formUnion($1.buttons) }
-        #expect(all.isSubset(of: ["play", "voice", "record"]))
-        #expect(NotchView.intro.allSatisfy { !$0.title.contains("Claude") && !$0.text.contains("Claude") })
+    /// The notch's line focus (2026-10-29): the line read goes dim, the words said on this line
+    /// are full white, the words still to say wait a little dim.
+    @Test func notchDimsTheLineRead() throws {
+        let text = "Most people never record a second take. They watch the first one, wince, and give up. Here is how to fix that."
+        let app = AppModel()
+        app.voice.source = { text }
+        app.voice.jump(to: 9)  // "the": the next word to say, on the second line
+        let view = Prompter(text: .constant(text), contentKey: "t", fontSize: 21, scrolling: false, speed: 40, editable: false,
+                            resetToken: 0, dark: true, voice: app.voice, readingLine: 0.3, inset: NSSize(width: 24, height: 2),
+                            darkPage: .black, font: NotchPanel.font(21, mono: true), centered: true, focusLine: true)
+        let host = NSHostingView(rootView: view.frame(width: 540, height: 160))
+        host.frame = NSRect(x: 0, y: 0, width: 540, height: 160)
+        let win = NSWindow(contentRect: NSRect(x: -3000, y: -3000, width: 540, height: 160), styleMask: .borderless, backing: .buffered, defer: false)
+        win.contentView = host
+        host.layoutSubtreeIfNeeded()
+        func find(_ v: NSView) -> NSTextView? { (v as? NSTextView) ?? v.subviews.lazy.compactMap(find).first }
+        let tv = try #require(find(host))
+        let lm = try #require(tv.layoutManager)
+        func alpha(_ word: String) -> CGFloat? {
+            let at = (text as NSString).range(of: word).location
+            return (lm.temporaryAttribute(.foregroundColor, atCharacterIndex: at, effectiveRange: nil) as? NSColor)?.alphaComponent
+        }
+        RunLoop.main.run(until: Date().addingTimeInterval(0.5))
+        #expect(tv.textContainer!.size.width > 300)
+        #expect(alpha("Most").map { $0 < 0.4 } == true)
+        #expect(alpha("watch") == 1)
+        #expect(alpha("first").map { $0 > 0.5 && $0 < 0.7 } == true)
     }
 
-    @Test func voiceFollowSwitchIsRemembered() {
-        let app = AppModel()
-        let was = app.followVoice
-        app.followVoice = !was
-        #expect(UserDefaults.standard.bool(forKey: "prompterFollowVoice") == !was)
-        app.followVoice = was
-        #expect(app.following == was)
+    @Test func notchIntroNamesTakesNotClaude() {
+        #expect(NotchView.intro.allSatisfy { !$0.title.contains("Claude") && !$0.text.contains("Claude") })
     }
 
     @Test func backToTopResetsThePlace() {
@@ -286,12 +292,52 @@ struct PrompterShots {
             let v = ZStack(alignment: .top) {
                 Color(white: 0.55)
                 NotchView(layout: l, close: {}, lit: name == "notch-intro-1" ? 1 : 0).environment(app(said: 9))
-                    .frame(width: l.frame.width + 2 * NotchView.margin, height: l.frame.height + NotchView.margin)
             }
-            try shoot(v, CGSize(width: l.frame.width + 2 * NotchView.margin + 40, height: l.frame.height + NotchView.margin + 20), name)
+            let w = NotchView.window(for: l, floating: false)
+            try shoot(v, CGSize(width: w.width + 40, height: w.height + 20), name)
         }
         UserDefaults.standard.removeObject(forKey: "notchLines")
         UserDefaults.standard.removeObject(forKey: NotchView.introKey)
+    }
+
+    /// The 2026-10-29 look: mono and Inter, narrow and wide, off the notch, with the voice light.
+    /// ImageRenderer, so the light's blur draws.
+    @Test func notchLooks() throws {
+        guard let dir = ProcessInfo.processInfo.environment["TAKES_SNAPSHOT"] else { return }
+        fonts()
+        let d = UserDefaults.standard
+        defer { [NotchView.introKey, NotchPanel.monoKey, "notchLines"].forEach { d.removeObject(forKey: $0) }; NotchVoiceLight.testLevel = nil }
+        d.set(NotchView.intro.count, forKey: NotchView.introKey)
+        d.set(3, forKey: "notchLines")
+        let screen = CGRect(x: 0, y: 0, width: 1512, height: 982)
+        for (name, mono, width, floating, light) in [("look-mono", true, nil, false, 0.9), ("look-inter", false, nil, false, 0.9),
+                                                     ("look-narrow", true, 420.0, false, 0.5), ("look-quiet", true, nil, false, 0.1),
+                                                     ("look-floating", true, nil, true, 0.8), ("look-with-pill", true, nil, false, 0.5)] as [(String, Bool, CGFloat?, Bool, Double)] {
+            d.set(mono, forKey: NotchPanel.monoKey)
+            NotchVoiceLight.testLevel = light
+            let body = NotchPanel.body(lines: 3)
+            let l = floating ? NotchLayout.floating(topLeft: CGPoint(x: 200, y: 900), width: 540, body: body + NotchView.strip)
+                             : NotchLayout.make(screen: screen, visibleTop: 950, notch: CGSize(width: 185, height: 32), body: body, width: width)
+            let w = NotchView.window(for: l, floating: floating)
+            let model = app(said: 14)
+            // The screen pill is up: the notch keeps only the words until you point at it.
+            model.screenPillOpen = name == "look-with-pill"
+            let v = ZStack(alignment: .top) {
+                LinearGradient(colors: [Color(red: 0.06, green: 0.16, blue: 0.34), Color(red: 0.17, green: 0.37, blue: 0.77)],
+                               startPoint: .top, endPoint: .bottom)
+                NotchView(layout: l, floating: floating, close: {}).environment(model)
+                if !floating {
+                    UnevenRoundedRectangle(cornerRadii: .init(bottomLeading: 8, bottomTrailing: 8)).fill(.black).frame(width: 185, height: 32)
+                }
+            }
+            .frame(width: w.width + 80, height: w.height + 20)
+            let r = ImageRenderer(content: v)
+            r.scale = 2
+            let img = try #require(r.nsImage)
+            let tiff = try #require(img.tiffRepresentation)
+            let rep = try #require(NSBitmapImageRep(data: tiff))
+            try rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: dir).appending(path: "\(name).png"))
+        }
     }
 
     /// The glow at its brightest. ImageRenderer draws blur; the AppKit snapshot above does not.

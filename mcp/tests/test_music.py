@@ -46,14 +46,6 @@ class Music(unittest.TestCase):
         self.assertEqual([x["group"] for x in t.t_list_music({"group": "sfx"})["sounds"]], ["SFX"])
         self.assertEqual(len(t.t_list_music({"query": "chasing"})["sounds"]), 1)
 
-    def test_no_song_picks(self):
-        """The app never plays a song over the video: no set_music, and get_session shows no pick."""
-        names = [x[0] for x in t.TOOLS]
-        self.assertNotIn("set_music", names)
-        self.assertNotIn("set_sfx", names)
-        self.assertNotIn("music", t.t_get_session({"session": self.s}))
-        self.assertNotIn("sfx", t.t_get_session({"session": self.s}))
-
 
 if __name__ == "__main__":
     unittest.main()

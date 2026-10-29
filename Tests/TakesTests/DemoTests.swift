@@ -64,17 +64,17 @@ import Testing
         let script = try String(contentsOf: url.appending(path: "script.md"), encoding: .utf8)
         #expect(script.hasPrefix("This app records the take"))
         #expect(lib.current?.meta.title == "Your first video")
-    }
-
-    @Test func aBrokenPackGivesTheScriptToo() async throws {
-        let saved = Demo.pack
-        defer { cleanup(saved) }
-        let lib = try fresh()
-        let bad = root.appending(path: "bad.zip")
-        try Data("not a zip".utf8).write(to: bad)
-        Demo.pack = bad
-        let url = try #require(await Demo.shared.add(lib))
-        #expect(FileManager.default.fileExists(atPath: url.appending(path: "script.md").path))
+        // A broken pack gives the script too.
+        do {
+            let saved = Demo.pack
+            defer { cleanup(saved) }
+            let lib = try fresh()
+            let bad = root.appending(path: "bad.zip")
+            try Data("not a zip".utf8).write(to: bad)
+            Demo.pack = bad
+            let url = try #require(await Demo.shared.add(lib))
+            #expect(FileManager.default.fileExists(atPath: url.appending(path: "script.md").path))
+        }
     }
 
     @Test func onlyAnEmptyLibraryGetsItOnItsOwn() async throws {

@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=1080, height=1920" />
+    <!-- Glass graph: a frosted-glass card in the lower third. A label, a big number that counts up,
+         and five bars that grow one after the other. The footage blurs through the glass.
+         The footage is footage.mp4 next to this file: the moment of the cut, at the size of the edit, from 0 s.
+         The size of the edit is data-width / data-height on #root (1080x1920, 1080x1350, 1080x1080, 1920x1080 all work).
+         In 9:16 the card is the tall one in the lower third. In other shapes it is shorter (lower bars, 32 px labels) and
+         centred near the bottom, so it stays under the face.
+         Render as mp4 (full frame, the footage is in the picture). Without footage.mp4, delete the
+         <video> line, set --glass to rgba(18, 18, 22, 0.75) and render as mov: the card then has
+         alpha and a dark tint, but no blur.
+         Edit TEXT, DATA and AT below. The length is data-duration on #root (seconds). -->
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+    <style>
+      @font-face { font-family: "Inter"; src: url("fonts/Inter-Medium.ttf"); font-weight: 500; }
+      @font-face { font-family: "Inter"; src: url("fonts/Inter-SemiBold.ttf"); font-weight: 600; }
+      :root { --ink: #f6f4f0; --muted: rgba(246, 244, 240, 0.62); --accent: #ff9f4a;
+              --glass: rgba(18, 18, 22, 0.42); --edge: rgba(255, 255, 255, 0.22); --sans: "Inter", sans-serif; }
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      html, body { width: 100%; height: 100%; overflow: hidden; background: transparent; }
+      #root { position: relative; width: 100%; height: 100%; overflow: hidden; }
+      #footage { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+      #card { position: absolute; left: 84px; right: 84px; bottom: 300px; height: 470px; padding: 48px 52px 40px;
+        border-radius: 48px; background: var(--glass); border: 2px solid var(--edge);
+        backdrop-filter: blur(34px) saturate(150%); -webkit-backdrop-filter: blur(34px) saturate(150%);
+        box-shadow: inset 0 2px 0 rgba(255, 255, 255, 0.18), 0 40px 90px rgba(0, 0, 0, 0.35);
+        font-family: var(--sans); color: var(--ink); opacity: 0; }
+      #top { display: flex; justify-content: space-between; align-items: flex-start; }
+      #label { font-weight: 500; font-size: 30px; letter-spacing: 0.04em; color: var(--muted); padding-top: 14px; }
+      #num { font-weight: 600; font-size: 112px; line-height: 1; letter-spacing: -0.03em; font-variant-numeric: tabular-nums; }
+      #bars { position: absolute; left: 52px; right: 52px; bottom: 40px; height: 230px; display: flex; gap: 20px; align-items: flex-end; }
+      .col { flex: 1; height: 100%; display: flex; flex-direction: column; justify-content: flex-end; align-items: stretch; }
+      .bar { width: 100%; border-radius: 16px 16px 8px 8px; transform-origin: 50% 100%;
+        background: linear-gradient(180deg, rgba(255, 255, 255, 0.92), rgba(255, 255, 255, 0.38)); }
+      .bar.top { background: linear-gradient(180deg, var(--accent), rgba(255, 159, 74, 0.45)); }
+      .cap { margin-top: 14px; text-align: center; font-weight: 500; font-size: 28px; letter-spacing: -0.01em; color: var(--muted); }
+      /* Shapes other than 9:16: a shorter card with bigger small type. The script sets its place. */
+      .short #card { width: 912px; height: 390px; padding: 40px 48px 34px; }
+      .short #label { font-size: 32px; padding-top: 12px; }
+      .short #num { font-size: 100px; }
+      .short #bars { left: 48px; right: 48px; bottom: 34px; height: 172px; gap: 16px; }
+      .short .cap { margin-top: 10px; font-size: 32px; letter-spacing: -0.02em; white-space: nowrap; }
+    </style>
+  </head>
+  <body>
+    <div id="root" data-composition-id="main" data-start="0" data-duration="6" data-width="1080" data-height="1920">
+      <video id="footage" src="footage.mp4" data-start="0" data-duration="6" muted playsinline></video>
+      <div id="card">
+        <div id="top"><div id="label"></div><div id="num">0</div></div>
+        <div id="bars"></div>
+      </div>
+    </div>
+    <script>
+      // The text and the numbers. The tallest bar is in the accent colour.
+      const TEXT = { label: "Views · one reel" };
+      const DATA = { total: 552866,
+        bars: [["Likes", 41], ["Comments", 78], ["Reposts", 18], ["Shares", 33], ["Saves", 55]] };
+      // When things happen (seconds). out = when the card starts to leave.
+      const AT = { card: 0.2, count: 0.5, countFor: 1.9, bars: 0.75, stagger: 0.12, out: 5.4 };
+      // The space under the card (px), per shape of the edit.
+      const BOTTOM = { tall: 300, "4:5": 160, square: 48, wide: 48 };
+
+      // The frame comes from data-width / data-height on #root. 9:16 keeps the tall card; other shapes get the short one.
+      const root = document.getElementById("root"), W = +root.dataset.width, H = +root.dataset.height;
+      const SHAPE = W / H < 0.7 ? "tall" : W / H < 0.95 ? "4:5" : W / H < 1.3 ? "square" : "wide";
+      const cardEl = document.getElementById("card");
+      if (SHAPE !== "tall") { root.classList.add("short"); Object.assign(cardEl.style, { left: (W - 912) / 2 + "px", right: "auto" }); }
+      cardEl.style.bottom = BOTTOM[SHAPE] + "px";
+      const BAR_H = SHAPE === "tall" ? 170 : 110;
+
+      document.getElementById("label").textContent = TEXT.label;
+      const max = Math.max(...DATA.bars.map((b) => b[1]));
+      const bars = DATA.bars.map(([name, v]) => {
+        const col = document.createElement("div"); col.className = "col";
+        const bar = document.createElement("div"); bar.className = "bar" + (v === max ? " top" : "");
+        bar.style.height = Math.round((v / max) * BAR_H) + "px";
+        const cap = document.createElement("div"); cap.className = "cap"; cap.textContent = name;
+        col.append(bar, cap); document.getElementById("bars").appendChild(col);
+        return bar;
+      });
+
+      const num = document.getElementById("num");
+      const n = { v: 0 };
+      const tl = gsap.timeline({ paused: true });
+      gsap.set(bars, { scaleY: 0 });
+      tl.fromTo("#card", { opacity: 0, y: 70, scale: 0.96 }, { opacity: 1, y: 0, scale: 1, duration: 0.6, ease: "power3.out" }, AT.card);
+      tl.to(n, { v: DATA.total, duration: AT.countFor, ease: "power2.out",
+        onUpdate: () => { num.textContent = Math.round(n.v).toLocaleString("en-US"); } }, AT.count);
+      bars.forEach((b, i) => tl.to(b, { scaleY: 1, duration: 0.7, ease: "power3.out" }, AT.bars + i * AT.stagger));
+      tl.to("#card", { opacity: 0, y: 40, duration: 0.3, ease: "power2.in" }, AT.out);
+      window.__timelines["main"] = tl;
+      tl.seek(0);
+    </script>
+  </body>
+</html>

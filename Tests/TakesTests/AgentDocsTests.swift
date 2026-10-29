@@ -53,9 +53,7 @@ struct AgentDocsTests {
             }
         }
         #expect(missing.isEmpty, "The docs name files that are gone:\n\(missing.joined(separator: "\n"))")
-    }
-
-    @Test func aMissingFileIsCaught() {
+        // The parser finds names of files, not folders, globs or home paths.
         let refs = Self.references(in: "Read `Gone.swift`, `mcp/gone.py`, `edits/`, `Phone*.swift` and `~/Movies`.",
                                    topLevel: ["mcp"])
         #expect(refs == ["Gone.swift", "mcp/gone.py"])

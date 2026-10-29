@@ -34,6 +34,8 @@ class SearchMedia(unittest.TestCase):
     def test_without_the_model_it_says_so(self):
         out = t.t_search_media({"query": "hands typing"})
         self.assertIn("downloading", out["error"])
+        # An empty query is refused.
+        self.assertIn("error", t.t_search_media({"query": "  "}))
 
     def test_hits_carry_path_kind_and_time(self):
         open(os.path.join(self.models, "text-q8", "model.safetensors"), "w").close()
@@ -46,9 +48,6 @@ class SearchMedia(unittest.TestCase):
         self.assertEqual(args[-1], "hands typing")
         self.assertIn("video,script", args)
         self.assertEqual(args[args.index("--limit") + 1], "5")
-
-    def test_an_empty_query_is_refused(self):
-        self.assertIn("error", t.t_search_media({"query": "  "}))
 
 
 if __name__ == "__main__":

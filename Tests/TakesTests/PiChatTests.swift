@@ -101,8 +101,8 @@ struct PiRunTests {
         Agents.overrides[.pi] = script.path
 
         func read(_ f: String) -> String { (try? String(contentsOf: dir.appending(path: f), encoding: .utf8)) ?? "" }
-        func until(_ ok: () -> Bool) async {
-            let end = Date().addingTimeInterval(15)
+        func until(_ ok: () -> Bool) async {  // only a failing test waits this long
+            let end = Date().addingTimeInterval(30)
             while !ok() && Date() < end { try? await Task.sleep(for: .milliseconds(50)) }
         }
 

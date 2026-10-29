@@ -28,8 +28,7 @@ class GeminiKey(unittest.TestCase):
     def test_the_saved_key_wins_over_an_older_one(self):
         self.env("GOOGLE_AI_API_KEY=old\nexport GEMINI_API_KEY=\"new\"\n")
         self.assertEqual(t.gemini_key(), "new")
-
-    def test_older_name_still_works(self):
+        # The older name alone still works.
         self.env("GOOGLE_AI_API_KEY='g'\n")
         self.assertEqual(t.gemini_key(), "g")
 

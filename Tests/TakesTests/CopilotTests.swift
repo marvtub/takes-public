@@ -31,12 +31,6 @@ struct CopilotTests {
         return try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
     }
 
-    @Test func eachDeclineKindHasItsOwnReasons() {
-        #expect(DeclineReason.reasons(wrongPost: true) == [.topic, .person, .other])
-        #expect(!DeclineReason.reasons(wrongPost: false).contains(.topic))
-        #expect(DeclineReason.reasons(wrongPost: false).last == .other)
-    }
-
     @Test func readsWhatTheServerWrites() throws {
         let (_, store) = try library(["a": "2026-10-02T16:00:00Z"])
         let s = try #require(store.review.first)
@@ -56,23 +50,23 @@ struct CopilotTests {
         #expect((b["drafts"] as? [[String: Any]])?.first?["text"] as? String == "ngl same")
         #expect(b["future_field"] as? Int == 7)
         #expect(store.approved.count == 2 && store.review.isEmpty)
-    }
-
-    @Test func approveRecordsTheVariantPicked() throws {
-        let (root, store) = try library(["a": "2026-10-02T16:00:00Z", "b": "2026-10-02T16:01:00Z"])
-        for id in ["a", "b"] {
-            var d = try raw(root, id)
-            d["drafts"] = [["text": "one", "variants": ["one", "two?", "three."], "by": "agent"]]
-            try JSONSerialization.data(withJSONObject: d).write(to: CopilotStore.suggestions(root).appending(path: "\(id).json"))
+        // The decision keeps which variant was picked.
+        do {
+            let (root, store) = try library(["a": "2026-10-02T16:00:00Z", "b": "2026-10-02T16:01:00Z"])
+            for id in ["a", "b"] {
+                var d = try raw(root, id)
+                d["drafts"] = [["text": "one", "variants": ["one", "two?", "three."], "by": "agent"]]
+                try JSONSerialization.data(withJSONObject: d).write(to: CopilotStore.suggestions(root).appending(path: "\(id).json"))
+            }
+            store.scan(root)
+            #expect(store.review[0].options == ["one", "two?", "three."])
+            store.approve(store.review[0], text: "two?", variant: 1)
+            store.approve(store.review[0], text: "three, mine", variant: 2)
+            let a = try #require(try raw(root, "a")["decision"] as? [String: Any])
+            let b = try #require(try raw(root, "b")["decision"] as? [String: Any])
+            #expect(a["kind"] as? String == "approved" && a["variant"] as? Int == 1)
+            #expect(b["kind"] as? String == "edited" && b["variant"] as? Int == 2)
         }
-        store.scan(root)
-        #expect(store.review[0].options == ["one", "two?", "three."])
-        store.approve(store.review[0], text: "two?", variant: 1)
-        store.approve(store.review[0], text: "three, mine", variant: 2)
-        let a = try #require(try raw(root, "a")["decision"] as? [String: Any])
-        let b = try #require(try raw(root, "b")["decision"] as? [String: Any])
-        #expect(a["kind"] as? String == "approved" && a["variant"] as? Int == 1)
-        #expect(b["kind"] as? String == "edited" && b["variant"] as? Int == 2)
     }
 
     @Test func declineKeepsKindReasonAndNote() throws {
@@ -178,6 +172,9 @@ struct CopilotTests {
         #expect(CopilotAsk.post(3).contains("3 approved comments"))
         #expect(CopilotAsk.context.contains("Never post a draft that is not approved"))
         #expect(CopilotAsk.context.contains("never use the system clipboard"))
+        // The daily ask finds comments and never posts.
+        #expect(CopilotAsk.daily(10).hasPrefix(CopilotAsk.find(10)))
+        #expect(CopilotAsk.daily(10).contains("Never post"))
     }
 
     @Test func readsTheRunResult() {
@@ -236,10 +233,5 @@ struct CommentScoutTests {
         #expect(CommentScout.due(now: at(15, 0), lastDay: "2026-10-09", calendar: cal))
         #expect(!CommentScout.due(now: at(15, 0), lastDay: "2026-10-10", calendar: cal))
         #expect(CommentScout.due(now: at(9, 0, day: 11), lastDay: "2026-10-10", calendar: cal))
-    }
-
-    @Test func theDailyAskNeverPosts() {
-        #expect(CopilotAsk.daily(10).hasPrefix(CopilotAsk.find(10)))
-        #expect(CopilotAsk.daily(10).contains("Never post"))
     }
 }

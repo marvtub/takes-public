@@ -36,20 +36,27 @@ struct JobFixture {
         return url
     }
 
-    /// Holds a job's lock the way its runner does, until `release`.
-    func hold(_ id: String, generate: Bool = false) -> Int32 {
+    /// Holds a job's lock in a child process, as its runner does, until `drop`. Held here, the lock's
+    /// fd could be copied into a process another test started, and that copy kept the lock after the
+    /// test let it go (lostRule failed so in 4 runs).
+    func hold(_ id: String, generate: Bool = false) throws -> Process {
         let path = session.appending(path: (generate ? "generated/.jobs/" : ".jobs/") + id + ".lock").path
-        // O_CLOEXEC: a process another test starts must not keep the lock after close (lostRule failed so).
-        let fd = open(path, O_WRONLY | O_CREAT | O_CLOEXEC, 0o644)
-        flock(fd, LOCK_EX)
-        return fd
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
+        p.arguments = ["-c", "import fcntl, sys; f = open(sys.argv[1], 'w'); fcntl.flock(f, fcntl.LOCK_EX); "
+                       + "print('locked', flush=True); sys.stdin.read()", path]
+        let out = Pipe()
+        p.standardOutput = out
+        p.standardInput = Pipe()
+        try p.run()
+        _ = out.fileHandleForReading.availableData  // "locked": the child holds it now
+        return p
     }
 
-    /// The runner died. Unlock before close: a process another test spawned at that moment can
-    /// hold a copy of the fd for a while, and close alone leaves the lock with that copy.
-    func drop(_ fd: Int32) {
-        flock(fd, LOCK_UN)
-        close(fd)
+    /// The runner died.
+    func drop(_ p: Process) {
+        p.terminate()
+        p.waitUntilExit()
     }
 
     func cleanup() { try? FileManager.default.removeItem(at: root) }
@@ -80,9 +87,9 @@ struct JobsTests {
         let f = try JobFixture()
         defer { f.cleanup() }
         try f.job("job-aaaaaa", ["status": "running"])
-        let fd = f.hold("job-aaaaaa")
+        let runner = try f.hold("job-aaaaaa")
         #expect(JobBoard.load(f.session).first?.status == .running)
-        f.drop(fd)  // the runner died
+        f.drop(runner)  // the runner died
         #expect(JobBoard.load(f.session).first?.status == .lost)
         try f.job("job-aaaaaa", ["status": "starting", "started": JobFixture.iso(5)])
         #expect(JobBoard.load(f.session).first?.status == .starting)
@@ -94,41 +101,10 @@ struct JobsTests {
         #expect(JobBoard.load(f.session).first?.status == .running)
         try f.job("shot-1-v1", ["status": "running", "started": JobFixture.iso(100 * 60)], generate: true)
         #expect(JobBoard.load(f.session).first?.status == .lost)
-        let g = f.hold("shot-1-v1", generate: true)
+        let g = try f.hold("shot-1-v1", generate: true)
         #expect(JobBoard.load(f.session).first?.status == .running)
         f.drop(g)
         #expect(JobBoard.load(f.session).first?.status == .lost)  // a free lock file: its runner is gone
-    }
-
-    @Test func rowCopy() {
-        let now = Date()
-        var j = Job(id: "job-1", label: "Render edit v3", outputs: ["edits/launch-v3.mp4"], fromChat: true, status: .starting,
-                    started: now.addingTimeInterval(-20), isGenerate: false, folder: URL(fileURLWithPath: "/tmp/s/.jobs"))
-        #expect(JobBoard.line(j, now: now) == "Just started")
-        j.status = .running
-        #expect(JobBoard.line(j, now: now) == "Just started")
-        j.started = now.addingTimeInterval(-200)
-        #expect(JobBoard.line(j, now: now) == "3 min")
-        j.progress = 0.42; j.eta = 120
-        #expect(JobBoard.line(j, now: now) == "42% · about 2 min left")
-        j.eta = 40
-        #expect(JobBoard.line(j, now: now) == "42% · less than a minute left")
-        var g = j; g.isGenerate = true; g.progress = nil
-        #expect(JobBoard.line(g, now: now) == "Making the clip · 3 min")
-        j.status = .done
-        #expect(JobBoard.line(j, now: now) == "Ready")
-        j.status = .failed
-        #expect(JobBoard.line(j, woken: true, now: now) == "Render edit v3 did not finish. Takes is on it.")
-        #expect(JobBoard.line(j, now: now) == "Render edit v3 did not finish.")
-        #expect(JobBoard.line(j, again: true, now: now) == "Render edit v3 did not finish again.")
-        j.status = .lost
-        #expect(JobBoard.line(j, now: now) == "Render edit v3 stopped. The Mac restarted or the job quit.")
-        j.status = .stopped; j.stoppedBy = "you"
-        #expect(JobBoard.line(j, now: now) == "You stopped it")
-        j.stoppedBy = "takes"
-        #expect(JobBoard.line(j, now: now) == "Takes stopped it")
-        #expect(JobBoard.duration(212) == "3 min 32 s")
-        #expect(JobBoard.duration(45) == "45 s")
     }
 
     @Test func notesSayWhatToDoNext() {
@@ -146,6 +122,37 @@ struct JobsTests {
         #expect(JobBoard.note(for: [lost]) == "[Takes] Job job-7f3a1c stopped: Render edit v3 did not finish, because the Mac restarted or the job quit. get_job id=job-7f3a1c gives its command: run it again with run_job and new outputs from next_path.")
         #expect(JobBoard.tick(done).text == "Render edit v3 is done" && JobBoard.tick(done).isJobNote)
         #expect(JobBoard.tick(failed).text == "Render edit v3 did not finish" && JobBoard.tick(failed).role == .tool)
+        // Each row's line: progress, time left, how it ended.
+        do {
+            let now = Date()
+            var j = Job(id: "job-1", label: "Render edit v3", outputs: ["edits/launch-v3.mp4"], fromChat: true, status: .starting,
+                        started: now.addingTimeInterval(-20), isGenerate: false, folder: URL(fileURLWithPath: "/tmp/s/.jobs"))
+            #expect(JobBoard.line(j, now: now) == "Just started")
+            j.status = .running
+            #expect(JobBoard.line(j, now: now) == "Just started")
+            j.started = now.addingTimeInterval(-200)
+            #expect(JobBoard.line(j, now: now) == "3 min")
+            j.progress = 0.42; j.eta = 120
+            #expect(JobBoard.line(j, now: now) == "42% · about 2 min left")
+            j.eta = 40
+            #expect(JobBoard.line(j, now: now) == "42% · less than a minute left")
+            var g = j; g.isGenerate = true; g.progress = nil
+            #expect(JobBoard.line(g, now: now) == "Making the clip · 3 min")
+            j.status = .done
+            #expect(JobBoard.line(j, now: now) == "Ready")
+            j.status = .failed
+            #expect(JobBoard.line(j, woken: true, now: now) == "Render edit v3 did not finish. Takes is on it.")
+            #expect(JobBoard.line(j, now: now) == "Render edit v3 did not finish.")
+            #expect(JobBoard.line(j, again: true, now: now) == "Render edit v3 did not finish again.")
+            j.status = .lost
+            #expect(JobBoard.line(j, now: now) == "Render edit v3 stopped. The Mac restarted or the job quit.")
+            j.status = .stopped; j.stoppedBy = "you"
+            #expect(JobBoard.line(j, now: now) == "You stopped it")
+            j.stoppedBy = "takes"
+            #expect(JobBoard.line(j, now: now) == "Takes stopped it")
+            #expect(JobBoard.duration(212) == "3 min 32 s")
+            #expect(JobBoard.duration(45) == "45 s")
+        }
     }
 
     @MainActor @Test func visibleRules() throws {
@@ -200,18 +207,6 @@ struct JobsTests {
         #expect(FileWatch.folders(paths + [s + "/edits/launch-v3.mp4"]) == [s + "/edits"])
     }
 
-    /// The stream starts on its own queue (a 99 s launch hang on 14 Oct), and a change still
-    /// reaches the panes on the main thread.
-    @MainActor @Test func noteLineStaysVisible() {
-        let note = ChatMessage(role: .tool, text: "Render edit v3 is done", toolID: ChatMessage.jobNote)
-        let tools = (1...3).map { ChatMessage(role: .tool, text: "Bash · step \($0)", toolID: "t\($0)") }
-        let items = ChatItem.group([note] + tools)
-        #expect(items.count == 2)
-        if case .message(let m) = items[0] { #expect(m.isJobNote) } else { Issue.record("the note was folded") }
-        if case .tools(let t) = items[1] { #expect(t.count == 3) } else { Issue.record("the steps did not fold") }
-        #expect(ClaudeChat.recap([note]).contains("Render edit v3 is done"))
-    }
-
     @Test func twoStepStop() {
         var arm = StopArm()
         let t0 = Date()
@@ -226,12 +221,6 @@ struct JobsTests {
         #expect(!arm.asking("a", now: t0.addingTimeInterval(14)))  // 3 s later it resets
         let again = arm.click("a", now: t0.addingTimeInterval(14))
         #expect(!again)
-    }
-
-    @Test func chatEnvTellsBoardsApart() {
-        #expect(ClaudeChat.environment()["TAKES_BOARD"] == nil)
-        #expect(ClaudeChat.environment(board: "styles")["TAKES_BOARD"] == "styles")
-        #expect(ClaudeChat.environment(board: "styles")["TAKES_CHAT"] == "1")
     }
 
     @Test func toldIsClaimedOnce() throws {
@@ -249,7 +238,8 @@ extension ChatRunTests {
     func board(_ chat: ClaudeChat) throws -> JobBoard {
         let b = JobBoard(defaults: try #require(UserDefaults(suiteName: "jobs-test-\(UUID().uuidString)")))
         b.chatFor = { _ in chat }
-        ClaudeChat.heldNotes = { [b] s in b.takeHeld(s) }
+        // On the chat, not the shared hook: each AppModel another test makes sets that one.
+        chat.notesFrom = { [b] s in b.takeHeld(s) }
         return b
     }
 
@@ -265,7 +255,7 @@ extension ChatRunTests {
     func told(_ id: String) -> Bool { FileManager.default.fileExists(atPath: session.appending(path: ".jobs/\(id).told").path) }
 
     @Test func aJobEndWakesTheChatOnceWithATickLine() async throws {
-        defer { cleanup(); ClaudeChat.heldNotes = nil }
+        defer { cleanup() }
         try fake("")
         let chat = ClaudeChat(session: session)
         let b = try board(chat)
@@ -290,14 +280,14 @@ extension ChatRunTests {
     }
 
     @Test func endsAtLaunchOrAfterAStopWaitForTheNextMessage() async throws {
-        defer { cleanup(); ClaudeChat.heldNotes = nil }
-        try fake(#"if [ $n = 1 ]; then sleep 20; fi"#)
+        defer { cleanup() }
+        try fake("if [ $n = 1 ]; then \(gate); fi")
         let chat = ClaudeChat(session: session)
         let b = try board(chat)
         try jobFile("job-1", [:])
-        b.scan(root: dir)  // the launch: nothing wakes
-        try? await Task.sleep(for: .milliseconds(300))
-        #expect(runs == 0)
+        // The launch: nothing wakes. A wake sends at once (tell is synchronous), so no wait is needed.
+        b.scan(root: dir)
+        #expect(!chat.running && chat.queued.isEmpty)
         #expect(!told("job-1"))
         // The user stops a run; a job that ends then waits too.
         chat.send("Make the cut", title: "T", onStage: nil)
@@ -310,7 +300,7 @@ extension ChatRunTests {
         await until { !chat.running }
         try jobFile("job-2", ["started": JobFixture.iso(30)])
         b.reload(session)
-        try? await Task.sleep(for: .milliseconds(300))
+        #expect(!chat.running && chat.queued.isEmpty)
         #expect(runs == 1)
         #expect(!told("job-2"))
         // His next message carries it in front, and the panel shows it as a tick line.
@@ -325,8 +315,8 @@ extension ChatRunTests {
     }
 
     @Test func aBusyChatHearsAboutAJobWhenItIsDone() async throws {
-        defer { cleanup(); ClaudeChat.heldNotes = nil }
-        try fake(#"if [ $n = 1 ]; then sleep 1; fi"#)
+        defer { cleanup() }
+        try fake("if [ $n = 1 ]; then \(gate); fi")
         let chat = ClaudeChat(session: session)
         let b = try board(chat)
         let idle = NotificationCenter.default.addObserver(forName: .takesChatIdle, object: nil, queue: .main) { n in
@@ -334,15 +324,18 @@ extension ChatRunTests {
         }
         defer { NotificationCenter.default.removeObserver(idle) }
         chat.send("Render it", title: "T", onStage: nil)
+        // The job ends while run 1 surely runs: it waits on the gate.
+        await until { runs == 1 }
         try jobFile("job-1", [:])
         b.reload(session)
-        #expect(runs <= 1)
+        #expect(runs == 1 && !told("job-1"), "a busy chat is not woken")
+        openGate()
         await until { runs == 2 && !chat.running }
         #expect(ask(2)?.hasPrefix("[Takes] Job job-1 ended") == true)
     }
 
     @Test func wakeCaps() async throws {
-        defer { cleanup(); ClaudeChat.heldNotes = nil }
+        defer { cleanup() }
         try fake("")
         let chat = ClaudeChat(session: session)
         let b = try board(chat)

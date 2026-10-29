@@ -57,12 +57,11 @@ class LivePost(Base):
 
 
 class Plan(Base):
-    def test_no_plan_asks_for_days(self):
-        self.assertIsNone(t.t_get_plan({})["plan"])
-        s = self.session("2026-10-01-a", "A")
-        self.assertNotIn("posting_plan", t.t_get_session({"session": s}))
-
     def test_slots_gaps_and_buffer(self):
+        # No plan yet: get_plan and get_session say nothing about one.
+        self.assertIsNone(t.t_get_plan({})["plan"])
+        s = self.session("2026-09-30-z", "Z")
+        self.assertNotIn("posting_plan", t.t_get_session({"session": s}))
         today = datetime.now().astimezone().date()
         days = [t.PLAN_DAYS[(today + timedelta(days=i)).weekday()] for i in (1, 3)]
         v = t.t_set_plan({"days": [d.title() for d in days], "time": "08:02"})

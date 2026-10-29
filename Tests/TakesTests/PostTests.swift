@@ -67,13 +67,17 @@ struct PostTests {
         store.edit("One, edited\n")
         store.load(session)                 // a file event while typing: his text stays
         #expect(store.text == "One, edited\n")
-        // The save waits 500 ms after the last key. Under a busy test run it can be later.
-        for _ in 0..<40 where PostFile.read(session)?.text != "One, edited\n" {
-            try await Task.sleep(for: .milliseconds(100))
+        // The save waits 500 ms after the last key. Under a busy test run it can be much later: a
+        // full run stalled every test for 24 s, past the old 20 s (2026-10-28).
+        let end = Date().addingTimeInterval(60)
+        while PostFile.read(session)?.text != "One, edited\n" && Date() < end {
+            try await Task.sleep(for: .milliseconds(50))
         }
         #expect(PostFile.read(session)?.text == "One, edited\n")
-        try await Task.sleep(for: .milliseconds(1100))  // a new modification date
+        // Claude's write gets a modification date of its own, set, not waited for.
         PostFile.write(.init(text: "Claude\n", media: nil), to: session)
+        try FileManager.default.setAttributes([.modificationDate: Date().addingTimeInterval(60)],
+                                              ofItemAtPath: PostFile.url(session).path)
         store.load(session)
         #expect(store.text == "Claude\n")
     }
@@ -216,11 +220,6 @@ struct PostDraftTests {
         PostFile.writeFirstComment(session, "  \n")
         #expect(!FileManager.default.fileExists(atPath: session.appending(path: PostFile.firstCommentRel).path))
     }
-
-    @Test func commentsPointAtTheDraftFile() {
-        #expect(PostFile.rel(of: "main") == "posts/linkedin.md")
-        #expect(PostFile.rel(of: "story") == "posts/variants/story.md")
-    }
 }
 
 // 2026-09-28: switching variant tabs while typing in the post left the old text in the editor.
@@ -261,11 +260,15 @@ struct PostEditorSwitchTests {
         host.layoutSubtreeIfNeeded()
         try await Task.sleep(for: .milliseconds(50))
         #expect(tv.string == "Main text.")
-        // A variant tab: the text must follow, even while typing.
+        // A variant tab: the text must follow, even while typing. Look until it does: SwiftUI can
+        // update a busy Mac's view later than 50 ms.
         m.draft = "short"
         m.text = "Short variant."
-        host.layoutSubtreeIfNeeded()
-        try await Task.sleep(for: .milliseconds(50))
+        let end = Date().addingTimeInterval(10)
+        repeat {
+            host.layoutSubtreeIfNeeded()
+            try await Task.sleep(for: .milliseconds(20))
+        } while tv.string != "Short variant." && Date() < end
         #expect(tv.string == "Short variant.")
     }
 }
@@ -293,15 +296,15 @@ struct PostSettleTests {
         let doc = SessionDoc(url: s)
         #expect(doc.posts.map(\.platform) == ["LinkedIn"])
         #expect(doc.posts.first?.at == at)
-    }
-
-    @Test func futurePostStaysScheduled() throws {
-        let s = try session(Date().addingTimeInterval(3600))
-        defer { try? FileManager.default.removeItem(at: s) }
-        var list = [QueuedPost(session: s, project: "P", title: "T", content: try #require(PostFile.read(s)))]
-        PostQueue.settle(&list)
-        #expect(list[0].content.status == .scheduled)
-        #expect(SessionDoc(url: s).posts.isEmpty)
+        // A post still ahead stays scheduled.
+        do {
+            let s = try session(Date().addingTimeInterval(3600))
+            defer { try? FileManager.default.removeItem(at: s) }
+            var list = [QueuedPost(session: s, project: "P", title: "T", content: try #require(PostFile.read(s)))]
+            PostQueue.settle(&list)
+            #expect(list[0].content.status == .scheduled)
+            #expect(SessionDoc(url: s).posts.isEmpty)
+        }
     }
 }
 

@@ -20,6 +20,9 @@ final class VoiceFollow {
     private(set) var failed = false
     /// The language it listens in ("German").
     private(set) var language: String?
+    /// How loud the mic is now, 0...1, while it listens (2026-10-29): the notch's blue light
+    /// follows it, so you see it hear you, and it sinks when you stop talking.
+    private(set) var level: Float = 0
     /// The script as the prompters show it.
     @ObservationIgnored var source: () -> String = { "" }
     @ObservationIgnored var problem: (String) -> Void = { _ in }
@@ -28,6 +31,8 @@ final class VoiceFollow {
     @ObservationIgnored private var engine: AVAudioEngine?
     @ObservationIgnored private var listener: Listener?
     @ObservationIgnored private let feed = FeedBox()
+    @ObservationIgnored private let loudness = LevelBox()
+    @ObservationIgnored private var levelTimer: Timer?
     /// Bumped on each start and stop: a late answer from an old run is dropped.
     @ObservationIgnored private var run = 0
     /// Bumped on each restart of the listener: a cancelled one's last call does nothing.
@@ -55,6 +60,9 @@ final class VoiceFollow {
         listener?.cancel()
         listener = nil
         listening = false
+        levelTimer?.invalidate()
+        levelTimer = nil
+        level = 0
     }
 
     /// A hand scroll or "back to top": go on from this word.
@@ -86,7 +94,7 @@ final class VoiceFollow {
         guard let made = await listen(mine, locale: locale, format: format) else { return }
         guard run == mine, wanted else { made.cancel(); return }
         feed.set(made.feed)
-        engine.inputNode.installTap(onBus: 0, bufferSize: 1024, format: format, block: Self.tap(feed))
+        engine.inputNode.installTap(onBus: 0, bufferSize: 1024, format: format, block: Self.tap(feed, loudness))
         do {
             engine.prepare()
             try engine.start()
@@ -99,6 +107,19 @@ final class VoiceFollow {
         listener = made
         language = Locale(identifier: "en").localizedString(forLanguageCode: locale.language.languageCode?.identifier ?? "")
         listening = true
+        // 15 times a second is enough for a light; only views that read `level` draw again.
+        let t = Timer(timeInterval: 1.0 / 15, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.readLevel() }
+        }
+        RunLoop.main.add(t, forMode: .common)
+        levelTimer = t
+    }
+
+    private func readLevel() {
+        let v = loudness.take()
+        // Up fast, down slow: a light that flickers with each syllable is restless to read under.
+        let next = v > level ? level * 0.4 + v * 0.6 : level * 0.8 + v * 0.2
+        if abs(next - level) > 0.01 { level = next }
     }
 
     private func listen(_ mine: Int, locale: Locale, format: AVAudioFormat) async -> Listener? {
@@ -188,8 +209,11 @@ final class VoiceFollow {
 
     // The audio calls back on its own thread. Built outside the main actor, so Swift does not
     // expect this closure to run on it.
-    nonisolated private static func tap(_ feed: FeedBox) -> AVAudioNodeTapBlock {
-        { buffer, _ in feed.send(buffer) }
+    nonisolated private static func tap(_ feed: FeedBox, _ level: LevelBox) -> AVAudioNodeTapBlock {
+        { buffer, _ in
+            level.hear(buffer)
+            feed.send(buffer)
+        }
     }
 }
 
@@ -203,5 +227,30 @@ final class FeedBox: @unchecked Sendable {
     func send(_ b: AVAudioPCMBuffer) {
         lock.lock(); let f = feed; lock.unlock()
         f?(b)
+    }
+}
+
+/// The loudest moment the audio thread heard since the main thread last asked, 0...1.
+final class LevelBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var peak: Float = 0
+
+    func hear(_ b: AVAudioPCMBuffer) {
+        guard let data = b.floatChannelData?[0], b.frameLength > 0 else { return }
+        var sum: Float = 0
+        for i in 0..<Int(b.frameLength) { sum += data[i] * data[i] }
+        let v = Self.level(rms: (sum / Float(b.frameLength)).squareRoot())
+        lock.lock(); peak = max(peak, v); lock.unlock()
+    }
+
+    func take() -> Float {
+        lock.lock(); defer { peak = 0; lock.unlock() }
+        return peak
+    }
+
+    /// -50 dB is silence, -10 dB is a full voice close to the mic.
+    static func level(rms: Float) -> Float {
+        guard rms > 0 else { return 0 }
+        return max(0, min(1, (20 * log10(rms) + 50) / 40))
     }
 }

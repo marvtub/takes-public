@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=1080, height=1920" />
+    <!-- Tier list: an S/A/B/C/D board in the lower half. Tiles drop into their rows one by one.
+         A status chip above the board says "Ranking…", then "Ranked" when the last tile lands.
+         Transparent background: render as mov (ProRes 4444 with alpha) and lay it over the footage.
+         Tiles are a mark (one or two letters, or a shape: circle, square, triangle, diamond, star) on a colour. Never put a real
+         brand logo here unless you have the right to use it.
+         The size of the edit is data-width / data-height on #root (1080x1920, 1080x1350, 1080x1080, 1920x1080 all work).
+         9:16: the tall board in the lower half. 4:5 and 1:1: a shorter board (smaller rows, 32 px chip) near the bottom.
+         16:9: the short board on one side of the speaker.
+         Edit TEXT, ITEMS, PLACE and AT below. The length is data-duration on #root (seconds). -->
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+    <style>
+      @font-face { font-family: "Inter"; src: url("fonts/Inter-Medium.ttf"); font-weight: 500; }
+      @font-face { font-family: "Inter"; src: url("fonts/Inter-SemiBold.ttf"); font-weight: 600; }
+      :root { --ink: #f6f4f0; --muted: rgba(246, 244, 240, 0.66); --panel: rgba(14, 14, 18, 0.80);
+              --row: rgba(255, 255, 255, 0.06); --edge: rgba(255, 255, 255, 0.14); --ok: #7ad48a;
+              --sans: "Inter", sans-serif; }
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      html, body { width: 100%; height: 100%; overflow: hidden; background: transparent; }
+      #root { position: relative; width: 100%; height: 100%; overflow: hidden; font-family: var(--sans); color: var(--ink); }
+      #wrap { position: absolute; left: 84px; right: 84px; bottom: 240px; display: flex; flex-direction: column; align-items: center; }
+      #chip { display: flex; align-items: center; gap: 14px; height: 64px; padding: 0 28px 0 22px; margin-bottom: 22px;
+        border-radius: 32px; background: var(--panel); border: 2px solid var(--edge); font-weight: 600; font-size: 30px; }
+      #dot { position: relative; width: 26px; height: 26px; }
+      #spin { position: absolute; inset: 0; border-radius: 50%; border: 4px solid rgba(255, 255, 255, 0.22); border-top-color: var(--ink); }
+      #okdot { position: absolute; inset: 2px; border-radius: 50%; background: var(--ok); opacity: 0; }
+      #chiptext { position: relative; height: 36px; line-height: 36px; overflow: hidden; }
+      #chiptext span { display: block; white-space: nowrap; }
+      #t2 { position: absolute; left: 0; top: 0; opacity: 0; }
+      #board { width: 100%; padding: 18px; border-radius: 40px; background: var(--panel); border: 2px solid var(--edge);
+        box-shadow: 0 40px 90px rgba(0, 0, 0, 0.35); display: flex; flex-direction: column; gap: 12px; }
+      .row { display: flex; align-items: center; gap: 14px; height: 104px; padding: 0 8px; border-radius: 24px; background: var(--row); }
+      .tier { flex: none; width: 84px; height: 84px; border-radius: 20px; display: grid; place-items: center;
+        font-weight: 600; font-size: 46px; color: #15130f; }
+      .slot { display: flex; gap: 14px; }
+      .tile { width: 84px; height: 84px; border-radius: 22px; display: grid; place-items: center;
+        font-weight: 600; font-size: 38px; color: #fff; border: 2px solid rgba(255, 255, 255, 0.18);
+        box-shadow: 0 10px 24px rgba(0, 0, 0, 0.35); }
+      .tile svg { width: 40px; height: 40px; fill: #fff; }
+      /* Shapes other than 9:16: a shorter board. */
+      .short #chip { height: 60px; margin-bottom: 16px; font-size: 32px; }
+      .short #board { padding: 14px; gap: 7px; border-radius: 32px; }
+      .short .row { height: 66px; gap: 10px; border-radius: 18px; }
+      .short .tier { width: 54px; height: 54px; border-radius: 14px; font-size: 32px; }
+      .short .slot { gap: 10px; }
+      .short .tile { width: 54px; height: 54px; border-radius: 15px; font-size: 32px; }
+      .short .tile svg { width: 28px; height: 28px; }
+    </style>
+  </head>
+  <body>
+    <div id="root" data-composition-id="main" data-start="0" data-duration="6" data-width="1080" data-height="1920">
+      <div id="wrap">
+        <div id="chip"><div id="dot"><div id="spin"></div><div id="okdot"></div></div>
+          <div id="chiptext"><span id="t1"></span><span id="t2"></span></div></div>
+        <div id="board"></div>
+      </div>
+    </div>
+    <script>
+      // The chip text before and after, the tiers (name, colour), and the tiles in the order they drop.
+      // A row holds up to 8 tiles.
+      const TEXT = { busy: "Ranking tools…", done: "Ranked" };
+      const TIERS = [["S", "#ff9f4a"], ["A", "#f4d35e"], ["B", "#9ad57f"], ["C", "#6cc0e0"], ["D", "#a99cf2"]];
+      const ITEMS = [
+        { mark: "circle", color: "#2f5fe0", tier: "A" },
+        { mark: "Nx", color: "#1f1f24", tier: "S" },
+        { mark: "triangle", color: "#c9412f", tier: "C" },
+        { mark: "Qb", color: "#6a3bd1", tier: "B" },
+        { mark: "square", color: "#13785a", tier: "A" },
+        { mark: "diamond", color: "#b8336a", tier: "D" },
+        { mark: "Lu", color: "#c4621a", tier: "S" },
+        { mark: "star", color: "#1f74b8", tier: "B" },
+      ];
+      // When things happen (seconds). first = the first drop, every = time between drops, out = exit.
+      const AT = { in: 0.15, first: 0.7, every: 0.34, out: 5.6 };
+      // Where the board sits. bottom = the space under it (px), per shape of the edit.
+      // side = where it sits in 16:9: "left" or "right" (away from the speaker's face).
+      const PLACE = { bottom: { tall: 240, "4:5": 100, square: 24, wide: 48 }, side: "left" };
+
+      // The frame comes from data-width / data-height on #root.
+      const comp = document.getElementById("root"), W = +comp.dataset.width, H = +comp.dataset.height;
+      const SHAPE = W / H < 0.7 ? "tall" : W / H < 0.95 ? "4:5" : W / H < 1.3 ? "square" : "wide";
+      const wrap = document.getElementById("wrap");
+      if (SHAPE !== "tall") comp.classList.add("short");
+      if (SHAPE === "wide") Object.assign(wrap.style, PLACE.side === "right" ? { left: "auto", width: "700px" } : { right: "auto", width: "700px" });
+      wrap.style.bottom = PLACE.bottom[SHAPE] + "px";
+
+      document.getElementById("t1").textContent = TEXT.busy;
+      document.getElementById("t2").textContent = TEXT.done;
+      const slots = {};
+      TIERS.forEach(([name, c]) => {
+        const row = document.createElement("div"); row.className = "row";
+        const t = document.createElement("div"); t.className = "tier"; t.textContent = name; t.style.background = c;
+        const s = document.createElement("div"); s.className = "slot";
+        row.append(t, s); document.getElementById("board").appendChild(row);
+        slots[name] = s;
+      });
+      const SHAPES = { circle: '<circle cx="12" cy="12" r="9"/>', square: '<rect x="4" y="4" width="16" height="16" rx="2"/>',
+        triangle: '<path d="M12 3 22 20H2z"/>', diamond: '<path d="M12 2 22 12 12 22 2 12z"/>',
+        star: '<path d="m12 2 2.9 6.6 7.1.6-5.4 4.7 1.6 7L12 17.3 5.8 20.9l1.6-7L2 9.2l7.1-.6z"/>' };
+      const tiles = ITEMS.map((it) => {
+        const el = document.createElement("div"); el.className = "tile"; el.style.background = it.color;
+        if (SHAPES[it.mark]) el.innerHTML = '<svg viewBox="0 0 24 24">' + SHAPES[it.mark] + "</svg>"; else el.textContent = it.mark;
+        slots[it.tier].appendChild(el);
+        return el;
+      });
+
+      document.fonts.ready.then(() => {
+      const box = document.getElementById("chiptext");
+      const w1 = document.getElementById("t1").offsetWidth, w2 = document.getElementById("t2").offsetWidth;
+      gsap.set(box, { width: w1 });
+      const tl = gsap.timeline({ paused: true });
+      const lastDrop = AT.first + (ITEMS.length - 1) * AT.every;
+      gsap.set(tiles, { opacity: 0 });
+      tl.fromTo("#wrap", { opacity: 0, y: 60 }, { opacity: 1, y: 0, duration: 0.6, ease: "power3.out" }, AT.in);
+      tl.fromTo("#spin", { rotation: 0 }, { rotation: 360 * Math.ceil(lastDrop / 0.9), duration: lastDrop + 0.3, ease: "none" }, 0);
+      tiles.forEach((el, i) => tl.fromTo(el, { opacity: 0, y: -120, scale: 0.7 },
+        { opacity: 1, y: 0, scale: 1, duration: 0.45, ease: "back.out(1.7)" }, AT.first + i * AT.every));
+      const done = lastDrop + 0.45;
+      tl.to("#spin", { opacity: 0, duration: 0.2, ease: "power2.in" }, done);
+      tl.fromTo("#okdot", { opacity: 0, scale: 0.4 }, { opacity: 1, scale: 1, duration: 0.35, ease: "back.out(2)" }, done + 0.1);
+      tl.to("#t1", { opacity: 0, y: -14, duration: 0.2, ease: "power2.in" }, done);
+      tl.to(box, { width: w2, duration: 0.35, ease: "power3.inOut" }, done + 0.05);
+      tl.fromTo("#t2", { opacity: 0, y: 14 }, { opacity: 1, y: 0, duration: 0.35, ease: "power3.out" }, done + 0.1);
+      tl.to("#wrap", { opacity: 0, y: 40, duration: 0.3, ease: "power2.in" }, AT.out);
+      window.__timelines["main"] = tl;
+      tl.seek(0);
+      });
+    </script>
+  </body>
+</html>

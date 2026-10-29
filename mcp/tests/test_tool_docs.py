@@ -25,17 +25,16 @@ class ToolDocsTests(unittest.TestCase):
         for n, d, props, req, _ in t.TOOLS:
             walk(n, t.listed(n, d, props, req)["inputSchema"], "")
         self.assertEqual(missing, [], "add these to PARAM_DOC or give them a description")
+        # Listing leaves the table alone.
+        self.assertEqual(t.S, {"type": "string"})
+        for n, d, props, req, _ in t.TOOLS:
+            self.assertIn("annotations", t.listed(n, d, props, req))
 
     def test_hint_sets_name_real_tools(self):
         defined = {n[2:] for n in dir(t) if n.startswith("t_")}
         for hints in (t.READ_ONLY, t.DESTRUCTIVE, t.OPEN_WORLD):
             self.assertTrue(hints <= defined, hints - defined)
         self.assertFalse(t.READ_ONLY & t.DESTRUCTIVE)
-
-    def test_listing_leaves_the_table_alone(self):
-        self.assertEqual(t.S, {"type": "string"})
-        for n, d, props, req, _ in t.TOOLS:
-            self.assertIn("annotations", t.listed(n, d, props, req))
 
     def test_always_load_only_in_the_takes_chat(self):
         try:

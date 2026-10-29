@@ -98,6 +98,87 @@ final class MediaSearch {
         return h == p || h.hasPrefix(p + "/")
     }
 
+    /// The results page's sort (2026-10-27). Best match keeps the panel's order, so no row moves
+    /// when the page opens; a date sort groups the rows by when they were made.
+    enum Sort: String, CaseIterable, Identifiable {
+        case best, newest, oldest
+        var id: String { rawValue }
+        var title: String {
+            switch self {
+            case .best: return "Best match"
+            case .newest: return "Newest first"
+            case .oldest: return "Oldest first"
+            }
+        }
+    }
+
+    struct Section: Identifiable, Equatable {
+        var title: String?
+        var hits: [Hit]
+        var id: String { title ?? "" }
+    }
+
+    /// Best match: one group without a title, in the order given. A date sort: Today, This week,
+    /// This month, then one group per month ("September 2026"), and Undated last.
+    nonisolated static func sections(_ hits: [Hit], sort: Sort, now: Date = Date(),
+                                     date: (Hit) -> Date? = { MediaSearch.day(of: $0.path) }) -> [Section] {
+        guard sort != .best, !hits.isEmpty else { return hits.isEmpty ? [] : [Section(title: nil, hits: hits)] }
+        let cal = Calendar.current
+        let dated = hits.enumerated().map { (i: $0.offset, h: $0.element, d: date($0.element)) }
+        let sorted = dated.sorted { a, b in
+            switch (a.d, b.d) {
+            case let (x?, y?): return x == y ? a.i < b.i : (sort == .newest ? x > y : x < y)
+            case (nil, nil): return a.i < b.i
+            case (nil, _): return false
+            case (_, nil): return true
+            }
+        }
+        let month = DateFormatter()
+        month.dateFormat = "LLLL yyyy"
+        func bucket(_ d: Date?) -> String {
+            guard let d else { return "Undated" }
+            if cal.isDate(d, inSameDayAs: now) { return "Today" }
+            if let days = cal.dateComponents([.day], from: cal.startOfDay(for: d), to: cal.startOfDay(for: now)).day, days >= 0, days < 7 { return "This week" }
+            if cal.isDate(d, equalTo: now, toGranularity: .month) { return "This month" }
+            return month.string(from: d)
+        }
+        var out: [Section] = []
+        for e in sorted {
+            let t = bucket(e.d)
+            if out.last?.title == t { out[out.count - 1].hits.append(e.h) } else { out.append(Section(title: t, hits: [e.h])) }
+        }
+        return out
+    }
+
+    /// The day a hit was made: the session folder's date ("2026-10-06-bookkeeping-agent"), else the
+    /// file's own date.
+    nonisolated static func day(of url: URL) -> Date? {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "yyyy-MM-dd"
+        for part in url.pathComponents.reversed() where part.count >= 10 {
+            let head = String(part.prefix(10))
+            if head.range(of: #"^\d{4}-\d{2}-\d{2}$"#, options: .regularExpression) != nil, let d = f.date(from: head) { return d }
+        }
+        return (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
+    }
+
+    /// "23 results in all projects", "1 result in Weekly Challenge".
+    nonisolated static func countLine(_ n: Int, project: String?) -> String {
+        "\(n) \(n == 1 ? "result" : "results") in \(project ?? "all projects")"
+    }
+
+    /// The shape of a picture, in words (2026-10-28: a vertical edit showed cropped in a wide box).
+    /// "Vertical 9:16 · 1080×1920", "Square 1:1 · 1080×1080", "Wide · 2000×900".
+    nonisolated static func shapeLine(width w: Int, height h: Int) -> String {
+        guard w > 0, h > 0 else { return "" }
+        let r = Double(w) / Double(h)
+        let known: [(Double, String)] = [(9.0 / 16, "Vertical 9:16"), (4.0 / 5, "Portrait 4:5"), (3.0 / 4, "Portrait 3:4"), (1, "Square 1:1"),
+                                         (4.0 / 3, "4:3"), (16.0 / 9, "Wide 16:9"), (21.0 / 9, "Cinema 21:9")]
+        let name = known.first { abs($0.0 - r) / $0.0 < 0.03 }?.1 ?? (r < 1 ? "Vertical" : "Wide")
+        return "\(name) · \(w)×\(h)"
+    }
+
     var model: ModelState = .missing
     var indexDone = 0
     var indexTotal = 0
@@ -532,15 +613,23 @@ final class Fetcher: NSObject, URLSessionDataDelegate, @unchecked Sendable {
 
 /// One search for all of Takes (2026-10-06): sessions, projects and boards by name, then footage
 /// by meaning. Pick a hit and it opens; a clip opens at its moment.
+///
+/// ⏎ shows all results (2026-10-27, design: https://claude.ai/artifact/QmdcZvAjLsi9XUeoVbhAu7,
+/// boards D and H). The panel itself grows into the page: the field stays where it is, the
+/// picked row stays picked, rows already there keep their place and the rest arrive under them,
+/// and a preview of the picked hit opens on the right. Esc shrinks it back. ⌘⏎ opens the hit.
 struct SearchPalette: View {
     @Environment(AppModel.self) private var app
     private var search = MediaSearch.shared
     @State private var query = ""
     @State private var hits: [MediaSearch.Hit] = []
-    @State private var selected = 0
+    /// The picked hit by id, so it stays picked when the page opens or the sort changes.
+    @State private var picked: String?
     @State private var busy = false
     @State private var filter: MediaSearch.Filter = .all
     @State private var project: URL?
+    @State private var expanded = false
+    @State private var sort: MediaSearch.Sort = .best
     /// The helper's hits for the last query. A chip or project only filters them again.
     @State private var found: (query: String, hits: [MediaSearch.Hit])?
     @FocusState private var focused: Bool
@@ -550,24 +639,29 @@ struct SearchPalette: View {
 
     private var filtered: Bool { filter != .all || project != nil }
 
-    init(query: String = "") { _query = State(initialValue: query) }
+    init(query: String = "", expanded: Bool = false) {
+        _query = State(initialValue: query)
+        _expanded = State(initialValue: expanded)
+    }
+
+    /// The rows as shown: by relevance, or in date groups when the page sorts by date.
+    private var sections: [MediaSearch.Section] {
+        MediaSearch.sections(hits, sort: expanded ? sort : .best)
+    }
+    private var order: [MediaSearch.Hit] { sections.flatMap(\.hits) }
+    private var selected: Int { order.firstIndex { $0.id == picked } ?? 0 }
+    private var current: MediaSearch.Hit? { order.indices.contains(selected) ? order[selected] : nil }
+
+    /// The grow and the shrink: one soft move, no bounce. Reduce Motion only fades.
+    private var grow: Animation { reduceMotion ? .easeOut(duration: 0.15) : .smooth(duration: 0.46).speed(1 / Theme.pace) }
 
     var body: some View {
         if search.shown {
             ZStack(alignment: .top) {
-                Color.black.opacity(0.28).ignoresSafeArea()
+                Color.black.opacity(expanded ? 0 : 0.28).ignoresSafeArea()
                     .onTapGesture { close() }
                 VStack(spacing: 0) {
-                    HStack(spacing: 10) {
-                        Image(systemName: "magnifyingglass").foregroundStyle(Theme.muted)
-                        TextField("Search sessions, boards and footage: \"hands typing\", \"walking outside\"", text: $query)
-                            .textFieldStyle(.plain)
-                            .font(Theme.sans(16))
-                            .focused($focused)
-                            .onSubmit { open(selected) }
-                        if busy { ProgressView().controlSize(.small).transition(.opacity) }
-                    }
-                    .padding(.horizontal, 16).frame(height: 52)
+                    header
                     chips
                     Rule()
                     if hits.isEmpty {
@@ -576,40 +670,33 @@ struct SearchPalette: View {
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .padding(16)
                             .transition(.opacity)
+                        if expanded { Spacer(minLength: 0) }
                     } else {
-                        ScrollViewReader { proxy in
-                            ScrollView {
-                                LazyVStack(spacing: 2) {
-                                    ForEach(Array(hits.enumerated()), id: \.element.id) { i, h in
-                                        SearchRow(hit: h, root: app.library.root, on: i == selected)
-                                            .onTapGesture { open(i) }
-                                            .transition(arrive(i))
-                                    }
-                                }
-                                .padding(6)
-                            }
-                            .frame(height: min(440, hits.reduce(12) { $0 + SearchRow.height($1) }))
-                            .onChange(of: selected) { _, i in
-                                guard hits.indices.contains(i) else { return }
-                                withAnimation(Theme.motion) { proxy.scrollTo(hits[i].id, anchor: .center) }
+                        HStack(alignment: .top, spacing: 0) {
+                            list
+                                .frame(width: expanded ? 440 : nil)
+                            if expanded, let current {
+                                Rule(vertical: true)
+                                SearchPreview(hit: current, root: app.library.root,
+                                              moments: hits.filter { $0.path == current.path && $0.title == nil }) { h in open(h) }
+                                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                                    .transition(reduceMotion ? .opacity : .opacity.combined(with: .offset(x: 24)).animation(grow.delay(0.08)))
                             }
                         }
+                        .frame(maxHeight: expanded ? .infinity : nil, alignment: .top)
                         .transition(.opacity)
-                        if search.model != .ready {
-                            Text(search.statusLine).font(Theme.sans(11)).foregroundStyle(Theme.faint)
-                                .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 16).padding(.vertical, 10)
-                                .overlay(alignment: .top) { Rule() }
-                        }
+                        if !expanded { footer }
                     }
                 }
-                .frame(width: 680)
-                .background(RoundedRectangle(cornerRadius: 14).fill(Theme.paper))
-                .overlay(RoundedRectangle(cornerRadius: 14).stroke(Theme.border))
-                .cardShadow(RoundedRectangle(cornerRadius: 14), fill: Theme.paper, radius: 30, y: 12)
+                .frame(maxWidth: expanded ? .infinity : 680, maxHeight: expanded ? .infinity : nil, alignment: .top)
+                // The page reaches up under the title bar, or the view behind shows there as a dark band (2026-10-28).
+                .background(RoundedRectangle(cornerRadius: expanded ? 0 : 14).fill(Theme.paper).ignoresSafeArea(edges: expanded ? .top : []))
+                .overlay(RoundedRectangle(cornerRadius: expanded ? 0 : 14).stroke(expanded ? .clear : Theme.border))
+                .cardShadow(RoundedRectangle(cornerRadius: expanded ? 0 : 14), fill: Theme.paper, radius: expanded ? 0 : 30, y: expanded ? 0 : 12)
                 .opacity(appeared ? 1 : 0)
                 .scaleEffect(appeared || reduceMotion ? 1 : 0.98, anchor: .top)
                 .offset(y: appeared || reduceMotion ? 0 : -6)
-                .padding(.top, 90)
+                .padding(.top, expanded ? 0 : 90)
             }
             .onAppear {
                 // Ask again once the panel is in the window: a request made while it is still being
@@ -620,10 +707,13 @@ struct SearchPalette: View {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { focused = true }
                 withAnimation(.smooth(duration: 0.22)) { appeared = true }
             }
-            .onDisappear { appeared = false }
-            .onKeyPress(.escape) { close(); return .handled }
-            .onKeyPress(.downArrow) { selected = min(hits.count - 1, selected + 1); return .handled }
-            .onKeyPress(.upArrow) { selected = max(0, selected - 1); return .handled }
+            .onDisappear { appeared = false; expanded = false }
+            .onKeyPress(.escape) {
+                if expanded { withAnimation(grow) { expanded = false } } else { close() }
+                return .handled
+            }
+            .onKeyPress(.downArrow) { move(1); return .handled }
+            .onKeyPress(.upArrow) { move(-1); return .handled }
             .onKeyPress(.tab, phases: .down) { press in
                 // Tab and ⇧Tab step through the chips.
                 let all = MediaSearch.Filter.allCases
@@ -631,12 +721,14 @@ struct SearchPalette: View {
                 filter = all[(i + (press.modifiers.contains(.shift) ? all.count - 1 : 1)) % all.count]
                 return .handled
             }
-            .task(id: "\(query)|\(filter.rawValue)|\(project?.path ?? "")") {
+            .task(id: "\(query)|\(filter.rawValue)|\(project?.path ?? "")|\(expanded)") {
                 // Names show at once; footage follows. A chip or project asks for more hits, then keeps its own.
+                // The page shows more of them than the panel.
+                let limit = expanded ? 200 : 40
                 let keep = { (h: MediaSearch.Hit) in MediaSearch.keeps(h, filter, project: project) }
                 let places = filter == .all ? MediaSearch.places(query, app: app, limit: project == nil ? 6 : 40).filter(keep) : []
                 if let found, found.query == query {
-                    show(places + MediaSearch.relevant(found.hits.filter(keep)).prefix(40))
+                    show(places + MediaSearch.relevant(found.hits.filter(keep)).prefix(limit))
                     return
                 }
                 show(places)
@@ -646,12 +738,101 @@ struct SearchPalette: View {
                 let all = await search.search(query, limit: 400)
                 guard !Task.isCancelled else { withAnimation(Theme.motion) { busy = false }; return }
                 found = (query, all)
-                show(places + MediaSearch.relevant(all.filter(keep)).prefix(40))
+                show(places + MediaSearch.relevant(all.filter(keep)).prefix(limit))
             }
         }
     }
 
-    /// All · Takes · Edits · B-roll · Stills · Scripts, and the project menu on the right.
+    /// The field. On the page, Back comes in on its left and the count on its right.
+    private var header: some View {
+        HStack(spacing: 10) {
+            if expanded {
+                Button { withAnimation(grow) { expanded = false } } label: {
+                    Image(systemName: "chevron.left").font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(Theme.muted).frame(width: 26, height: 26).contentShape(Rectangle())
+                }
+                .buttonStyle(.plain).help("Back (Esc)")
+                .transition(.opacity.combined(with: .offset(x: -8)).animation(grow.delay(0.12)))
+            }
+            Image(systemName: "magnifyingglass").foregroundStyle(Theme.muted)
+            TextField("Search sessions, boards and footage: \"hands typing\", \"walking outside\"", text: $query)
+                .textFieldStyle(.plain)
+                .font(Theme.sans(16))
+                .focused($focused)
+                .onSubmit { submit() }
+                .frame(maxWidth: expanded ? 560 : .infinity)
+            if busy { ProgressView().controlSize(.small).transition(.opacity) }
+            if expanded {
+                Text(MediaSearch.countLine(order.count, project: project?.lastPathComponent))
+                    .font(Theme.sans(12.5)).foregroundStyle(Theme.muted).lineLimit(1)
+                    .transition(.opacity.animation(grow.delay(0.2)))
+                Spacer(minLength: 0)
+            }
+        }
+        .padding(.horizontal, 16).frame(height: 52)
+        .onKeyPress(.return, phases: .down) { press in
+            // ⌘⏎ opens the picked hit from the panel, as ⏎ did before the page.
+            guard press.modifiers.contains(.command) else { return .ignored }
+            open(selected)
+            return .handled
+        }
+    }
+
+    /// The rows. On the page a click picks and a double click opens; in the panel a click opens.
+    private var list: some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 2) {
+                    ForEach(sections) { section in
+                        if let title = section.title {
+                            Text(title).font(Theme.sans(11.5, .semibold)).foregroundStyle(Theme.muted)
+                                .padding(.horizontal, 10).padding(.top, 12).padding(.bottom, 2)
+                                .transition(.opacity)
+                        }
+                        ForEach(section.hits) { h in
+                            let i = order.firstIndex(of: h) ?? 0
+                            SearchRow(hit: h, root: app.library.root, on: h.id == current?.id)
+                                .onTapGesture(count: 2) { open(i) }
+                                .onTapGesture { if expanded { picked = h.id } else { open(i) } }
+                                .transition(arrive(i))
+                        }
+                    }
+                }
+                .padding(6)
+            }
+            .frame(height: expanded ? nil : min(440, hits.reduce(12) { $0 + SearchRow.height($1) }))
+            .onChange(of: picked) { _, id in
+                guard let id else { return }
+                withAnimation(Theme.motion) { proxy.scrollTo(id, anchor: .center) }
+            }
+        }
+    }
+
+    /// Teaches the keys: ⏎ now shows everything, ⌘⏎ opens.
+    private var footer: some View {
+        HStack(spacing: 14) {
+            if search.model != .ready {
+                Text(search.statusLine).lineLimit(1)
+            } else {
+                Text("↑↓ Move")
+                Text("⌘⏎ Open")
+            }
+            Spacer(minLength: 8)
+            Button { submit() } label: {
+                Text("See all results  ⏎").font(Theme.sans(11.5, .medium)).foregroundStyle(Theme.ink)
+                    .padding(.horizontal, 8).frame(height: 22)
+                    .background(RoundedRectangle(cornerRadius: 6).fill(Theme.hover))
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+        }
+        .font(Theme.sans(11)).foregroundStyle(Theme.faint)
+        .padding(.horizontal, 16).frame(height: 36)
+        .overlay(alignment: .top) { Rule() }
+        .transition(.opacity.animation(.easeOut(duration: 0.12)))
+    }
+
+    /// All · Takes · Edits · B-roll · Stills · Scripts, the project menu on the right, and on the page the sort.
     private var chips: some View {
         HStack(spacing: 6) {
             ForEach(MediaSearch.Filter.allCases) { f in
@@ -684,32 +865,66 @@ struct SearchPalette: View {
                 }
             }
             .fixedSize()
+            if expanded {
+                TakesMenuButton {
+                    HStack(spacing: 4) {
+                        Image(systemName: "arrow.up.arrow.down").font(.system(size: 10))
+                        Text(sort.title).lineLimit(1)
+                        Image(systemName: "chevron.down").font(.system(size: 9, weight: .semibold))
+                    }
+                    .font(Theme.sans(12)).foregroundStyle(sort == .best ? Theme.muted : Theme.ink)
+                } content: { [$sort, grow] in
+                    for s in MediaSearch.Sort.allCases {
+                        MenuButton(s.title, checked: $sort.wrappedValue == s) { withAnimation(grow) { $sort.wrappedValue = s } }
+                    }
+                }
+                .fixedSize()
+                .transition(.opacity.animation(grow.delay(0.2)))
+            }
         }
         .padding(.horizontal, 12).padding(.bottom, 10)
     }
 
+    /// ⏎: in the panel, grow into the page; on the page, open the picked hit.
+    private func submit() {
+        if expanded { open(selected); return }
+        guard !hits.isEmpty else { return }
+        withAnimation(grow) { expanded = true }
+    }
+
+    private func move(_ by: Int) {
+        let o = order
+        guard !o.isEmpty else { return }
+        picked = o[max(0, min(o.count - 1, selected + by))].id
+    }
+
     /// New hits glide in: the panel grows to fit, rows that stay keep their place, new rows fade up
-    /// one after another, and old ones fade out.
+    /// one after another, and old ones fade out. The picked row stays picked while it is there.
     private func show(_ new: [MediaSearch.Hit]) {
         withAnimation(.smooth(duration: 0.28)) {
-            hits = new; selected = 0; busy = false
+            if !new.contains(where: { $0.id == picked }) { picked = new.first?.id }
+            hits = new; busy = false
         }
     }
 
     /// A new row fades in and rises 6 points, a few hundredths of a second after the row above it.
+    /// On the page, the rows that were not in the panel arrive after the panel has grown.
     private func arrive(_ i: Int) -> AnyTransition {
-        let delay = Double(min(i, 8)) * 0.025
+        let delay = expanded ? 0.18 + Double(min(max(i - 6, 0), 12)) * 0.03 : Double(min(i, 8)) * 0.025
         return .asymmetric(
             insertion: (reduceMotion ? AnyTransition.opacity : AnyTransition.opacity.combined(with: .offset(y: 6)))
                 .animation(.smooth(duration: 0.26).delay(delay)),
             removal: .opacity.animation(.easeOut(duration: 0.12)))
     }
 
-    private func close() { search.shown = false }
+    private func close() { search.shown = false; expanded = false }
 
     private func open(_ i: Int) {
-        guard hits.indices.contains(i) else { return }
-        let h = hits[i]
+        guard order.indices.contains(i) else { return }
+        open(order[i])
+    }
+
+    private func open(_ h: MediaSearch.Hit) {
         close()
         if let b = h.board {
             app.board = b
@@ -725,7 +940,7 @@ struct SearchPalette: View {
     }
 }
 
-private struct SearchRow: View {
+struct SearchRow: View {
     let hit: MediaSearch.Hit
     let root: URL
     let on: Bool
@@ -803,7 +1018,9 @@ private struct SearchRow: View {
     }
 
     /// "Weekly Challenge › Sign in with ChatGPT › edits" or "B-roll › Desk work".
-    private var place: String {
+    private var place: String { Self.place(hit, root: root) }
+
+    static func place(_ hit: MediaSearch.Hit, root: URL) -> String {
         let rel = hit.path.deletingLastPathComponent().path.replacingOccurrences(of: root.path + "/", with: "")
         let parts = rel.split(separator: "/").map(String.init)
         if parts.first == "_library" { return (["B-roll"] + parts.dropFirst(2).map { $0.replacingOccurrences(of: #"^\d+ "#, with: "", options: .regularExpression) }).joined(separator: " › ") }

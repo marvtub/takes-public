@@ -202,6 +202,8 @@ struct PhoneSessionDetail: Codable {
     var scriptHooks: [Hook]? = nil
     /// Where it is marked published (Platforms.all names; "" for somewhere else), for the More panel.
     var publishedOn: [String]? = nil
+    /// The session's slides (2026-10-26): the LinkedIn and vertical posts can show them in place of the video.
+    var carousel: CarouselFile? = nil
 }
 
 /// One published post on the phone's performance tab: its latest numbers.
@@ -614,6 +616,22 @@ final class PhoneServer: PhoneHandler, @unchecked Sendable {
             let failed = await MainActor.run { Self.postStoreDraft(b, in: s, p) }
             if let failed { return .error(failed.hasPrefix("It changed") ? 409 : 400, failed) }
             return .encode(["ok": true])
+        case ("POST", "/api/carousel"):
+            // {"platform", "on"} turns the slides on or off for a post; {"slide", "title" or "body"}; {"action": "add"}.
+            guard let s = session(req.query["id"]) else { return .error(404, "No such session") }
+            guard let b = try? JSONDecoder().decode([String: String].self, from: req.body) else { return .error(400, "No change") }
+            let title = Store.readMeta(s)?.title ?? ""
+            if let failed = CarouselFile.phoneChange(b, in: s, title: title) { return .error(400, failed) }
+            let line: String
+            if let p = b["platform"].flatMap(PostPlatform.init(rawValue:)) {
+                line = b["on"] == "true" ? "The \(p.name) post shows slides (from the phone)" : "The \(p.name) post shows its video again (from the phone)"
+            } else if b["action"] == "add" {
+                line = "Added a slide (from the phone)"
+            } else {
+                line = "Changed slide \((Int(b["slide"] ?? "") ?? 0) + 1) (from the phone)"
+            }
+            await MainActor.run { _ = self.app?.chats.chat(s).action(line) }
+            return .encode(["ok": true])
         case ("POST", "/api/side"):
             // ?side=hn: {"file", and "title", "text" or "status", "base": the text the phone started from}.
             guard let s = session(req.query["id"]) else { return .error(404, "No such session") }
@@ -649,6 +667,15 @@ final class PhoneServer: PhoneHandler, @unchecked Sendable {
         case ("GET", "/media"), ("HEAD", "/media"):
             guard let f = inLibrary(req.query["path"]), FileManager.default.fileExists(atPath: f.path) else { return .error(404, "No such file") }
             return .file(f, type: Self.type(of: f))
+        case ("GET", "/api/carousel/slide"):
+            // ?id&n&place=instagram|tiktok|linkedin&w: one slide drawn by the Mac, so the phone shows every
+            // layout and look as the export has them (2026-10-29).
+            guard let s = session(req.query["id"]), let c = CarouselFile.read(s) else { return .error(404, "No carousel") }
+            guard let n = Int(req.query["n"] ?? ""), c.slides.indices.contains(n) else { return .error(404, "No such slide") }
+            let place = req.query["place"].flatMap(CarouselPlace.init(rawValue:)) ?? .instagram
+            let w = max(48, min(Int(req.query["w"] ?? "") ?? 540, 1080))
+            guard let png = await Self.slidePicture(c, n, place: place, width: w, session: s) else { return .error(500, "Could not draw the slide") }
+            return .file(png, type: "image/png")
         case ("GET", "/thumb"):
             guard let f = inLibrary(req.query["path"]) else { return .error(404, "No such file") }
             guard let jpg = await Self.thumb(f, width: Int(req.query["w"] ?? "") ?? 480) else { return .error(404, "No picture") }
@@ -980,7 +1007,8 @@ final class PhoneServer: PhoneHandler, @unchecked Sendable {
                                   style: Self.sessionStyle(s, meta: meta, root: root),
                                   scriptVariants: script.0, scriptFavorite: script.1, scriptHistory: script.2,
                                   scriptHooks: script.3.isEmpty ? nil : script.3,
-                                  publishedOn: (meta.published ?? []).map { $0.platform ?? "" })
+                                  publishedOn: (meta.published ?? []).map { $0.platform ?? "" },
+                                  carousel: CarouselFile.read(s))
     }
 
     private func chat(_ s: URL) async -> PhoneChat {
@@ -1432,6 +1460,30 @@ final class PhoneServer: PhoneHandler, @unchecked Sendable {
     static var thumbFolder: URL { URL.cachesDirectory.appending(path: "Takes/phone-thumbs") }
 
     /// A JPEG at most `width` px wide: a frame for a video, the picture for an image. Cached on disk.
+    /// A slide as a PNG in the thumb folder, named for everything it shows: its words, look, size and
+    /// the files' times. The phone asks again when the slide changes, and gets the cached one when not.
+    static func slidePicture(_ c: CarouselFile, _ n: Int, place: CarouselPlace, width: Int, session: URL) async -> URL? {
+        let slide = c.slides[n]
+        let name = UserDefaults.standard.string(forKey: "linkedinName") ?? "You"
+        let enc = JSONEncoder()
+        enc.outputFormatting = .sortedKeys
+        let words = (try? enc.encode(slide)).map { String(decoding: $0, as: UTF8.self) } ?? ""
+        let files = slide.files.compactMap { CarouselFile.resolve($0, in: session) }
+        let times = files.map { "\(attributes($0).modified?.timeIntervalSince1970 ?? 0)" }.joined(separator: ",")
+        let key = hash("slide|\(words)|\(c.look.rawValue)|\(c.accent)|\(n)/\(c.slides.count)|\(place.rawValue)|\(width)|\(name)|\(times)")
+        let out = thumbFolder.appending(path: key + ".png")
+        if FileManager.default.fileExists(atPath: out.path) { return out }
+        try? FileManager.default.createDirectory(at: thumbFolder, withIntermediateDirectories: true)
+        var load: [(URL, Double?)] = CarouselFile.resolve(slide.media, in: session).map { [($0, slide.layout == .video ? (slide.start ?? 0) : slide.at)] } ?? []
+        for i in slide.items { if let u = CarouselFile.resolve(i.media, in: session) { load.append((u, i.at)) } }
+        await SlidePictures.shared.preload(load)
+        return await MainActor.run {
+            let v = CarouselSlideView(slide: slide, index: n, total: c.slides.count, place: place, name: name, width: CGFloat(width),
+                                      style: SlideStyle(c.look, accent: c.accent), session: session, exporting: true)
+            return (try? CarouselExport.png(v, to: out)) != nil ? out : nil
+        }
+    }
+
     static func thumb(_ u: URL, width: Int) async -> URL? {
         let w = max(64, min(width, 1600))
         let a = attributes(u)

@@ -11,6 +11,11 @@ struct SetupTests {
         #expect(AgentKind.claudeSignedIn("Warning: something\n{\"loggedIn\": true}"))
         #expect(!AgentKind.claudeSignedIn("error: not found"))
         #expect(!AgentKind.claudeSignedIn(""))
+        // The status lines the agents board shows.
+        #expect(AgentsStatus.codexLine("Logged in using ChatGPT\n") == "Signed in · uses your ChatGPT plan")
+        #expect(AgentsStatus.codexLine(nil).hasPrefix("Not signed in"))
+        #expect(AgentsStatus.claudeLine(#"{"loggedIn": true, "authMethod": "claude.ai"}"#) == "Signed in · uses your Claude plan")
+        #expect(AgentsStatus.claudeLine(#"{"loggedIn": false}"#).hasPrefix("Not signed in"))
     }
 
     @Test func readsSignInOfCodexAndPi() throws {

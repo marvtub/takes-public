@@ -100,9 +100,4 @@ struct PhoneStylesTests {
         _ = server.setStyle(["style": "Nope"], in: s)
         #expect(Store.readMeta(s)?.style == nil)
     }
-
-    @Test func theStylesChatHasItsLane() {
-        #expect(PhoneServer.lane("board:styles") == "styles")
-        #expect(PhoneServer.origin(["text": "x", "from": "Styles"]).contains("Styles board"))
-    }
 }

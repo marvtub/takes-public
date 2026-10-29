@@ -12,6 +12,11 @@ struct Hit: Codable, Hashable, Identifiable {
     var title: String?
     var session: String?
     var board: String?
+    /// The date group under a date sort, and a file's size and length (2026-10-28).
+    var section: String?
+    var w: Int?
+    var h: Int?
+    var seconds: Double?
     var id: String { kind + ":" + (title ?? "") + path + "#\(start)" }
 }
 
@@ -36,10 +41,15 @@ struct SearchView: View {
     @State private var project: String?
     @State private var result: SearchResult?
     @State private var picking = false
+    /// The results page, as the Mac's ⌘K ⏎ (2026-10-28): a sort, date groups, and a preview.
+    @State private var sort = "best"
+    @State private var sorting = false
+    @State private var previewing: Hit?
     @State private var path: [Session] = []
     @State private var showing: Hit?
     @FocusState private var focused: Bool
 
+    private static let sorts = [("best", "Best match"), ("newest", "Newest first"), ("oldest", "Oldest first")]
     private static let filters = [("all", "All"), ("takes", "Takes"), ("edits", "Edits"), ("broll", "B-roll"), ("stills", "Stills"), ("scripts", "Scripts")]
     private var projects: [String] { model.projects.isEmpty ? Array(Set(model.sessions.map(\.project))).sorted() : model.projects }
 
@@ -55,12 +65,20 @@ struct SearchView: View {
             .background(Palette.surface.ignoresSafeArea())
             .toolbar(.hidden, for: .navigationBar)
             .navigationDestination(for: Session.self) { SessionView(session: $0) }
+            .navigationDestination(item: $previewing) { h in
+                SearchPreviewScreen(hit: h, moments: (result?.hits ?? []).filter { $0.path == h.path && $0.title == nil }) { showing = $0 }
+            }
             .overlay {
                 if picking {
                     FloatingPanel(open: $picking, alignment: .topTrailing, top: 150) {
                         PanelChoice(title: "All projects", checked: project == nil) { project = nil; picking = false }
                         PanelDivider()
                         ForEach(projects, id: \.self) { p in PanelChoice(title: p, checked: project == p) { project = p; picking = false } }
+                    }
+                }
+                if sorting {
+                    FloatingPanel(open: $sorting, alignment: .topTrailing, top: 200) {
+                        ForEach(Self.sorts, id: \.0) { s in PanelChoice(title: s.1, checked: sort == s.0) { sort = s.0; sorting = false } }
                     }
                 }
             }
@@ -126,8 +144,32 @@ struct SearchView: View {
                     .font(.inter(.subheadline)).foregroundStyle(Palette.muted)
                     .frame(maxWidth: .infinity, alignment: .leading).padding(16)
             } else {
-                LazyVStack(spacing: 2) {
+                LazyVStack(alignment: .leading, spacing: 2) {
+                    // The count, and the sort on the right as on the Mac's page (2026-10-28).
+                    HStack(spacing: 8) {
+                        Text("\(hits.count) \(hits.count == 1 ? "result" : "results") in \(project ?? "all projects")")
+                            .font(.inter(.footnote)).foregroundStyle(Palette.faint).lineLimit(1)
+                        Spacer(minLength: 8)
+                        Button { Brand.select(); withAnimation(Brand.quick) { sorting.toggle() } } label: {
+                            HStack(spacing: 4) {
+                                Image(systemName: "arrow.up.arrow.down").font(.system(size: 11))
+                                Text(Self.sorts.first { $0.0 == sort }?.1 ?? "Best match").lineLimit(1)
+                                Image(systemName: "chevron.down").font(.system(size: 9, weight: .semibold))
+                            }
+                            .font(.inter(.footnote, .medium)).foregroundStyle(sort == "best" ? Palette.muted : Palette.ink)
+                            .padding(.horizontal, 12).frame(height: 34)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.press)
+                        .accessibilityLabel("Sort: \(Self.sorts.first { $0.0 == sort }?.1 ?? "Best match")")
+                        .accessibilityIdentifier("search-sort")
+                    }
+                    .padding(.leading, 8)
                     ForEach(Array(hits.enumerated()), id: \.element.id) { i, h in
+                        if let t = h.section, i == 0 || hits[i - 1].section != t {
+                            Text(t).font(.inter(.caption, .semibold)).foregroundStyle(Palette.muted)
+                                .padding(.horizontal, 8).padding(.top, i == 0 ? 4 : 14).padding(.bottom, 2)
+                        }
                         Button { open(h) } label: { HitRow(hit: h) }
                             .buttonStyle(RowPress())
                             .arrive(min(i, 8))
@@ -137,11 +179,11 @@ struct SearchView: View {
             }
         }
         .scrollDismissesKeyboard(.interactively)
-        .task(id: "\(query)|\(filter)|\(project ?? "")") {
+        .task(id: "\(query)|\(filter)|\(project ?? "")|\(sort)") {
             // As on the Mac: wait a moment while typing, then ask once.
             try? await Task.sleep(for: .milliseconds(query.isEmpty ? 0 : 220))
             guard !Task.isCancelled else { return }
-            var q = ["q": query, "filter": filter]
+            var q = ["q": query, "filter": filter, "sort": sort, "limit": "200"]
             if let project { q["project"] = project }
             guard let d = try? await model.act("/api/search", q, nil, method: "GET"),
                   let r = try? API.decoder.decode(SearchResult.self, from: d), !Task.isCancelled else { return }
@@ -159,6 +201,9 @@ struct SearchView: View {
             return
         }
         if h.kind == "script", let id = h.session, let s = model.sessions.first(where: { $0.id == id }) { path = [s]; return }
+        // A clip or a still: first the preview in its own shape, then Open (2026-10-28).
+        let ext = (h.path as NSString).pathExtension.lowercased()
+        if ["mov", "mp4", "m4v", "png", "jpg", "jpeg", "heic", "webp"].contains(ext) { previewing = h; return }
         showing = h
     }
 }

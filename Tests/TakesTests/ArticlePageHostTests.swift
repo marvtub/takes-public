@@ -19,7 +19,8 @@ import WebKit
 
     private func text(_ web: WKWebView, until want: String) async -> String {
         var last = ""
-        for _ in 0..<100 {
+        let end = Date().addingTimeInterval(20)  // a deadline, not a wait: a busy Mac renders late
+        while Date() < end {
             last = ((try? await web.evaluateJavaScript("document.querySelector('article')?.innerText ?? ''")) as? String ?? "")
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             if last.contains(want) || (want == "@@" && last.isEmpty) { return last }
@@ -47,20 +48,23 @@ import WebKit
         // Typing, then a switch before the page sends it: nothing late reaches the next article.
         _ = try? await first.evaluateJavaScript("document.querySelector('article p').textContent += ' typed'; "
                                                 + "document.querySelector('article').dispatchEvent(new Event('input')); 1")
+        // A mark on the loaded page: a reload would lose it.
+        _ = try? await first.evaluateJavaScript("window.takesLoaded = 1; 1")
         // Another platform shows: the article view goes, and its page waits, loaded.
         h.rootView = AnyView(Color.clear.frame(width: 700, height: 600))
         settle(h)
         #expect(ArticlePageHost.idle.contains { $0.web === first })
         #expect(await text(first, until: "@@").isEmpty)   // emptied, not the old article
 
-        // The next article view: the same web view, the new text, and quickly.
+        // The next article view: the same web view and the same page, not loaded again, with the
+        // new text. The page kept its mark instead of a time limit, which a busy Mac broke.
         let t = CFAbsoluteTimeGetCurrent()
         h.rootView = AnyView(article("Second article body.\n").frame(width: 700, height: 600))
         settle(h)
         #expect(webs(in: h).first === first)
         #expect(await text(first, until: "Second").contains("Second article"))
         let ms = (CFAbsoluteTimeGetCurrent() - t) * 1000
-        #expect(ms < 400)
+        #expect((try? await first.evaluateJavaScript("window.takesLoaded ?? 0")) as? Int == 1, "the page was loaded again")
         var changed: [String] = []
         h.rootView = AnyView(ArticleView(markdown: "Second article body.\n", head: ArticleHead(nil),
                                          session: URL(fileURLWithPath: NSTemporaryDirectory()), onChange: { changed.append($0) })

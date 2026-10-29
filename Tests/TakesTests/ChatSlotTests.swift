@@ -79,33 +79,43 @@ enum SlotHarness {
 extension ChatRunTests {
     @Test func theHiddenDockedChatSkipsStreamedWords() async throws {
         defer { cleanup() }
+        // Each word waits for the test (a word-<run>-<i> file), so every word is a change the view sees on
+        // its own, however busy the Mac. A fixed 25 ms per word let a slow Mac fold many into one.
+        let words = 20
         try fake(#"""
         echo '{"type":"stream_event","event":{"type":"content_block_start","content_block":{"type":"text"}}}'
-        for i in $(seq 1 80); do
+        for i in $(seq 1 \#(words)); do
+          while [ -d "\#(dir.path)" ] && [ ! -e "\#(dir.path)/word-$n-$i" ]; do sleep 0.01; done
           echo '{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"word '$i' "}}}'
-          sleep 0.025
         done
         """#)
         let slot = SlotHarness.Slot()
         let (view, window, chat, _) = SlotHarness.host(slot, session: session)
         defer { window.orderOut(nil) }
 
-        func stream() async -> Int {
+        func stream(_ run: Int) async -> Int {
             SlotHarness.settle(view)
             let start = Perf.count("ChatRows")
             chat.send("Go", title: "Slot", onStage: nil)
-            await until(15) { !chat.running }
-            try? await Task.sleep(for: .milliseconds(100))
+            for i in 1...words {
+                FileManager.default.createFile(atPath: dir.appending(path: "word-\(run)-\(i)").path, contents: nil)
+                await until { chat.messages.last?.text.contains("word \(i) ") == true }
+                view.layoutSubtreeIfNeeded()  // the shown copy draws this word before the next comes
+            }
+            await until { !chat.running }
+            SlotHarness.settle(view)
             return Perf.count("ChatRows") - start
         }
 
         SlotHarness.set(slot, false)
-        let hidden = await stream()
+        let hidden = await stream(1)
         SlotHarness.set(slot, true)
-        let shown = await stream()
-        #expect(chat.messages.last?.text.contains("word 80") == true)
-        // Hidden: only when the run starts and ends. Shown: for the words too. (Without the freeze,
-        // both were 30. The count is for the whole test run, so other tests add a little.)
-        #expect(shown >= hidden * 2, "hidden copy redrew \(hidden) times, shown \(shown)")
+        let shown = await stream(2)
+        print("hidden copy drew \(hidden) times, shown \(shown), for \(words) words")
+        #expect(chat.messages.last?.text.contains("word \(words) ") == true)
+        // Hidden: only when the run starts and ends (3). Shown: for each word too (21). Without the
+        // freeze, both were about one per word. The count is for the whole test run, so other tests add a little.
+        #expect(hidden < words / 2, "hidden copy redrew \(hidden) times for \(words) words")
+        #expect(shown >= words / 2, "shown copy redrew \(shown) times for \(words) words")
     }
 }

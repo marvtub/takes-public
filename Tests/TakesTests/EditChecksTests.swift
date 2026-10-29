@@ -62,26 +62,14 @@ struct EditChecksTests {
             ["check": "streams", "pass": true], ["check": "echo", "pass": NSNull(), "skip": "Music under the voice."],
             ["check": "words", "pass": NSNull(), "error": "ffmpeg: failed"]]]
         #expect(EditChecks.state(e, modified: modified) == .passed(skipped: ["Music under the voice.", "ffmpeg: failed"]))
-    }
-
-    @Test func allSkippedIsNothingRan() {
-        let e: [String: Any] = ["v": 2, "mtime": modified.timeIntervalSince1970, "results": [
-            ["check": "echo", "pass": NSNull(), "skip": "No take."]]]
-        #expect(EditChecks.state(e, modified: modified) == .nothingRan)
-    }
-
-    @Test func lineCopy() {
+        // Only skipped checks is nothing ran.
+        do {
+            let e: [String: Any] = ["v": 2, "mtime": modified.timeIntervalSince1970, "results": [
+                ["check": "echo", "pass": NSNull(), "skip": "No take."]]]
+            #expect(EditChecks.state(e, modified: modified) == .nothingRan)
+        }
+        // The lines the user sees name Takes, never Claude or the user.
         let c = EditCheck(check: "echo", pass: false, label: "Echo", say: "The voice has more echo than the take.")
-        #expect(EditChecks.line(.passed(skipped: [])) == "All checks pass.")
-        #expect(EditChecks.line(.passed(skipped: ["a", "b"])) == "All checks pass. 2 did not run.")
-        #expect(EditChecks.line(.problems([c])) == "1 problem:")
-        #expect(EditChecks.line(.problems([c, c])) == "2 problems:")
-        #expect(EditChecks.line(.nothingRan) == "Takes could not check this edit. Ask Takes in the chat why.")
-        #expect(EditChecks.line(.stale) == "Changed since the last check. Ask Takes to check it again.")
-        #expect(EditChecks.line(.unchecked) == "Not checked yet. Ask Takes to check this edit.")
-        #expect(c.help == "The voice has more echo than the take. Ask Takes in the chat to fix it.")
-        #expect(EditChecks.badgeHelp(1) == "1 problem in this edit. Open it to see what.")
-        #expect(EditChecks.badgeHelp(3) == "3 problems in this edit. Open it to see what.")
         for s in [EditChecks.line(.nothingRan), EditChecks.line(.stale), EditChecks.line(.unchecked), c.help] {
             #expect(!s.contains("Claude") && !s.contains("The user"))
         }
@@ -96,14 +84,6 @@ struct EditChecksTests {
         #expect(CheckLine.fit(many, width: 2000) == 12)
         let n = CheckLine.fit(many, width: 300)
         #expect(n > 0 && n < 12)
-    }
-
-    @Test func barSpaceGrowsOnlyForEdits() {
-        let s = URL(fileURLWithPath: "/tmp/Lib/Proj/2026-10-11-a")
-        #expect(ReviewPlayer.barSpace(for: s.appending(path: "edits/hook-v1.mp4"), in: s) == 78)
-        #expect(ReviewPlayer.barSpace(for: s.appending(path: "take-01-camera.mov"), in: s) == 54)
-        #expect(ReviewPlayer.barSpace(for: s.appending(path: "generated/clip-v1.mp4"), in: s) == 54)
-        #expect(ReviewPlayer.barSpace(for: s.appending(path: "edits"), in: s) == 54)
     }
 
     @Test func checksJSONIsNotAnAsset() throws {

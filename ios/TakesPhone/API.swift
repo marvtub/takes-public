@@ -208,6 +208,8 @@ struct SessionDetail: Codable, Hashable {
     var scriptHooks: [PostHook]? = nil
     /// Where it is marked published ("" for somewhere else).
     var publishedOn: [String]? = nil
+    /// The session's slides (2026-10-26). Nil from an older Mac or when the session has none.
+    var carousel: Carousel? = nil
 }
 
 /// A saved version of the script or a post (the Mac's history sheet).

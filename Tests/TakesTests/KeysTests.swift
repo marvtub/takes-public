@@ -10,12 +10,6 @@ import Testing
 struct KeysTests {
     let video = KeyContext(hasPreview: true, videoOnStage: true, canComment: true, hasPlayer: true)
 
-    @Test func readOnlyTextIsNotTyping() {
-        let t = NSTextView()
-        t.isEditable = false
-        #expect(!KeyRouter.isTyping(t))
-    }
-
     @Test func editableTextIsTyping() {
         #expect(KeyRouter.isTyping(NSTextView()))
         #expect(!KeyRouter.isTyping(nil))
@@ -41,6 +35,8 @@ struct KeysTests {
         for key in [Key.space, Key.c, Key.left, Key.right] {
             #expect(KeyRouter.action(key: key, modifiers: [], c) != nil, "key \(key) would beep")
         }
+        // Read-only text is not typing.
+        #expect(!KeyRouter.isTyping(t))
     }
 
     @Test func typingKeepsKeysForTheField() {

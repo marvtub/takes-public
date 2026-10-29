@@ -658,6 +658,9 @@ final class ClaudeChat {
     /// Notes about jobs that ended while the chat could not hear them (JobBoard.takeHeld): they go
     /// in front of the user's next message. Set by AppModel.
     static var heldNotes: (@MainActor (URL) -> (text: String, lines: [ChatMessage])?)?
+    /// This chat's own source of held notes, before `heldNotes`. Tests: every AppModel a test makes
+    /// sets the shared one, and a job test lost its notes to one made beside it (2026-10-27).
+    @ObservationIgnored var notesFrom: (@MainActor (URL) -> (text: String, lines: [ChatMessage])?)?
 
     /// The user pressed Stop, and nothing ran since: a job's end waits for his next message.
     var stoppedByYou: Bool { stopped }
@@ -686,7 +689,7 @@ final class ClaudeChat {
         }
         // Jobs that ended while the chat was stopped or could not hear: their notes go first, as
         // their own lines. /compact must stay alone.
-        if notes.isEmpty, let session, !Self.isCompact(text), let held = Self.heldNotes?(session) {
+        if notes.isEmpty, let session, !Self.isCompact(text), let held = (notesFrom ?? Self.heldNotes)?(session) {
             held.lines.forEach(append)
             text = held.text + "\n\n" + text
         }
@@ -776,6 +779,7 @@ final class ClaudeChat {
                       case let p = PostPlatform.stored(UserDefaults.standard.string(forKey: "postPlatform") ?? "") {
                 // Which post he looks at, so "make it shorter" lands on the right one (2026-10-04).
                 notes.append("Right now the user has the Post tab open on the \(p.name) side (\(p.rel)).")
+                if let c = CarouselFile.read(session)?.context(p) { notes.append(c) }
             }
         } else if boardName.hasPrefix("comments") {
             context = CopilotAsk.context
@@ -2060,6 +2064,12 @@ private struct ChatPanel: View {
                 VStack(alignment: .leading, spacing: 6) {
                     ForEach(intro.asks, id: \.0) { label, ask in suggestion(ask, label) }
                 }
+            } else if target.session == nil && chat.boardName != "board" {
+                // A board with no intro of its own: never the Performance asks (2026-10-26, Plan
+                // showed "Update the dashboard" to public users, who have no dashboard).
+                Text("Ask Takes about \(target.title).").font(Theme.display(22)).foregroundStyle(Theme.ink)
+                Text("It knows this board. Past chats are under the clock.")
+                    .font(Theme.sans(12.5)).foregroundStyle(Theme.muted)
             } else if target.session == nil {
                 Text("Ask Takes about your numbers.").font(Theme.display(22)).foregroundStyle(Theme.ink)
                 Text("It can refresh this board for you. Past chats are under the clock.")

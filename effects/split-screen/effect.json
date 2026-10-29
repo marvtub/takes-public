@@ -1,0 +1,15 @@
+{
+  "name": "Split screen",
+  "description": "The frame splits: the speaker in the top half, the screen recording (or any b-roll) in the bottom half, each with rounded corners and a label chip. Then it returns to full frame.",
+  "when": "Demos: when you walk through an app, a site or a doc while you talk, and the take has a screen recording.",
+  "needs": [
+    "the camera footage and the screen recording (or b-roll) of the same moment",
+    "the part of the screen to show (cover) or the whole clip (contain)",
+    "a short label for each half",
+    "the cut time where it starts"
+  ],
+  "kind": "Full frame",
+  "length_s": 6,
+  "shape": "any",
+  "shipped": true
+}

@@ -45,6 +45,48 @@ struct TakesPlugin: Identifiable {
     /// Cards under a chat's last message (2026-10-19): the plugin returns a view for the chats it knows, nil for the
     /// rest. The chat panel draws it below the transcript, so a card can carry buttons that act on the board.
     var chatFoot: (@MainActor (ClaudeChat) -> AnyView?)? = nil
+    /// Takes posts the post itself at its time (2026-10-25, the admin Zernio plugin): its part of the
+    /// Schedule panel, the header button's label, and a layer over the window.
+    var autopost: AutopostHook? = nil
+}
+
+/// A plugin that posts for you. The Schedule panel and the header button ask it about each post;
+/// nil everywhere means today's panel and button.
+struct AutopostHook {
+    /// Its part of the Schedule panel for this post. Nil: the panel as it is.
+    let panel: @MainActor (_ c: AutopostContext) -> AutopostPanel?
+    /// The header button's label for this post. Nil: today's label.
+    let label: @MainActor (_ session: URL, _ platform: PostPlatform, _ content: PostFile.Content) -> AutopostLabel?
+    /// Over the whole window, like the first take's card.
+    let layer: @MainActor (_ app: AppModel) -> AnyView
+}
+
+/// The post and the time on show in the Schedule panel. `save` writes that time to the post (after
+/// what is being typed); `close` shuts the panel.
+struct AutopostContext {
+    let session: URL
+    let platform: PostPlatform
+    let content: PostFile.Content
+    let date: Date
+    let zone: TimeZone
+    let app: AppModel
+    let save: () -> Void
+    let close: () -> Void
+}
+
+struct AutopostPanel {
+    /// Under the time: the offer, the wait, or the account it posts as.
+    var block: AnyView
+    /// In place of the line under it. Nil: today's line.
+    var note: String?
+    /// In place of the Set time / Save button. Nil: that button.
+    var primary: AnyView?
+}
+
+struct AutopostLabel {
+    var view: AnyView
+    var accent: Bool
+    var help: String
 }
 
 /// A plugin's part of the phone server. `route` answers the requests it knows (with the library
@@ -137,6 +179,8 @@ enum Plugins {
         built.first { $0.id == id && !removed.contains($0.id) && $0.chatContext != nil }
     }
     static var postSides: [PostSide] { all.flatMap(\.postSides) }
+    /// The plugin that posts for you, if one is on.
+    static var autopost: AutopostHook? { all.lazy.compactMap(\.autopost).first }
     static var recordHooks: [RecordHook] { all.compactMap(\.record) }
     static var phoneHooks: [PhoneHook] { all.compactMap(\.phone) }
     /// The hook that has the stage for this session, if one has.

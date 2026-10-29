@@ -115,6 +115,56 @@ class Higgsfield(unittest.TestCase):
                              "aspect_ratio": "9:16", "name": "cut vertical"})
         self.assertTrue(r2["file"].endswith("cut-vertical-v2.mp4"))
 
+    def take(self):
+        os.makedirs(os.path.join(self.s, "stills"), exist_ok=True)
+        open(os.path.join(self.s, "take-01-camera.mov"), "wb").write(b"v")
+        for f in ("target.png", "product.png"):
+            open(os.path.join(self.s, "stills", f), "wb").write(b"png")
+
+    def test_an_edit_draft_keeps_the_take_sound_and_takes_several_references(self):
+        self.take()
+        r = t.t_higgsfield({"session": self.s, "video": "take-01-camera.mov", "prompt": "Edit @video1.", "name": "can",
+                            "image": "stills/target.png", "images": ["stills/product.png"],
+                            "params": {"mode": "video_edit", "draft": True, "resolution": "480p"}})
+        t.higgsfield_run(self.s, self.started[0])
+        a = self.args()
+        self.assertEqual([a[i + 1].rsplit("/", 1)[-1] for i, x in enumerate(a) if x == "--image"], ["target.png", "product.png"])
+        self.assertEqual(a[a.index("--generate_audio") + 1], "false")  # Seedance's own track has murmured voices
+        self.assertEqual(a[a.index("--draft") + 1], "true")  # not "True"
+        job = t.hf_jobs(self.s)[0]
+        self.assertEqual((job["draft"], job["hf_id"]), (True, "job1"))
+        self.assertEqual(r["file"], os.path.join("generated", "can-v1.mp4"))
+
+    def test_finalise_makes_the_full_size_from_the_draft_job(self):
+        self.take()
+        t.t_higgsfield({"session": self.s, "video": "take-01-camera.mov", "prompt": "Edit @video1.", "name": "can",
+                        "params": {"mode": "video_edit", "draft": True, "resolution": "480p"}})
+        with self.assertRaisesRegex(ValueError, "not a finished draft"):
+            t.t_higgsfield({"session": self.s, "finalise": "can-v1"})  # still running
+        t.higgsfield_run(self.s, self.started[0])
+        r = t.t_higgsfield({"session": self.s, "finalise": "generated/can-v1.mp4"})
+        self.assertEqual(r["file"], os.path.join("generated", "can-final-v1.mp4"))
+        t.higgsfield_run(self.s, self.started[1])
+        a = self.args()
+        self.assertNotIn("--draft", a)
+        self.assertEqual(a[a.index("--draft_job_id") + 1], "job1")
+        self.assertEqual(a[a.index("--resolution") + 1], "1080p")
+        self.assertEqual(a.count("--wait"), 1)
+        self.assertIn("--video", a)
+
+    def test_cost_starts_nothing(self):
+        self.take()
+        r = t.t_higgsfield({"session": self.s, "video": "take-01-camera.mov", "prompt": "Edit @video1.", "cost": True,
+                            "params": {"mode": "video_edit", "draft": True}})
+        self.assertFalse(r["started"])
+        self.assertEqual(self.args()[:3], ["generate", "cost", "seedance_2_5"])
+        self.assertNotIn("--wait", self.args())
+        self.assertEqual(self.started, [])
+
+    def test_the_job_id_comes_from_the_url_when_the_output_has_none(self):
+        self.assertEqual(t.hf_id("done", "https://x/hf_20261023_011129_07b5c224-3b6c-4859-9cbd-3aee4d5c3c42.mp4"),
+                         "07b5c224-3b6c-4859-9cbd-3aee4d5c3c42")
+
     def test_bad_input_is_refused_before_any_credit_is_spent(self):
         with self.assertRaisesRegex(ValueError, "prompt"):
             t.t_higgsfield({"session": self.s})
@@ -125,6 +175,10 @@ class Higgsfield(unittest.TestCase):
         self.assertEqual(self.started, [])
 
     def test_not_installed(self):
+        # Installed: the status reads the account.
+        st = t.t_higgsfield_status({})
+        self.assertTrue(st["signed_in"])
+        self.assertIn("credits", st["account"])
         os.environ.pop("TAKES_HIGGSFIELD_CMD")
         t.higgsfield_cli, real = (lambda: None), t.higgsfield_cli
         try:
@@ -133,11 +187,6 @@ class Higgsfield(unittest.TestCase):
                 t.t_higgsfield({"session": self.s, "prompt": "x"})
         finally:
             t.higgsfield_cli = real
-
-    def test_status_reads_the_account(self):
-        st = t.t_higgsfield_status({})
-        self.assertTrue(st["signed_in"])
-        self.assertIn("credits", st["account"])
 
     def test_the_result_url_prefers_a_media_file(self):
         out = json.dumps({"page": "https://higgsfield.ai/x", "result": {"raw": "https://cdn.x/a.mp4?sig=1"}})

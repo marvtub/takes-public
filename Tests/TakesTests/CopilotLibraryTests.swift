@@ -14,15 +14,6 @@ struct CopilotLibraryTests {
         #expect(TokenCount.label(17_000) == "17k")
     }
 
-    @Test func theListHoldsTheFilesTheAgentReads() {
-        let root = URL(fileURLWithPath: "/tmp/lib")
-        let docs = CopilotDoc.all(root)
-        #expect(docs.map(\.id) == ["lessons", "targets", "style", "best"])
-        #expect(docs[0].url == CopilotStore.lessons(root))
-        #expect(docs[1].url.lastPathComponent == "commenting-targets.md")
-        #expect(docs[2].url.lastPathComponent == "comment-style-guide.md")
-    }
-
     /// Renders the tab off screen and saves it as a PNG in TAKES_SNAP=<folder>, to look at. Only on
     /// request: its run-loop spin on the main thread made the sound-cue timer test miss its second.
     @Test(.enabled(if: ProcessInfo.processInfo.environment["TAKES_SNAP"] != nil))

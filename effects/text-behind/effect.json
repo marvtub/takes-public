@@ -1,0 +1,15 @@
+{
+  "name": "Text behind",
+  "description": "The footage pulls back into a dark frame and a huge word or number rises up behind the speaker's head, with a small accent line above it.",
+  "when": "One big number or word you want to land: a result, a price, a short claim.",
+  "needs": [
+    "the word (1 to 5 characters reads best)",
+    "a short line above it",
+    "the cut time where it starts",
+    "a cutout of the speaker (made in step 2)"
+  ],
+  "kind": "Cut-out",
+  "length_s": 6,
+  "shape": "any",
+  "shipped": true
+}

@@ -314,16 +314,6 @@ class Jobs(unittest.TestCase):
         os.environ["TAKES_BOARD"] = "styles"
         self.assertNotIn("sends you a note", self.run_job("true")["note"])
 
-    def test_bad_wait_and_bad_job_file(self):
-        r = self.run_job("true")
-        with self.assertRaises(ValueError) as e:
-            t.t_get_job({"id": r["job"], "wait_s": "abc"})
-        self.assertEqual(str(e.exception), "wait_s is seconds, 0 to 50.")
-        open(t.job_path(self.s, "job-dead00"), "w").write('{"id": "job-de')
-        with self.assertRaises(ValueError) as e:
-            t.t_get_job({"id": "job-dead00"})
-        self.assertIn("Start it again with run_job.", str(e.exception))
-
     def test_next_path_skips_claimed_version(self):
         self.run_job("sleep 2; printf x > edits/launch-v1.mp4", ["edits/launch-v1.mp4"])
         self.assertTrue(t.t_next_path({"session": self.s, "kind": "edit", "name": "launch"})["path"].endswith("launch-v2.mp4"))
@@ -519,6 +509,15 @@ class Jobs(unittest.TestCase):
         self.assertIn("cannot read", str(e.exception))
         self.assertEqual(open(p).read(), '{"id": "job-abc')
         self.assertEqual(t.t_get_job({"session": self.s})["jobs"], [])
+        # A bad wait, and a broken job file says to start it again.
+        r = self.run_job("true")
+        with self.assertRaises(ValueError) as e:
+            t.t_get_job({"id": r["job"], "wait_s": "abc"})
+        self.assertEqual(str(e.exception), "wait_s is seconds, 0 to 50.")
+        open(t.job_path(self.s, "job-dead00"), "w").write('{"id": "job-de')
+        with self.assertRaises(ValueError) as e:
+            t.t_get_job({"id": "job-dead00"})
+        self.assertIn("Start it again with run_job.", str(e.exception))
 
     def test_idle_session_gets_no_folder(self):
         t.t_get_session({"session": self.s}) if hasattr(t, "t_get_session") else None

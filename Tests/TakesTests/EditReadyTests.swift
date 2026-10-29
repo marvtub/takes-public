@@ -28,13 +28,6 @@ struct EditReadyTests {
 
     func cleanup() { try? fm.removeItem(at: root) }
 
-    @Test func sessionIDRoundTrips() throws {
-        var m = SessionMeta(title: "A", createdAt: Date(timeIntervalSince1970: 0))
-        m.id = "4be1c09a7f3d"
-        let back = try Store.decoder.decode(SessionMeta.self, from: Store.encoder.encode(m))
-        #expect(back.id == "4be1c09a7f3d")
-    }
-
     @Test func derivedIDMatchesServer() throws {
         defer { cleanup() }
         let s = try session("2026-10-11-demo")

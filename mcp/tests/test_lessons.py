@@ -211,6 +211,11 @@ class Lessons(unittest.TestCase):
         self.assertTrue(t.t_get_rules({})["steps"][0]["full"])
         props = next(p for n, d, p, r, f in t.TOOLS if n == "set_rule")
         self.assertNotIn("merge", props)
+        # Only the full step says full.
+        t.t_set_rule({"area": "sound", "text": "Loud."})
+        steps = {x["area"]: x for x in t.t_get_rules({})["steps"]}
+        self.assertTrue(steps["cut"]["full"])
+        self.assertNotIn("full", steps["sound"])
 
     def test_details(self):
         out = t.t_set_rule({"area": "cut", "text": "Tight pauses.", "details": "  Keep   a breath. "})
@@ -226,13 +231,6 @@ class Lessons(unittest.TestCase):
         self.assertNotIn("details", t.read_lessons()["rules"][0])
         with self.assertRaises(ValueError):
             t.t_set_rule({"id": "cut-1", "details": "x" * (t.DETAILS_MAX + 1)})
-
-    def test_full_flag_in_steps(self):
-        self.full_cut()
-        t.t_set_rule({"area": "sound", "text": "Loud."})
-        steps = {x["area"]: x for x in t.t_get_rules({})["steps"]}
-        self.assertTrue(steps["cut"]["full"])
-        self.assertNotIn("full", steps["sound"])
 
     def test_the_users_rule_is_theirs(self):
         d = t.read_lessons()
@@ -346,18 +344,6 @@ class RulesBySteps(unittest.TestCase):
             self.assertEqual(f.read(), '{"rules": [ oops')
         self.assertEqual(len([r for r in t.read_lessons()["rules"] if r["area"] == "cut"]), 2)
 
-    def test_old_copilot_lessons_file_is_merged(self):
-        t.lessons_path()
-        with open(os.path.join(self.lib, "comments", "lessons.md"), "w") as f:
-            f.write(t.LESSONS_SEED + "\n- Never open with a compliment.\n")
-        with open(t.lessons_path()) as f:
-            self.assertIn("- Never open with a compliment.", f.read())
-        self.assertFalse(os.path.exists(os.path.join(self.lib, "comments", "lessons.md")))
-
-    def test_linkedin_hooks_are_linkedin(self):
-        self.assertEqual(t.post_area("posts/hooks.json"), "post-linkedin")
-        self.assertEqual(t.post_area("posts/x/hooks.json"), "post-x")
-
     def test_old_file_splits_by_area(self):
         old = [{"id": "cut-1", "area": "cut", "text": "Tight."}, {"id": "post-1", "area": "post", "text": "Hook."},
                {"id": "post-3", "area": "post", "text": "True claims."}, {"id": "odd-1", "area": "odd", "text": "?"}]
@@ -381,6 +367,9 @@ class RulesBySteps(unittest.TestCase):
         t.t_reply_comment({"session": self.s, "replies": [{"id": "c1", "resolve": True, "lesson": "new",
                                                            "rule": {"area": "post", "text": "No 'so' openers on X."}}]})
         self.assertEqual(t.t_get_rules({"area": "post-x"})["rules"][0]["id"], "post-x-1")
+        # LinkedIn hooks are LinkedIn, X hooks X.
+        self.assertEqual(t.post_area("posts/hooks.json"), "post-linkedin")
+        self.assertEqual(t.post_area("posts/x/hooks.json"), "post-x")
 
     def test_writing_a_post_needs_its_rules_once(self):
         t.t_set_rule({"area": "post-x", "text": "Short."})
@@ -438,4 +427,11 @@ class RulesBySteps(unittest.TestCase):
         with self.assertRaises(ValueError) as e:
             t.need_rules("comments")
         self.assertIn("No polish.", str(e.exception))
+        # An old lessons file next to the new one is merged into it.
+        t.lessons_path()
+        with open(os.path.join(self.lib, "comments", "lessons.md"), "w") as f:
+            f.write(t.LESSONS_SEED + "\n- Never open with a compliment.\n")
+        with open(t.lessons_path()) as f:
+            self.assertIn("- Never open with a compliment.", f.read())
+        self.assertFalse(os.path.exists(os.path.join(self.lib, "comments", "lessons.md")))
 

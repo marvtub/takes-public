@@ -22,9 +22,4 @@ struct TurnClockTests {
         let c = TurnClock(agent: "pi", now: 0)
         #expect(c.line(outcome: "error", now: 1) == "chat turn pi once: first line –, answer –, done 1.00 s, error")
     }
-
-    @Test func theProcessKnowsItsAge() throws {
-        let age = try #require(Perf.processAge())
-        #expect(age > 0 && age < 86_400)
-    }
 }

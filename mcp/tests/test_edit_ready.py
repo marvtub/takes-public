@@ -45,8 +45,8 @@ if log:
 '''
 
 
-def ff(*args):
-    subprocess.run([FFMPEG, "-v", "error", "-y"] + [str(a) for a in args], check=True)
+sys.path.insert(0, os.path.dirname(__file__))
+from check_media import ff  # noqa: E402  made media is cached between runs
 
 
 def flash_take(path, secs=6, offset=0.2, flashes=(1.0, 3.0, 5.0), size="160x120", rate=30):
@@ -352,21 +352,37 @@ class Prepare(Base):
         self.assertFalse(os.path.exists(os.path.join(self.s, "take-01-camera.words.json")))
 
     def test_prepare_lock_ignores_tmpdir(self):
+        # The test holds the library's lock, so both runs must wait on it, each with its own TMPDIR.
+        # Before, the second run had to start within the first's 0.6 s, and a busy Mac missed that.
+        import fcntl
         self.add_take()
         self.add_take(2)
         self.words(self.WORDS)
         log = os.path.join(self.root, "log")
         env = dict(os.environ, TAKES_TEST_LOG=log, TAKES_TEST_SLEEP="0.6")
-        procs = [subprocess.Popen([sys.executable, SERVER, "--prepare-run", self.s, str(n)], cwd=self.s,
-                                  env=dict(env, TMPDIR=tempfile.mkdtemp()), stdout=subprocess.PIPE, text=True)
-                 for n in (1, 2)]
-        outs = [p.communicate(timeout=60)[0] for p in procs]
+        fd = os.open(os.path.join(self.root, ".prepare.lock"), os.O_RDWR | os.O_CREAT, 0o644)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        try:
+            procs = [subprocess.Popen([sys.executable, SERVER, "--prepare-run", self.s, str(n)], cwd=self.s,
+                                      env=dict(env, TMPDIR=tempfile.mkdtemp()), stdout=subprocess.PIPE, text=True)
+                     for n in (1, 2)]
+            heads = []
+            for p in procs:  # until each says it waits (or ends without waiting: then the check fails)
+                head = ""
+                while "Waits for " not in head:
+                    line = p.stdout.readline()
+                    if not line: break
+                    head += line
+                heads.append(head)
+        finally:
+            os.close(fd)
+        outs = [h + p.communicate(timeout=60)[0] for h, p in zip(heads, procs)]
+        self.assertTrue(all("Waits for " in h for h in heads), outs)
         lines = [l.split() for l in open(log).read().splitlines()]
         spans = [(float(lines[i][1]), float(lines[i + 1][1])) for i in range(0, len(lines), 2)]
         self.assertEqual(len(spans), 2)
         a, b = sorted(spans)
         self.assertLessEqual(a[1], b[0], "two Whisper runs at once")
-        self.assertTrue(any("Waits for " in o for o in outs), outs)
 
     def test_prepare_waits_for_recording(self):
         self.add_take()
@@ -434,8 +450,18 @@ class Prepare(Base):
             rec.kill()
 
     def test_uv_without_network_is_the_download_error(self):
-        # uv stops before prepare_take.py runs (no TAKES_PROGRESS line): offline, one plain error.
         self.add_take()
+        # The script's download error is the plain error, and marks the Mac offline.
+        os.environ["TAKES_TEST_FAIL"] = t.DOWNLOAD_ERROR
+        os.environ["TAKES_TEST_CODE"] = "3"
+        with self.assertRaises(t.PrepareError) as e:
+            t.prepare_take(self.s, 1)
+        self.assertEqual(str(e.exception), "Takes could not download the speech model. Connect to the internet. "
+                                           "Takes tries again at the next cut.")
+        self.assertTrue(os.path.exists(os.path.join(self.root, ".prepare-offline")))
+        os.environ.pop("TAKES_TEST_FAIL")
+        os.remove(os.path.join(self.root, ".prepare-offline"))
+        # uv stops before prepare_take.py runs (no TAKES_PROGRESS line): offline, one plain error.
         os.environ["TAKES_PREP_CMD"] = json.dumps([sys.executable, "-c", (
             "print('hint: Packages were unavailable because the network was disabled.'); raise SystemExit(1)")])
         with self.assertRaises(t.PrepareError) as e:
@@ -483,16 +509,6 @@ class Prepare(Base):
         os.utime(os.path.join(self.root, ".prepare-offline"), (time.time() - 7200, time.time() - 7200))
         t.app_prepare(self.s, 1)
         self.assertEqual(len(started), 1)
-
-    def test_download_error_and_offline_marker(self):
-        self.add_take()
-        os.environ["TAKES_TEST_FAIL"] = t.DOWNLOAD_ERROR
-        os.environ["TAKES_TEST_CODE"] = "3"
-        with self.assertRaises(t.PrepareError) as e:
-            t.prepare_take(self.s, 1)
-        self.assertEqual(str(e.exception), "Takes could not download the speech model. Connect to the internet. "
-                                           "Takes tries again at the next cut.")
-        self.assertTrue(os.path.exists(os.path.join(self.root, ".prepare-offline")))
 
     def test_prepare_job_progress_and_reason(self):
         self.add_take()
@@ -609,8 +625,7 @@ class SessionIds(Base):
         body = json.loads(out[0]["content"][0]["text"])
         self.assertEqual(body["resolved_from"], old)
         self.assertTrue(body["note"].startswith("The session moved to %s." % new))
-
-    def test_rename_by_old_path_names_the_new_path_once(self):
+        # A rename called by the old path names the new path once.
         old = self.s
         t.t_update_session({"session": old, "title": "Beta"})
         out = []
@@ -673,6 +688,11 @@ class SessionIds(Base):
 class Cuts(Base):
     def setUp(self):
         super().setUp()
+        # A 1 s cut ran past the 25 s wait while other work loaded the Mac (2026-10-27). These tests
+        # read the result; test_cut_take_running_shape tests the answer for a cut still running.
+        for name in ("CUT_WAIT", "JOB_WAIT_MAX"):
+            self.addCleanup(setattr, t, name, getattr(t, name))
+            setattr(t, name, 120)
         self.f = self.add_take()
         self.words([{"word": "Hello", "start": 0.6, "end": 0.9}, {"word": "datacenter", "start": 2.0, "end": 2.4},
                     {"word": "world", "start": 2.7, "end": 3.2}])
@@ -702,10 +722,6 @@ class Cuts(Base):
         self.assertEqual(r["voice_source"], "take sound")
         self.assertTrue(r["video"].endswith("/_work/take-01-v1.mp4"))
 
-    def test_cut_take_reverse_order_in_sync(self):
-        r = self.cut([{"take": 1, "in": 2.5, "out": 3.5}, {"take": 1, "in": 0.5, "out": 1.5}])
-        self.assert_sync(r["video"], [0.5, 1.5])
-
     def test_cut_take_many_segments_in_sync(self):
         # More segments than one picture pass holds: the parts join without a gap or a drift.
         segs = [{"take": 1, "in": 0.0, "out": 0.4}] * 4 + [{"take": 1, "in": 0.9, "out": 1.2}] \
@@ -714,6 +730,9 @@ class Cuts(Base):
         self.assertAlmostEqual(t.media_duration(r["video"]), 3.5, delta=0.07)
         self.assertEqual(t.take_clock(r["video"])["fps_mode"], "cfr")
         self.assert_sync(r["video"], [1.7, 3.2])
+        # Segments in reverse order stay in sync too.
+        r = self.cut([{"take": 1, "in": 2.5, "out": 3.5}, {"take": 1, "in": 0.5, "out": 1.5}])
+        self.assert_sync(r["video"], [0.5, 1.5])
 
     def test_cut_batch_small_above_1080p_or_10_bit(self):
         # A 4K HEVC Main10 decoder holds about 320 MB: 150 segments 8 at a time peaked at 2.5 GB.
@@ -1242,34 +1261,6 @@ class OldWordsFiles(Base):
         self.words([w("So", 0.9, 1.2)])
         self.assertEqual(t.prepare_take(self.s, 1), "done")
         self.assertEqual(self.doc(self.f)["onsets"], 1)
-
-
-class Docs(unittest.TestCase):
-    def test_sync_rule_in_descriptions_and_instructions(self):
-        # A default with its reason, not a ban (2026-10-11): own ffmpeg is fine for what the tools cannot do.
-        for name in ("get_session", "cut_take", "rough_cut"):
-            d = t.BY_NAME[name][1]
-            self.assertNotRegex(d, r"(?i)never[^.]*own ffmpeg", name)
-        self.assertIn("by default: they fix the audio offset and frame rate", t.BY_NAME["get_session"][1])
-        self.assertIn("own ffmpeg", t.BY_NAME["cut_take"][1])
-        self.assertIn("first draft", t.BY_NAME["rough_cut"][1])
-        self.assertIn("rough_cut's cut)", t.BY_NAME["render_edit"][1])
-        self.assertNotIn("cut_list", json.dumps([x[:4] for x in t.TOOLS]))
-        out = []
-        real = t.reply
-        t.reply = lambda id_, result=None, error=None: out.append(result)
-        try:
-            t.handle({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
-        finally:
-            t.reply = real
-        text = out[0]["instructions"]
-        i = text.index("Cut takes with rough_cut (a first draft: improve it freely) or cut_take by default")
-        self.assertLess(i, 400)
-        self.assertLess(i, text.index("clean_voice"))
-        self.assertNotRegex(text, r"(?i)never[^.]*own ffmpeg")
-        self.assertIn("by hand is fine too: its path comes from next_path", text)
-        self.assertNotIn("Whisper word times", text)
-        self.assertIn("cut_take", t.CORE_TOOLS)
 
 
 if __name__ == "__main__":

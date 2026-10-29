@@ -217,6 +217,9 @@ struct PhoneCommentTests {
         #expect(PhoneServer.lane("board:comments") == "find")
         #expect(PhoneServer.lane("board:comments-post") == "post")
         #expect(PhoneServer.lane("Inbox/2026-10-02-x") == nil)
+        // The Styles board's chat has its lane, and the note names the board.
+        #expect(PhoneServer.lane("board:styles") == "styles")
+        #expect(PhoneServer.origin(["text": "x", "from": "Styles"]).contains("Styles board"))
     }
 
     @MainActor @Test func postVariantsAndHooksFromThePhone() throws {
@@ -266,11 +269,11 @@ struct PhoneOriginTests {
         let typed = PhoneServer.origin(["text": "hi", "from": "Script"])
         #expect(typed.contains("Script tab"))
         #expect(!typed.contains("dictated"))
-    }
-
-    @Test func anOlderPhoneStillCountsAsThePhone() {
-        let note = PhoneServer.origin(["text": "hi"])
-        #expect(note.contains("iPhone"))
-        #expect(!note.contains("while"))
+        // An older phone that sends no screen still counts as the phone.
+        do {
+            let note = PhoneServer.origin(["text": "hi"])
+            #expect(note.contains("iPhone"))
+            #expect(!note.contains("while"))
+        }
     }
 }

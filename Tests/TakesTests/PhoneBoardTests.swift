@@ -130,5 +130,12 @@ struct PhoneBoardTests {
         (_, data) = await call("/api/search", method: "GET", query: ["q": "take-01", "filter": "stills"])
         r = try JSONDecoder().decode(PhoneSearch.self, from: try #require(data))
         #expect(r.hits.isEmpty)
+        // The phone's results page (2026-10-28): a date sort names each hit's group; best match does not.
+        (_, data) = await call("/api/search", method: "GET", query: ["q": "take-01", "filter": "takes", "sort": "newest", "limit": "200"])
+        r = try JSONDecoder().decode(PhoneSearch.self, from: try #require(data))
+        #expect(r.hits.count == 1 && r.hits.allSatisfy { $0.section != nil })
+        (_, data) = await call("/api/search", method: "GET", query: ["q": "take-01", "filter": "takes"])
+        r = try JSONDecoder().decode(PhoneSearch.self, from: try #require(data))
+        #expect(r.hits.allSatisfy { $0.section == nil })
     }
 }

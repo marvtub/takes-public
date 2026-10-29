@@ -1,0 +1,15 @@
+{
+  "name": "Over the shoulder",
+  "description": "Two stat cards slide out from behind the speaker's head and their numbers count up. The footage stays full-bleed: no pull back, no zoom, only a light vignette.",
+  "when": "When you name two proof numbers in one breath: views and followers, before and after.",
+  "needs": [
+    "two labels with a number each",
+    "an optional short change tag for each",
+    "the cut time where it starts",
+    "a cutout of the speaker (made in step 2)"
+  ],
+  "kind": "Cut-out",
+  "length_s": 6,
+  "shape": "any",
+  "shipped": true
+}

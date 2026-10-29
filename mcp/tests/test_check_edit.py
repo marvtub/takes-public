@@ -1,5 +1,6 @@
 """check_edit's built-in checks: each problem a user heard or saw, made on purpose in a synthetic edit,
 fails its check; the plain cut passes every one (2026-10-11)."""
+import contextlib
 import json
 import os
 import shutil
@@ -18,6 +19,13 @@ os.environ["TAKES_NO_REVIEW"] = "1"  # never let a real Gemini key watch a test 
 import check_media as m  # noqa: E402
 
 FFMPEG = t.find_tool("ffmpeg") and t.find_tool("ffprobe")
+# The built-in checks after streams. A test of one check runs only that one (2026-10-27): every run of
+# all of them started up to 40 ffmpeg processes for a test that reads one result.
+BUILT_IN = ("av_sync", "frozen_video", "band_balance", "echo", "picture_drift", "framing", "words", "regression")
+
+
+def off(ctx):
+    raise t.Skip("off in this test")
 
 
 def take_meta(s, takes):
@@ -31,13 +39,18 @@ class Base(unittest.TestCase):
         os.makedirs(os.path.join(s, "edits"))
         return s
 
-    def run_check(self, name, segs=None, s=None, source=None, **kw):
-        """Cuts edits/<name> from the take (once) and runs check_edit. Returns (result, {check: [results]})."""
+    def run_check(self, name, segs=None, s=None, source=None, only=None, **kw):
+        """Cuts edits/<name> from the take (once) and runs check_edit. Returns (result, {check: [results]}).
+        only: the built-in checks to run; the others skip."""
         s = s or self.s
         path = os.path.join(s, "edits", name)
         if segs is not None and not os.path.exists(path):
             m.cut(os.path.join(s, "take-01-camera.mov"), path, segs, **kw)
-        r = t.t_check_edit(dict({"session": s, "file": "edits/" + name}, **({"source": source} if source else {})))
+        with contextlib.ExitStack() as stack:
+            for n in BUILT_IN if only else ():
+                if n not in only:
+                    stack.enter_context(mock.patch.object(t, "chk_" + n, off))
+            r = t.t_check_edit(dict({"session": s, "file": "edits/" + name}, **({"source": source} if source else {})))
         by = {}
         for x in r["results"]:
             by.setdefault(x.get("check") or x.get("rule"), []).append(x)
@@ -83,7 +96,9 @@ class CheckEdit(Base):
     # Alignment and the plain cut
 
     def test_clean_cut_passes_everything(self):
-        r, by = self.run_check("clean-v1.mp4", self.segs)
+        # A whole sentence may go (sentence 3 is left out), and words never pays for a transcription.
+        with mock.patch.object(t, "eleven_transcribe", side_effect=AssertionError("no paid transcription")):
+            r, by = self.run_check("clean-v1.mp4", self.segs)
         self.assertTrue(r["known"])
         self.assertEqual(r["source"], "take-01-camera.mov")
         built = [x for x in r["results"] if "check" in x]
@@ -94,6 +109,11 @@ class CheckEdit(Base):
                           and not (x["check"] == "framing" and "takes-faces" in x.get("skip", ""))], [])
         self.assertTrue(r["passed"])
         self.assertIn("Every check passes", r["note"])
+        # The check results and their cache are not assets.
+        files = [a["file"] for a in t.assets(self.s, {"take-01-camera.mov"})]
+        self.assertTrue(os.path.exists(os.path.join(self.s, "checks.json")))
+        self.assertTrue(os.listdir(os.path.join(self.s, t.CHECKS_CACHE)))
+        self.assertFalse([f for f in files if "checks" in f], files)
 
     def test_align_finds_segments(self):
         path = m.cut(self.src, os.path.join(self.s, "edits", "align-v1.mp4"), self.segs)
@@ -116,7 +136,7 @@ class CheckEdit(Base):
         self.assertTrue(src["known"])
         self.assertEqual(src["segments"][1]["edit"][0], L)
         with mock.patch.object(t, "align", side_effect=AssertionError("provenance skips the search")):
-            r, by = self.run_check("made-v1.mp4")
+            r, by = self.run_check("made-v1.mp4", only=("words",))
         self.assertTrue(r["known"])
         self.assertTrue(by["words"][0]["pass"])
 
@@ -125,16 +145,12 @@ class CheckEdit(Base):
         if not os.path.exists(other):
             m.make_take(self.root, name="other-take.mov", seed=3)
         m.cut(other, os.path.join(self.s, "edits", "other-v1.mp4"), [(1.0, 9.0)], af="highpass=f=300")
-        r, by = self.run_check("other-v1.mp4")
+        r, by = self.run_check("other-v1.mp4", only=("band_balance", "echo", "picture_drift", "words"))
         self.assertFalse(r["known"])
         for c in ("band_balance", "echo", "picture_drift", "words"):
             self.assertIsNone(by[c][0]["pass"], c)
             self.assertEqual(by[c][0]["skip"], t.NO_SOURCE)
         self.assertTrue(r["passed"])
-
-    def test_bad_source_argument_is_an_error(self):
-        with self.assertRaises(ValueError):
-            self.run_check("clean-v1.mp4", self.segs, source="take-09-camera.mov")
 
     def test_given_source_needs_the_edit_in_it(self):
         # A source argument is not enough: a piece of 1 s found by chance in a 58 s edit failed band_balance.
@@ -142,13 +158,13 @@ class CheckEdit(Base):
         if not os.path.exists(other):
             m.make_take(self.root, name="other-take.mov", seed=3)
         m.cut(other, os.path.join(self.s, "edits", "given-v1.mp4"), [(1.0, 9.0)], af="highpass=f=300")
-        r, by = self.run_check("given-v1.mp4", source="take-01-camera.mov")
+        r, by = self.run_check("given-v1.mp4", source="take-01-camera.mov", only=("band_balance", "echo", "picture_drift", "words"))
         self.assertFalse(r["known"])
         for c in ("band_balance", "echo", "picture_drift", "words"):
             self.assertIsNone(by[c][0]["pass"], c)
             self.assertEqual(by[c][0]["skip"], t.NOT_FOUND % "take-01-camera.mov")
         self.assertNotIn("Pass source", json.dumps(r["results"]))
-        r, by = self.run_check("clean-v1.mp4", self.segs, source="take-01-camera.mov")
+        r, by = self.run_check("clean-v1.mp4", self.segs, source="take-01-camera.mov", only=("words",))
         self.assertTrue(r["known"])
 
     def test_unreadable_file_is_an_error(self):
@@ -170,6 +186,8 @@ class CheckEdit(Base):
             t.t_check_edit({"session": self.s, "file": "../../x.mp4"})
         with self.assertRaisesRegex(ValueError, "Use get_session for the edit files, or next_path"):
             t.t_check_edit({"session": self.s, "file": "edits/nothere-v1.mp4"})
+        with self.assertRaises(ValueError):
+            self.run_check("clean-v1.mp4", self.segs, source="take-09-camera.mov")
         for bad in ("/etc/hosts", "edits/clean-v1.mp4"):
             with self.assertRaisesRegex(ValueError, "Pass a take file from get_session"):
                 self.run_check("clean-v1.mp4", self.segs, source=bad)
@@ -180,7 +198,7 @@ class CheckEdit(Base):
         with open(os.path.splitext(path)[0] + ".words.json", "w") as f:
             json.dump({"v": 2, "words": [], "made_from": {"session_id": t.session_id(self.s), "cut": [
                 {"take": 1, "kind": "camera", "in": self.A[0], "out": self.A[1]}, "x"]}}, f)
-        r, by = self.run_check("noat-v1.mp4")
+        r, by = self.run_check("noat-v1.mp4", only=("words",))
         self.assertTrue(r["known"])
 
     def test_work_cut_provenance_reaches_edits(self):
@@ -208,7 +226,7 @@ class CheckEdit(Base):
     # Sound
 
     def test_highpass_fails_band_balance(self):
-        r, by = self.run_check("thin-v1.mp4", self.segs, af="highpass=f=300")
+        r, by = self.run_check("thin-v1.mp4", self.segs, af="highpass=f=300", only=("band_balance",))
         bad = self.failed(by, "band_balance")
         self.assertEqual(len(bad), 1)
         self.assertEqual(bad[0]["label"], "Thin voice")
@@ -218,7 +236,7 @@ class CheckEdit(Base):
 
     def test_lowpass_fails_band_balance(self):
         # A hard cut at 7 kHz, as a 14 kHz step in the chain makes it.
-        r, by = self.run_check("dull-v1.mp4", self.segs, af="aresample=14000,aresample=48000")
+        r, by = self.run_check("dull-v1.mp4", self.segs, af="aresample=14000,aresample=48000", only=("band_balance",))
         bad = self.failed(by, "band_balance")
         self.assertEqual(bad[0]["say"], "The voice sounds dull. It lost its high tones.")
         self.assertEqual(bad[0]["label"], "Dull voice")
@@ -229,10 +247,10 @@ class CheckEdit(Base):
             m.make_take(self.root, name="other-take.mov", seed=3)
         m.cut(other, os.path.join(self.s, "edits", "floor-v1.mp4"), [(1.0, 9.0)], af="aresample=14000,aresample=48000")
         m.cut(other, os.path.join(self.s, "edits", "nofloor-v1.mp4"), [(1.0, 9.0)])
-        r, by = self.run_check("floor-v1.mp4")
+        r, by = self.run_check("floor-v1.mp4", only=("band_balance",))
         self.assertFalse(r["known"])
         self.assertEqual(self.failed(by, "band_balance")[0]["label"], "Dull voice")
-        r, by = self.run_check("nofloor-v1.mp4")
+        r, by = self.run_check("nofloor-v1.mp4", only=("band_balance",))
         self.assertIsNone(by["band_balance"][0]["pass"])
 
     @unittest.skipUnless(shutil.which("say"), "needs macOS say")
@@ -247,24 +265,23 @@ class CheckEdit(Base):
              os.path.join(s, "take-01-camera.mov"))
         take_meta(s, [{"number": 1, "kind": "camera", "file": "take-01-camera.mov", "keeper": True}])
         d = t.media_seconds(os.path.join(s, "take-01-camera.mov"))
-        r, by = self.run_check("say-v1.mp4", [(0.0, d)], s=s, af="lowpass=f=7000,lowpass=f=7000,lowpass=f=7000,lowpass=f=7000")
+        r, by = self.run_check("say-v1.mp4", [(0.0, d)], s=s, af="lowpass=f=7000,lowpass=f=7000,lowpass=f=7000,lowpass=f=7000",
+                               only=("band_balance",))
         self.assertTrue(r["known"])
         self.assertEqual(self.failed(by, "band_balance")[0]["label"], "Dull voice")
 
     def test_echo_fails(self):
-        r, by = self.run_check("echo-v1.mp4", self.segs, af="aecho=0.8:0.6:60|120:0.5|0.3")
+        r, by = self.run_check("echo-v1.mp4", self.segs, af="aecho=0.8:0.6:60|120:0.5|0.3", only=("echo",))
         bad = self.failed(by, "echo")
         self.assertEqual(len(bad), 1, by.get("echo"))
         self.assertEqual(bad[0]["say"], "The voice has more echo than the take.")
         self.assertGreater(bad[0]["value"], 0.08)
-        r, by = self.run_check("clean-v1.mp4", self.segs)
-        self.assertTrue(by["echo"][0]["pass"])
 
     def test_aecho_60_and_120_fail(self):
         # One copy of the voice 60 or 120 ms later: the tail grows too little for the tail measure
         # (2026-10-11 verify pass); the repeat measure finds it.
         for ms in (60, 120):
-            r, by = self.run_check("aecho%d-v1.mp4" % ms, self.segs, af="aecho=0.8:0.6:%d:0.4" % ms)
+            r, by = self.run_check("aecho%d-v1.mp4" % ms, self.segs, af="aecho=0.8:0.6:%d:0.4" % ms, only=("echo",))
             bad = self.failed(by, "echo")
             self.assertEqual(len(bad), 1, by.get("echo"))
             self.assertEqual(bad[0]["say"], "The voice has more echo than the take.")
@@ -282,7 +299,7 @@ class CheckEdit(Base):
         # A compressor, loudness and an EQ change the sound, not its timing: no echo.
         for name, af in (("comp-v1.mp4", "acompressor=threshold=0.05:ratio=6:attack=5:release=200,loudnorm"),
                          ("thin-v1.mp4", "highpass=f=300")):
-            r, by = self.run_check(name, self.segs, af=af)
+            r, by = self.run_check(name, self.segs, af=af, only=("echo",))
             self.assertTrue(by["echo"][0]["pass"], (name, by["echo"]))
 
     def music_over(self, base, name):
@@ -297,14 +314,14 @@ class CheckEdit(Base):
     def test_music_under_voice_still_checks_echo(self):
         clean = m.cut(self.src, os.path.join(self.s, "edits", "clean-v1.mp4"), self.segs) \
             if not os.path.exists(os.path.join(self.s, "edits", "clean-v1.mp4")) else os.path.join(self.s, "edits", "clean-v1.mp4")
-        r, by = self.run_check(os.path.basename(self.music_over(clean, "music-v1.mp4")))
+        r, by = self.run_check(os.path.basename(self.music_over(clean, "music-v1.mp4")), only=("echo",))
         self.assertTrue(by["echo"][0]["pass"], by["echo"])
         self.assertIn("Music or noise under the voice", by["echo"][0]["note"])
         self.assertIn("only the repeat", by["echo"][0]["note"])
         echo = os.path.join(self.s, "edits", "aecho60-v1.mp4")
         if not os.path.exists(echo):
             m.cut(self.src, echo, self.segs, af="aecho=0.8:0.6:60:0.4")
-        r, by = self.run_check(os.path.basename(self.music_over(echo, "musicecho-v1.mp4")))
+        r, by = self.run_check(os.path.basename(self.music_over(echo, "musicecho-v1.mp4")), only=("echo",))
         bad = self.failed(by, "echo")
         self.assertEqual(len(bad), 1, by["echo"])
         self.assertIn("The voice repeats", bad[0]["fix"])
@@ -316,7 +333,7 @@ class CheckEdit(Base):
             m.cut(self.src, work, self.segs)
             m.ff("-i", work, "-vn", "-af", "aecho=0.8:0.6:60:0.4", "-c:a", "pcm_s16le", "-ar", "48000",
                  os.path.splitext(work)[0] + ".wav")
-        r, by = self.run_check("stem-v1.mp4")
+        r, by = self.run_check("stem-v1.mp4", only=("echo",))
         self.assertEqual(len(self.failed(by, "echo")), 1, by["echo"])
 
     # Sync
@@ -327,7 +344,7 @@ class CheckEdit(Base):
             m.cut(self.src, clean, self.segs)
         m.ff("-i", clean, "-itsoffset", "0.2", "-i", clean, "-map", "0:v", "-map", "1:a", "-c", "copy",
              os.path.join(self.s, "edits", "offset-v1.mp4"))
-        r, by = self.run_check("offset-v1.mp4")
+        r, by = self.run_check("offset-v1.mp4", only=("av_sync",))
         bad = self.failed(by, "av_sync")
         self.assertAlmostEqual(bad[0]["value"], 0.2, delta=0.03)
         self.assertEqual(bad[0]["say"], "The sound is late by 0.2 s.")
@@ -335,10 +352,10 @@ class CheckEdit(Base):
 
     def test_baked_offset_fails_av_sync(self):
         # Both streams start at 0; the sound comes from 0.2 s earlier in the take.
-        r, by = self.run_check("baked-v1.mp4", self.segs, audio_shift=0.2)
+        r, by = self.run_check("baked-v1.mp4", self.segs, audio_shift=0.2, only=("av_sync",))
         bad = self.failed(by, "av_sync")
         self.assertAlmostEqual(bad[0]["value"], 0.2, delta=0.03)
-        r, by = self.run_check("early-v1.mp4", self.segs, audio_shift=-0.2)
+        r, by = self.run_check("early-v1.mp4", self.segs, audio_shift=-0.2, only=("av_sync",))
         bad = self.failed(by, "av_sync")
         self.assertAlmostEqual(bad[0]["value"], -0.2, delta=0.03)
         self.assertEqual(bad[0]["say"], "The sound is early by 0.2 s.")
@@ -357,13 +374,13 @@ class CheckEdit(Base):
         self.assertIn("No face", t.framing_verdict([(1.0, [])], lim)[3]["note"])
 
     def test_green_fails_picture_drift(self):
-        r, by = self.run_check("green-v1.mp4", self.segs, vf="colorbalance=gs=0.3")
+        r, by = self.run_check("green-v1.mp4", self.segs, vf="colorbalance=gs=0.3", only=("picture_drift",))
         bad = self.failed(by, "picture_drift")
         self.assertEqual(bad[0]["say"], "The picture is greener than the take.")
         self.assertEqual(bad[0]["label"], "Picture color")
 
     def test_blur_fails_picture_drift(self):
-        r, by = self.run_check("soft-v1.mp4", self.segs, vf="gblur=sigma=3")
+        r, by = self.run_check("soft-v1.mp4", self.segs, vf="gblur=sigma=3", only=("picture_drift",))
         bad = self.failed(by, "picture_drift")
         self.assertEqual(bad[0]["say"], "The picture is softer than the take.")
         self.assertEqual(bad[0]["label"], "Soft picture")
@@ -371,14 +388,14 @@ class CheckEdit(Base):
     def test_graded_cut_passes(self):
         path = m.cut(self.src, os.path.join(self.s, "edits", "graded-v1.mp4"), self.segs,
                      vf="eq=saturation=0.6:gamma_r=1.1")
-        r, by = self.run_check("graded-v1.mp4")
+        r, by = self.run_check("graded-v1.mp4", only=("picture_drift",))
         self.assertFalse(by["picture_drift"][0]["pass"], "without the grade on record it is a change")
         L = self.A[1] - self.A[0]
         with open(os.path.splitext(path)[0] + ".words.json", "w") as f:
             json.dump({"v": 2, "words": [], "made_from": {"grade": "warm", "cut": [
                 {"take": 1, "kind": "camera", "in": self.A[0], "out": self.A[1], "at": 0.0},
                 {"take": 1, "kind": "camera", "in": self.B[0], "out": self.B[1], "at": L}]}}, f)
-        r, by = self.run_check("graded-v1.mp4")
+        r, by = self.run_check("graded-v1.mp4", only=("picture_drift",))
         self.assertTrue(by["picture_drift"][0]["pass"], by["picture_drift"])
         self.assertIn("grade", by["picture_drift"][0]["note"])
 
@@ -391,7 +408,7 @@ class CheckEdit(Base):
              "[2:a]atrim=0:3[s];[0:v][0:a][1:v][s][3:v][3:a]concat=n=3:v=1:a=1[v][a]", "-map", "[v]", "-map", "[a]",
              "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-ar", "48000",
              os.path.join(self.s, "edits", "mag-v1.mp4"))
-        r, by = self.run_check("mag-v1.mp4")
+        r, by = self.run_check("mag-v1.mp4", only=("picture_drift", "frozen_video", "band_balance", "av_sync"))
         self.assertTrue(r["known"])
         for c in ("picture_drift", "frozen_video", "band_balance", "av_sync"):
             self.assertTrue(by[c][0]["pass"], by[c])
@@ -399,7 +416,7 @@ class CheckEdit(Base):
     @unittest.skipUnless(t.find_tool("ffmpeg") and t.has_filter("zscale"), "needs ffmpeg with zscale")
     def test_hlg_untonemapped_fails(self):
         s = self.hlg_session()
-        r, by = self.run_check("hlg-raw-v1.mp4", [(0.0, 8.0)], s=s)
+        r, by = self.run_check("hlg-raw-v1.mp4", [(0.0, 8.0)], s=s, only=("picture_drift",))
         self.assertIn("washed out", self.failed(by, "picture_drift")[0]["say"])
 
     @unittest.skipUnless(t.find_tool("ffmpeg") and t.has_filter("zscale"), "needs ffmpeg with zscale")
@@ -407,7 +424,7 @@ class CheckEdit(Base):
         s = self.hlg_session()
         r, by = self.run_check("hlg-sdr-v1.mp4", [(0.0, 8.0)], s=s,
                                vf="zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,tonemap=hable:desat=0,"
-                                  "zscale=t=bt709:m=bt709:r=tv,format=yuv420p")
+                                  "zscale=t=bt709:m=bt709:r=tv,format=yuv420p", only=("picture_drift",))
         self.assertTrue(by["picture_drift"][0]["pass"], by["picture_drift"])
 
     def hlg_session(self):
@@ -432,7 +449,7 @@ class CheckEdit(Base):
         m.ff("-i", other, "-filter_complex", "[0:v]trim=0:2,setpts=PTS-STARTPTS,tpad=stop_mode=clone:stop_duration=12[v];"
              "[0:a]atrim=0:14,asetpts=PTS-STARTPTS[a]", "-map", "[v]", "-map", "[a]", "-c:v", "libx264",
              "-pix_fmt", "yuv420p", "-c:a", "aac", os.path.join(self.s, "edits", "still-v1.mp4"))
-        r, by = self.run_check("still-v1.mp4")
+        r, by = self.run_check("still-v1.mp4", only=("frozen_video",))
         bad = self.failed(by, "frozen_video")
         self.assertEqual(bad[0]["label"], "Frozen picture")
         self.assertAlmostEqual(bad[0]["at"][0], 2.0, delta=0.3)
@@ -445,7 +462,7 @@ class CheckEdit(Base):
         os.replace(os.path.join(s, "take-01-camera.mov"), os.path.join(s, "take-01-screen.mov"))
         take_meta(s, [{"number": 1, "kind": "screen", "file": "take-01-screen.mov"}])
         m.cut(os.path.join(s, "take-01-screen.mov"), os.path.join(s, "edits", "ui-v1.mp4"), [(0.2, 9.0), (11.0, 19.5)])
-        r, by = self.run_check("ui-v1.mp4", s=s, source="take-01-screen.mov")
+        r, by = self.run_check("ui-v1.mp4", s=s, source="take-01-screen.mov", only=("frozen_video",))
         self.assertTrue(r["known"])
         self.assertTrue(by["frozen_video"][0]["pass"], by["frozen_video"])
 
@@ -455,7 +472,7 @@ class CheckEdit(Base):
              "anullsrc=r=48000:cl=mono", "-filter_complex", "[2:a]atrim=0:3[s];[0:v][0:a][1:v][s]concat=n=2:v=1:a=1[v][a]",
              "-map", "[v]", "-map", "[a]", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-ar", "48000",
              os.path.join(self.s, "edits", "card-v1.mp4"))
-        r, by = self.run_check("card-v1.mp4")
+        r, by = self.run_check("card-v1.mp4", only=("frozen_video",))
         self.assertTrue(by["frozen_video"][0]["pass"], by["frozen_video"])
 
     # Streams
@@ -471,7 +488,7 @@ class CheckEdit(Base):
              os.path.join(self.s, "edits", "chapter-v1.mp4"))
         m.ff("-i", clean, "-c", "copy", "-timecode", "00:00:00:00", os.path.join(self.s, "edits", "data-v1.mov"))
         for name in ("chapter-v1.mp4", "data-v1.mov"):
-            r, by = self.run_check(name)
+            r, by = self.run_check(name, only=("streams",))
             bad = self.failed(by, "streams")
             self.assertEqual(bad[0]["say"], "The file has an extra track that can freeze the video.", name)
             self.assertEqual(bad[0]["label"], "Extra track")
@@ -482,23 +499,19 @@ class CheckEdit(Base):
     def test_words_mid_sentence_fails(self):
         sp = self.sent
         i = self.word_index(sp[4][0]) + 1  # the cut stops after the second word of sentence 5
-        r, by = self.run_check("mid-v1.mp4", [self.A, (self.B[0], self.gap_after(i))])
+        r, by = self.run_check("mid-v1.mp4", [self.A, (self.B[0], self.gap_after(i))], only=("words",))
         bad = self.failed(by, "words")
         self.assertEqual(len(bad), 1, by["words"])
         self.assertEqual(bad[0]["label"], "Missing words")
         self.assertIn("The cut stops in the middle of a sentence at 0:", bad[0]["say"])
         self.assertIn(self.words[i][2], bad[0]["say"])
 
-    def test_words_whole_sentence_dropped_passes(self):
-        r, by = self.run_check("clean-v1.mp4", self.segs)
-        self.assertTrue(by["words"][0]["pass"])
-
     def test_words_said_twice(self):
         i = self.word_index(self.sent[1][0]) + 4  # in the middle of sentence 2
         k = i - 3
         while self.gap_after(i) - self.gap_after(k) < 0.8:
             k -= 1
-        r, by = self.run_check("twice-v1.mp4", [(self.A[0], self.gap_after(i)), (self.gap_after(k), self.B[1])])
+        r, by = self.run_check("twice-v1.mp4", [(self.A[0], self.gap_after(i)), (self.gap_after(k), self.B[1])], only=("words",))
         bad = self.failed(by, "words")
         self.assertEqual([x["label"] for x in bad], ["Words twice"], by["words"])
         self.assertIn("Words are said twice at 0:", bad[0]["say"])
@@ -506,7 +519,7 @@ class CheckEdit(Base):
     def test_words_clipped(self):
         w = max(range(len(self.words) - 1), key=lambda j: self.words[j][1] - self.words[j][0])
         a, b, _ = self.words[w]
-        r, by = self.run_check("clip-v1.mp4", [(max(0.0, a - 3.0), (a + b) / 2.0 + 0.05)])
+        r, by = self.run_check("clip-v1.mp4", [(max(0.0, a - 3.0), (a + b) / 2.0 + 0.05)], only=("words",))
         bad = [x for x in self.failed(by, "words") if x["label"] == "Cut word"]
         self.assertEqual(len(bad), 1, by["words"])
         self.assertIn(self.words[w][2], bad[0]["say"])
@@ -531,14 +544,14 @@ class CheckEdit(Base):
             m.ff("-i", os.path.join(s, "take-01-camera.mov"), "-i", os.path.join(s, "take-02-camera.mov"),
                  "-filter_complex", parts, "-map", "[v]", "-map", "[a]", "-c:v", "libx264", "-pix_fmt", "yuv420p",
                  "-c:a", "aac", "-ar", "48000", out)
-            r, by = self.run_check(name, s=s)
+            r, by = self.run_check(name, s=s, only=("words",))
             self.assertTrue(r["known"], name)
             self.assertEqual(self.failed(by, "words"), [], (name, "no made_from"))
             with open(os.path.splitext(out)[0] + ".words.json", "w") as f:
                 json.dump({"v": 2, "words": [], "made_from": {"session_id": t.session_id(s), "cut": [
                     {"take": 1, "kind": "camera", "in": a1, "out": b1, "at": 0.0},
                     {"take": 2, "kind": "camera", "in": a2, "out": b2, "at": b1 - a1}]}}, f)
-            r, by = self.run_check(name, s=s)
+            r, by = self.run_check(name, s=s, only=("words",))
             self.assertTrue(r["known"], name)
             self.assertEqual(self.failed(by, "words"), [], (name, "made_from"))
 
@@ -557,17 +570,12 @@ class CheckEdit(Base):
         # The 0.4 s pause after "ten" is not a sentence end: the script says the sentence goes on.
         self.assertEqual([w for (_, _, w), e in zip(words, ends) if e], ["fine.", "cut"])
 
-    def test_never_calls_eleven_transcribe(self):
-        with mock.patch.object(t, "eleven_transcribe", side_effect=AssertionError("no paid transcription")):
-            r, by = self.run_check("clean-v1.mp4", self.segs)
-        self.assertTrue(by["words"][0]["pass"])
-
     def test_words_skip_without_transcript(self):
         s = self.make_session("2026-10-11-nowords")
         m.make_take(s)
         os.remove(os.path.join(s, "take-01-camera.words.json"))
         take_meta(s, [{"number": 1, "kind": "camera", "file": "take-01-camera.mov", "keeper": True}])
-        r, by = self.run_check("x-v1.mp4", [(0.2, 9.0)], s=s)
+        r, by = self.run_check("x-v1.mp4", [(0.2, 9.0)], s=s, only=("words",))
         self.assertEqual(by["words"][0]["skip"], "The take has no transcript yet.")
 
     def test_words_skip_with_old_transcript(self):
@@ -580,7 +588,7 @@ class CheckEdit(Base):
         with open(w, "w") as f:
             json.dump({"source": "apple en_US", "words": words}, f)
         take_meta(s, [{"number": 1, "kind": "camera", "file": "take-01-camera.mov", "keeper": True}])
-        r, by = self.run_check("x-v1.mp4", [(0.2, 9.0)], s=s)
+        r, by = self.run_check("x-v1.mp4", [(0.2, 9.0)], s=s, only=("words",))
         self.assertEqual(by["words"][0]["skip"], "The take has no exact word times yet. cut_take and rough_cut make them.")
 
     # Saving and the asset lists
@@ -592,7 +600,7 @@ class CheckEdit(Base):
         old = {"edits/old-v1.mp4": {"at": "2026-10-01T00:00:00Z", "results": [{"rule": "cut-1", "pass": False}]}}
         with open(os.path.join(s, "checks.json"), "w") as f:
             json.dump(old, f)
-        r, by = self.run_check("a-v1.mp4", [(0.2, 8.0)], s=s)
+        r, by = self.run_check("a-v1.mp4", [(0.2, 8.0)], s=s, only=("words",))
         with open(os.path.join(s, "checks.json")) as f:
             saved = json.load(f)
         self.assertEqual(saved["edits/old-v1.mp4"], old["edits/old-v1.mp4"])
@@ -616,18 +624,6 @@ class CheckEdit(Base):
         with open(os.path.join(s, "checks.json")) as f:
             self.assertIn("edits/a-v1.m4a", json.load(f))
 
-    def test_checks_json_not_an_asset(self):
-        self.run_check("clean-v1.mp4", self.segs)
-        files = [a["file"] for a in t.assets(self.s, {"take-01-camera.mov"})]
-        self.assertNotIn("checks.json", files)
-        self.assertTrue(os.path.exists(os.path.join(self.s, "checks.json")))
-
-    def test_cache_not_an_asset(self):
-        self.run_check("clean-v1.mp4", self.segs)
-        self.assertTrue(os.listdir(os.path.join(self.s, t.CHECKS_CACHE)))
-        files = [a["file"] for a in t.assets(self.s, {"take-01-camera.mov"})]
-        self.assertFalse([f for f in files if ".checks" in f], files)
-
     def test_audio_only_edit_runs_sound_checks(self):
         m.ff("-i", self.src, "-filter_complex", "[0:a]atrim=%g:%g,asetpts=PTS-STARTPTS[a];[0:a]atrim=%g:%g,"
              "asetpts=PTS-STARTPTS[b];[a][b]concat=n=2:v=0:a=1[o]" % (self.A + self.B), "-map", "[o]",
@@ -645,11 +641,12 @@ class CheckEdit(Base):
         self.assertIn("did not run", r["note"])
 
     def test_get_session_check_states(self):
-        self.run_check("state-v1.mp4", self.segs)
-        self.run_check("state-v2.mp4", self.segs)   # the newest of its slug
-        self.run_check("thin-v1.mp4", self.segs, af="highpass=f=300")
+        one = {"only": ("band_balance",)}
+        self.run_check("state-v1.mp4", self.segs, **one)
+        self.run_check("state-v2.mp4", self.segs, **one)   # the newest of its slug
+        self.run_check("thin-v1.mp4", self.segs, af="highpass=f=300", **one)
         m.cut(self.src, os.path.join(self.s, "edits", "fresh-v1.mp4"), self.segs)
-        self.run_check("old-v1.mp4", self.segs)
+        self.run_check("old-v1.mp4", self.segs, **one)
         later = time.time() + 30
         os.utime(os.path.join(self.s, "edits", "old-v1.mp4"), (later, later))
         st = t.t_get_session({"session": self.s})["checks"]
@@ -663,7 +660,7 @@ class CheckEdit(Base):
         seen = []
         for name, kw in (("thin-v1.mp4", {"af": "highpass=f=300"}), ("clean-v1.mp4", {}),
                          ("soft-v1.mp4", {"vf": "gblur=sigma=3"}), ("baked-v1.mp4", {"audio_shift": 0.2})):
-            r, by = self.run_check(name, self.segs, **kw)
+            r, by = self.run_check(name, self.segs, only=("band_balance", "picture_drift", "av_sync", "words"), **kw)
             seen.append(r["note"])
             seen += [x.get(k) or "" for x in r["results"] for k in ("say", "fix", "note", "skip", "label")]
         for text in seen + [t.NO_SOURCE, t.OUT_OF_TIME]:
@@ -746,7 +743,7 @@ class Regression(Base):
         os.environ["TAKES_ROOT"] = self.root
 
     def test_regression_reverted_fails(self):
-        r, by = self.run_check("hook-v3.mp4")
+        r, by = self.run_check("hook-v3.mp4", only=("regression",))
         bad = self.failed(by, "regression")
         self.assertEqual(len(bad), 1, by["regression"])
         self.assertEqual(bad[0]["comment"], "c12")
@@ -756,23 +753,23 @@ class Regression(Base):
         self.assertNotIn("c12", bad[0]["say"])
 
     def test_regression_global_change_passes(self):
-        r, by = self.run_check("hook-v4.mp4")
+        r, by = self.run_check("hook-v4.mp4", only=("regression",))
         self.assertTrue(by["regression"][0]["pass"], by["regression"])
 
     def test_regression_fixed_version_passes(self):
-        r, by = self.run_check("hook-v2.mp4")
+        r, by = self.run_check("hook-v2.mp4", only=("regression",))
         self.assertTrue(by["regression"][0]["pass"])
 
     def test_regression_without_fixed_at(self):
-        r, by = self.run_check("intro-v3.mp4")
+        r, by = self.run_check("intro-v3.mp4", only=("regression",))
         self.assertEqual([x["comment"] for x in self.failed(by, "regression")], ["c13"])
 
     def test_regression_skips_newer_comment(self):
-        r, by = self.run_check("outro-v3.mp4")
+        r, by = self.run_check("outro-v3.mp4", only=("regression",))
         self.assertTrue(by["regression"][0]["pass"], by["regression"])
 
     def test_regression_finds_shifted_window(self):
-        r, by = self.run_check("shift-v3.mp4")
+        r, by = self.run_check("shift-v3.mp4", only=("regression",))
         bad = self.failed(by, "regression")
         self.assertEqual(len(bad), 1, by["regression"])
         self.assertAlmostEqual(bad[0]["at"][0], 3.0, delta=0.3)
@@ -782,17 +779,17 @@ class Regression(Base):
 class Reframe(Base):
     """Vertical footage and reframed edits (a 9:16 cut of a 16:9 take, a punch-in): the picture is found in
     the take and compared at the same scale (2026-10-11 verify pass: gblur sigma 3 passed at 9:16, every
-    reframe skipped)."""
+    reframe skipped). At half of 1080p: full size took the longest chunk of the run (2026-10-27)."""
 
     @classmethod
     def setUpClass(cls):
         cls.root = tempfile.mkdtemp()
         os.environ["TAKES_ROOT"] = cls.root
         cls.v = cls.make_session("2026-10-11-vertical")
-        m.make_take(cls.v, seconds=12.0, picture="testsrc2=size=1080x1920:rate=30")
+        m.make_take(cls.v, seconds=12.0, picture="testsrc2=size=540x960:rate=30")
         take_meta(cls.v, [{"number": 1, "kind": "camera", "file": "take-01-camera.mov", "keeper": True}])
         cls.w = cls.make_session("2026-10-11-wide")
-        m.make_take(cls.w, seconds=12.0, picture="testsrc2=size=1920x1080:rate=30")
+        m.make_take(cls.w, seconds=12.0, picture="testsrc2=size=960x540:rate=30")
         take_meta(cls.w, [{"number": 1, "kind": "camera", "file": "take-01-camera.mov", "keeper": True}])
         cls.segs = [(1.0, 5.5), (6.5, 11.0)]
 
@@ -807,7 +804,7 @@ class Reframe(Base):
     def pd(self, s, name, vf=None):
         if not os.path.exists(os.path.join(s, "edits", name)):
             m.cut(os.path.join(s, "take-01-camera.mov"), os.path.join(s, "edits", name), self.segs, vf=vf)
-        r, by = self.run_check(name, s=s)
+        r, by = self.run_check(name, s=s, only=("picture_drift",))
         self.assertTrue(r["known"])
         return by["picture_drift"][0]
 
@@ -818,9 +815,9 @@ class Reframe(Base):
         self.assertEqual(x["label"], "Soft picture")
 
     def test_reframed_edits_are_checked(self):
-        for name, vf in (("r916-v1.mp4", "crop=608:1080:656:0,scale=1080:1920"),
-                         ("punch-v1.mp4", "crop=1440:810:240:135,scale=1920:1080"),
-                         ("square-v1.mp4", "crop=1080:1080:420:0,scale=720:720")):
+        for name, vf in (("r916-v1.mp4", "crop=304:540:328:0,scale=540:960"),
+                         ("punch-v1.mp4", "crop=720:404:120:68,scale=960:540"),
+                         ("square-v1.mp4", "crop=540:540:210:0,scale=360:360")):
             x = self.pd(self.w, name, vf)
             self.assertTrue(x["pass"], (name, x))
             x = self.pd(self.w, name.replace("-v1", "soft-v1"), vf + ",gblur=sigma=3")
@@ -830,32 +827,32 @@ class Reframe(Base):
     def test_find_region(self):
         e = os.path.join(self.w, "edits", "r916-v1.mp4")
         if not os.path.exists(e):
-            m.cut(os.path.join(self.w, "take-01-camera.mov"), e, self.segs, vf="crop=608:1080:656:0,scale=1080:1920")
-        region, score = t.find_region(e, 3.0, os.path.join(self.w, "take-01-camera.mov"), 4.0, (1080, 1920), (1920, 1080))
+            m.cut(os.path.join(self.w, "take-01-camera.mov"), e, self.segs, vf="crop=304:540:328:0,scale=540:960")
+        region, score = t.find_region(e, 3.0, os.path.join(self.w, "take-01-camera.mov"), 4.0, (540, 960), (960, 540))
         self.assertGreater(score, 0.95)
-        for got, want in zip(region, (656, 0, 608, 1080)):
-            self.assertAlmostEqual(got, want, delta=24)
+        for got, want in zip(region, (328, 0, 304, 540)):
+            self.assertAlmostEqual(got, want, delta=12)
 
     def test_find_region_at_the_left_edge(self):
         # A 9:16 cut near the take's left edge: the search that looked at every place at 240 px found a
         # smaller crop lower down (486x864 at 0.972, 2026-10-22).
         e = os.path.join(self.w, "edits", "r916left-v1.mp4")
         if not os.path.exists(e):
-            m.cut(os.path.join(self.w, "take-01-camera.mov"), e, self.segs, vf="crop=608:1080:40:0,scale=1080:1920")
-        region, score = t.find_region(e, 3.0, os.path.join(self.w, "take-01-camera.mov"), 4.0, (1080, 1920), (1920, 1080))
+            m.cut(os.path.join(self.w, "take-01-camera.mov"), e, self.segs, vf="crop=304:540:20:0,scale=540:960")
+        region, score = t.find_region(e, 3.0, os.path.join(self.w, "take-01-camera.mov"), 4.0, (540, 960), (960, 540))
         self.assertGreater(score, 0.99)
-        for got, want in zip(region, (40, 0, 608, 1080)):
-            self.assertAlmostEqual(got, want, delta=16)
+        for got, want in zip(region, (20, 0, 304, 540)):
+            self.assertAlmostEqual(got, want, delta=8)
 
     def test_recipe_crop_skips_the_search(self):
         name = "rec-v1.mp4"
         m.cut(os.path.join(self.w, "take-01-camera.mov"), os.path.join(self.w, "edits", name), self.segs,
-              vf="crop=608:1080:656:0,scale=1080:1920")
+              vf="crop=304:540:328:0,scale=540:960")
         with open(os.path.join(self.w, "edits", "rec-v1.recipe.json"), "w") as f:
-            json.dump({"name": "rec", "frame": {"shape": "9:16", "w": 1080, "h": 1920}}, f)
-        self.assertEqual(t.recipe_region(self.w, "edits/" + name, (1920, 1080)), (656, 0, 608, 1080))
+            json.dump({"name": "rec", "frame": {"shape": "9:16", "w": 540, "h": 960}}, f)
+        self.assertEqual(t.recipe_region(self.w, "edits/" + name, (960, 540)), (328, 0, 304, 540))
         with mock.patch.object(t, "find_region", side_effect=AssertionError("the recipe gives the crop")):
-            r, by = self.run_check(name, s=self.w)
+            r, by = self.run_check(name, s=self.w, only=("picture_drift",))
         self.assertTrue(by["picture_drift"][0]["pass"], by["picture_drift"])
 
     def test_shown_size_rotation(self):
@@ -911,7 +908,7 @@ class CutRegression(Base):
         os.environ["TAKES_ROOT"] = self.root
 
     def test_cut_part_back_fails(self):
-        r, by = self.run_check("hic-v3.mp4")
+        r, by = self.run_check("hic-v3.mp4", only=("regression",))
         bad = self.failed(by, "regression")
         self.assertEqual(len(bad), 1, by["regression"])
         self.assertEqual(bad[0]["comment"], "c21")
@@ -940,20 +937,20 @@ class CutRegression(Base):
         words("hic-v3", [(1.0, 16.0)])
         try:
             with mock.patch.object(t, "version_segments", return_value=(None, [])):
-                r, by = self.run_check("hic-v3.mp4")
+                r, by = self.run_check("hic-v3.mp4", only=("regression",))
                 bad = self.failed(by, "regression")
                 self.assertEqual([x["comment"] for x in bad], ["c21"], by["regression"])
                 self.assertIn(" ".join(x[2] for x in self.cut_words), bad[0]["say"])
-                r, by = self.run_check("hic-v2.mp4")
+                r, by = self.run_check("hic-v2.mp4", only=("regression",))
                 self.assertTrue(by["regression"][0]["pass"], by["regression"])
         finally:
             for v in (1, 2, 3):
                 os.remove(os.path.join(self.s, "edits", "hic-v%d.words.json" % v))
 
     def test_cut_kept_passes(self):
-        r, by = self.run_check("hic-v2.mp4")
+        r, by = self.run_check("hic-v2.mp4", only=("regression",))
         self.assertTrue(by["regression"][0]["pass"], by["regression"])
-        r, by = self.run_check("keep-v3.mp4")
+        r, by = self.run_check("keep-v3.mp4", only=("regression",))
         self.assertTrue(by["regression"][0]["pass"], by["regression"])
 
 

@@ -71,7 +71,7 @@ struct BrandSnapshotTests {
         }
     }
 
-    /// ⌘K with its chips and the project menu, a script hit under them.
+    /// ⌘K with its chips and the project menu, a script hit under them; then ⏎'s results page.
     @Test func searchChips() throws {
         guard let dir = ProcessInfo.processInfo.environment["TAKES_SNAPSHOT"] else { return }
         let assets = URL(fileURLWithPath: #filePath).deletingLastPathComponent().appending(path: "../../assets")
@@ -81,25 +81,89 @@ struct BrandSnapshotTests {
         let s = root.appending(path: "Weekly Challenge/2026-10-06-bookkeeping-agent")
         try FileManager.default.createDirectory(at: s, withIntermediateDirectories: true)
         try Data("Look down at the computer, click once.".utf8).write(to: s.appending(path: "script.md"))
+        let s2 = root.appending(path: "Takes Launch/2026-09-14-computer-setup")
+        try FileManager.default.createDirectory(at: s2, withIntermediateDirectories: true)
+        try Data("My computer setup in one minute.".utf8).write(to: s2.appending(path: "script.md"))
         defer { try? FileManager.default.removeItem(at: root) }
         let app = AppModel()
         app.library.setRoot(root)
         MediaSearch.shared.shown = true
         defer { MediaSearch.shared.shown = false }
+        for (expanded, size) in [(false, NSSize(width: 760, height: 420)), (true, NSSize(width: 1200, height: 720))] {
         for (name, appearance) in [("light", NSAppearance.Name.aqua), ("dark", .darkAqua)] {
-            let v = SearchPalette(query: "computer").environment(app)
+            let v = SearchPalette(query: "computer", expanded: expanded).environment(app)
                 .environment(\.colorScheme, name == "dark" ? .dark : .light)
             let host = NSHostingView(rootView: v)
             host.appearance = NSAppearance(named: appearance)
-            host.frame = NSRect(x: 0, y: 0, width: 760, height: 420)
-            let win = NSWindow(contentRect: NSRect(x: -3000, y: -3000, width: 760, height: 420), styleMask: .borderless, backing: .buffered, defer: false)
+            host.frame = NSRect(origin: .zero, size: size)
+            let win = NSWindow(contentRect: NSRect(origin: NSPoint(x: -3000, y: -3000), size: size), styleMask: .borderless, backing: .buffered, defer: false)
             win.contentView = host
             host.layoutSubtreeIfNeeded()
             RunLoop.main.run(until: Date().addingTimeInterval(1.0))
             let rep = try #require(host.bitmapImageRepForCachingDisplay(in: host.bounds))
             host.cacheDisplay(in: host.bounds, to: rep)
             let data = try #require(rep.representation(using: .png, properties: [:]))
-            try data.write(to: URL(fileURLWithPath: dir).appending(path: "search-\(name).png"))
+            try data.write(to: URL(fileURLWithPath: dir).appending(path: "search\(expanded ? "-page" : "")-\(name).png"))
+        }
+        }
+    }
+
+    /// The results page's preview for each kind (2026-10-28): a tall still in its own shape, a
+    /// script as a page, a session as its files, a project as its sessions.
+    @Test func searchPreviewKinds() async throws {
+        guard let dir = ProcessInfo.processInfo.environment["TAKES_SNAPSHOT"] else { return }
+        let assets = URL(fileURLWithPath: #filePath).deletingLastPathComponent().appending(path: "../../assets")
+        for f in (try? FileManager.default.contentsOfDirectory(at: assets.appending(path: "fonts"), includingPropertiesForKeys: nil)) ?? []
+        where f.pathExtension == "ttf" { CTFontManagerRegisterFontsForURL(f as CFURL, .process, nil) }
+        let root = FileManager.default.temporaryDirectory.appending(path: "kinds-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let project = root.appending(path: "Weekly Challenge")
+        let s = project.appending(path: "2026-10-06-bookkeeping-agent")
+        try FileManager.default.createDirectory(at: s.appending(path: "stills"), withIntermediateDirectories: true)
+        try Data("# Bookkeeping agent\n\nLook down at the computer, click once.\n\nThe agent reads every receipt in the inbox and files it. No more Sunday nights with a shoebox.\n\nThen it asks one question: is this a business lunch?".utf8)
+            .write(to: s.appending(path: "script.md"))
+        try Store.encoder.encode(SessionMeta(title: "Bookkeeping agent", createdAt: Date())).write(to: s.appending(path: "session.json"))
+        // A tall picture and a wide one, so the shapes show.
+        func picture(_ w: Int, _ h: Int, _ to: URL) throws {
+            let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: w, pixelsHigh: h, bitsPerSample: 8, samplesPerPixel: 4,
+                                       hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
+            NSGraphicsContext.saveGraphicsState()
+            NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+            NSGradient(starting: NSColor(red: 0.25, green: 0.32, blue: 0.28, alpha: 1), ending: NSColor(red: 0.85, green: 0.8, blue: 0.7, alpha: 1))!
+                .draw(in: NSRect(x: 0, y: 0, width: w, height: h), angle: 70)
+            NSGraphicsContext.restoreGraphicsState()
+            try rep.representation(using: .png, properties: [:])!.write(to: to)
+        }
+        try picture(1080, 1920, s.appending(path: "stills/receipt-vertical.png"))
+        try picture(1920, 1080, s.appending(path: "stills/desk-wide.png"))
+        for (i, d) in ["2026-09-14-computer-setup", "2026-10-20-sign-in-with-chatgpt"].enumerated() {
+            let o = project.appending(path: d)
+            try FileManager.default.createDirectory(at: o, withIntermediateDirectories: true)
+            try Store.encoder.encode(SessionMeta(title: ["Computer setup", "Sign in with ChatGPT"][i], createdAt: Date())).write(to: o.appending(path: "session.json"))
+        }
+        let kinds: [(String, MediaSearch.Hit)] = [
+            ("still", MediaSearch.Hit(path: s.appending(path: "stills/receipt-vertical.png"), kind: "image", start: 0)),
+            ("script", MediaSearch.Hit(path: s.appending(path: "script.md"), kind: "script", start: 0, text: "reads every receipt")),
+            ("session", MediaSearch.Hit(path: s, kind: "session", start: 0, text: "Weekly Challenge", title: "Bookkeeping agent")),
+            ("project", MediaSearch.Hit(path: project, kind: "project", start: 0, title: "Weekly Challenge")),
+        ]
+        for (kind, hit) in kinds {
+        for (name, appearance) in [("light", NSAppearance.Name.aqua), ("dark", .darkAqua)] {
+            let v = SearchPreview(hit: hit, root: root, moments: [], open: { _ in })
+                .environment(\.colorScheme, name == "dark" ? .dark : .light)
+            let size = NSSize(width: 900, height: 720)
+            let host = NSHostingView(rootView: v)
+            host.appearance = NSAppearance(named: appearance)
+            host.frame = NSRect(origin: .zero, size: size)
+            let win = NSWindow(contentRect: NSRect(origin: NSPoint(x: -3000, y: -3000), size: size), styleMask: .borderless, backing: .buffered, defer: false)
+            win.contentView = host
+            host.layoutSubtreeIfNeeded()
+            // The preview reads the file in a task: let the main actor run it.
+            try await Task.sleep(for: .seconds(1.5))
+            let rep = try #require(host.bitmapImageRepForCachingDisplay(in: host.bounds))
+            host.cacheDisplay(in: host.bounds, to: rep)
+            try #require(rep.representation(using: .png, properties: [:])).write(to: URL(fileURLWithPath: dir).appending(path: "search-preview-\(kind)-\(name).png"))
+        }
         }
     }
 

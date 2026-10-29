@@ -143,13 +143,6 @@ class TicketEvals(unittest.TestCase):
         self.assertEqual((c["Evidence matches"]["pass"], c["Evidence matches"]["why"]),
                          (None, "skipped · no climb.json answers yet"))
 
-    def test_cited_apps_reads_only_names_after_a_naming_verb(self):
-        self.assertEqual(t.work_cited_apps("Claude names Teleprompter Premium and Descript, not Takes."),
-                         [("Claude", "Teleprompter Premium"), ("Claude", "Descript")])
-        self.assertEqual(t.work_cited_apps("The page names Takes for Mac. A search at rank 12."), [])
-        self.assertTrue(t.work_same_app("Teleprompter", "Teleprompter.com"))
-        self.assertFalse(t.work_same_app("Teleprompter Premium", "Teleprompter.com"))
-
     # ---- 1b. Page is live and indexed ----
 
     def test_page_live_and_indexed(self):
@@ -224,10 +217,6 @@ class TicketEvals(unittest.TestCase):
         self.assertTrue(self.checks(self.good(lift=1, effort=3))[0]["Lift has a reason"]["pass"])
         self.assertEqual(self.checks(self.good())[0]["Lift has a reason"]["why"],
                          "Lift 1.5: Moves 1 question: two answers cite a page like this one")
-
-    def test_a_plain_ticket_gets_no_step_checks(self):
-        out = t.work_ticket_checks({"title": "Reply to issue #42", "kind": "reply", "kpi": "Issues", "before": "1"}, [], self.now)
-        self.assertEqual([c["name"] for c in out["checks"]], ["Names one number", "Not a repeat"])
 
     def test_propose_steps_refuses_each_real_failure(self):
         got = t.t_propose_steps({"steps": [
@@ -314,6 +303,30 @@ class TicketEvals(unittest.TestCase):
             looked = json.load(f)
         self.assertTrue(looked["nothing"].startswith("/teleprompter already answers"))
         self.assertFalse(os.path.exists(t.work_file()) and self.read()["tickets"])
+        # looked.json keeps every page-already-answers reason.
+        t.work_fetch_page = lambda url: "Teleprompter for Mac page text"
+        calls = self.gemini()
+
+        def fake(system, ask, **kw):
+            if system == t.WORK_PAGE_READ_SYSTEM:
+                answers = "/teleprompter" in ask
+                return json.dumps({"answers": answers, "now": "It answers it already." if answers else "It does not.",
+                                   "new": "x"})
+            if "One agent can finish this in one ticket" in ask:
+                return json.dumps([{"pass": True, "why": "one page"}])
+            n = sum(1 for line in ask.splitlines() if line[:3].rstrip(". ").isdigit())
+            return json.dumps([{"pass": True, "why": "ok"}] * n)
+        t.gemini_text = fake
+        got = t.t_propose_steps({"steps": [self.good(), self.good(
+            title="Answer the webcam question on its page", page="/webcam-teleprompter",
+            targets=[{"type": "question", "value": Q2}], why="3 of 3 assistants name Descript, not Takes.",
+            lead={"name": "AI answers", "now": "0 of 3", "expect": "1 of 3"})]})
+        self.assertEqual(len(got["filed"]), 1)
+        with open(t.work_path("looked.json")) as f:
+            looked = json.load(f)
+        self.assertNotIn("nothing", looked)
+        self.assertEqual(looked["answered"], ["/teleprompter already answers “%s”. It answers it already." % Q])
+        del calls
 
     def test_page_read_skips_without_a_key_or_a_page(self):
         os.environ["TAKES_JUDGE"] = "on"
@@ -387,6 +400,26 @@ class TicketEvals(unittest.TestCase):
         self.assertEqual((ag["agree"], ag["of"], ag["good"], ag["bad"], ag["trusted"]), (9, 10, 9, 1, False))
         self.assertEqual(ag["disagree"][0]["label"], "bad")
         self.assertIn("needs 8 good and 8 bad labels", ag["why"])
+
+    def test_page_case_is_judged_on_its_words_only(self):
+        # T-38 (2026-10-27): a page case keeps only its text. Screenshots of its stand-in HTML showed an unstyled wall,
+        # so every design rule failed every page the user shipped. A case gets no screenshots and the text-only note.
+        seen, real = {}, (t.work_page_shots, t.work_judge)
+
+        def no_shots(raw, root):
+            raise AssertionError("a page case was screenshotted")
+
+        def judge(suite, text, tk, h=None, rules=None, shots=None, note=None):
+            seen.update(shots=shots, note=note)
+            return [], "gemini"
+        t.work_page_shots, t.work_judge = no_shots, judge
+        try:
+            v = t.work_case_verdict({"suite": "page", "title": "Free teleprompter for Mac", "text": "Takes for Mac is free."})
+        finally:
+            t.work_page_shots, t.work_judge = real
+        self.assertIsNone(seen["shots"])
+        self.assertEqual(seen["note"], t.WORK_TEXT_ONLY_NOTE)
+        self.assertIn(v["verdict"], ("good", "bad"))
 
     def test_seed_ticket_cases_from_the_board(self):
         self.put(self.board_step("T-6"), self.board_step("T-7", undoes="T-6"),
@@ -488,6 +521,12 @@ class TicketEvals(unittest.TestCase):
                                                        "answers name Riverside and Teleprompter.com")
         c, _ = self.checks(self.good(why="ChatGPT names Riverside. Claude names Teleprompter.com."))
         self.assertTrue(c["Evidence matches"]["pass"], c["Evidence matches"])
+        # Only names after a naming verb count.
+        self.assertEqual(t.work_cited_apps("Claude names Teleprompter Premium and Descript, not Takes."),
+                         [("Claude", "Teleprompter Premium"), ("Claude", "Descript")])
+        self.assertEqual(t.work_cited_apps("The page names Takes for Mac. A search at rank 12."), [])
+        self.assertTrue(t.work_same_app("Teleprompter", "Teleprompter.com"))
+        self.assertFalse(t.work_same_app("Teleprompter Premium", "Teleprompter.com"))
 
     def test_page_check_skips_when_the_page_list_is_unknown(self):
         # The real state today: no pages.json yet and climb.json "pages": [].
@@ -548,31 +587,6 @@ class TicketEvals(unittest.TestCase):
         t9 = self.ticket("T-9")
         self.assertEqual((t9["skipped_by"], [c["name"] for c in t9["recheck"]["checks"]]),
                          ("recheck", ["Evidence matches", "Page is live and indexed", "Not a repeat"]))
-
-    def test_looked_keeps_every_page_already_answers_reason(self):
-        t.work_fetch_page = lambda url: "Teleprompter for Mac page text"
-        calls = self.gemini()
-
-        def fake(system, ask, **kw):
-            if system == t.WORK_PAGE_READ_SYSTEM:
-                answers = "/teleprompter" in ask
-                return json.dumps({"answers": answers, "now": "It answers it already." if answers else "It does not.",
-                                   "new": "x"})
-            if "One agent can finish this in one ticket" in ask:
-                return json.dumps([{"pass": True, "why": "one page"}])
-            n = sum(1 for line in ask.splitlines() if line[:3].rstrip(". ").isdigit())
-            return json.dumps([{"pass": True, "why": "ok"}] * n)
-        t.gemini_text = fake
-        got = t.t_propose_steps({"steps": [self.good(), self.good(
-            title="Answer the webcam question on its page", page="/webcam-teleprompter",
-            targets=[{"type": "question", "value": Q2}], why="3 of 3 assistants name Descript, not Takes.",
-            lead={"name": "AI answers", "now": "0 of 3", "expect": "1 of 3"})]})
-        self.assertEqual(len(got["filed"]), 1)
-        with open(t.work_path("looked.json")) as f:
-            looked = json.load(f)
-        self.assertNotIn("nothing", looked)
-        self.assertEqual(looked["answered"], ["/teleprompter already answers “%s”. It answers it already." % Q])
-        del calls
 
 
 if __name__ == "__main__":

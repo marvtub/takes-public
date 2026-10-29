@@ -584,6 +584,9 @@ struct PlatformPostPane: View {
     @StateObject private var hooks: HookStore
     /// The hook under the pointer in the hooks drawer: the post shows it until the pointer leaves.
     @State private var previewHook: Hook?
+    /// The session's slides, when the post shows them in place of its video (Carousel.swift).
+    @StateObject private var carousel = CarouselStore()
+    @State private var slide = 0
 
     init(doc: SessionDoc, platform: PostPlatform, from: String? = nil, pick: @escaping (String) -> Void) {
         self.doc = doc
@@ -637,7 +640,7 @@ struct PlatformPostPane: View {
         }
         .background(Theme.canvas)
         .onAppear { load() }
-        .onDisappear { post.close() }
+        .onDisappear { post.close(); carousel.flush() }
         .onChange(of: paneShown) { _, on in if on { load() } else { post.close(); draft = nil } }
         .onChange(of: doc.url) { load(); draft = nil; focused = nil; expanded = false }
         .onChange(of: post.draft) { draft = nil; focused = nil; selection = ""; previewHook = nil }
@@ -662,8 +665,52 @@ struct PlatformPostPane: View {
 
     private func saveTitle(_ t: String) { post.update { $0.title = t } }
 
+    /// The slides stand in for the video on this post.
+    private var slidesOn: Bool { carousel.file?.isOn(platform) == true }
+
+    private func say(_ line: String) { app.chats.chat(doc.url).action(line) }
+
+    /// The slides down the left while they are on (CarouselRail).
+    @ViewBuilder private var rail: some View {
+        if slidesOn { CarouselRail(store: carousel, platform: platform, picked: $slide, say: say).padding(.top, 60) }
+    }
+
+    private func editSlide(_ i: Int, _ s: CarouselSlide) {
+        carousel.change { c in if c.slides.indices.contains(i) { c.slides[i] = s } }
+    }
+
+    /// A picture or a video dropped on the slide on show.
+    private func dropOnSlide(_ i: Int, _ urls: [URL]) {
+        carousel.put(urls, on: i)
+        say("Put \(urls.map(\.lastPathComponent).joined(separator: ", ")) on slide \(i + 1)")
+    }
+
+    /// LinkedIn's document post where the video would be.
+    private var slidesMedia: AnyView? {
+        guard slidesOn, let c = carousel.file else { return nil }
+        let name = UserDefaults.standard.string(forKey: "linkedinName") ?? "You"
+        return AnyView(GeometryReader { g in
+            CarouselPager(slides: c.slides, place: .linkedin, name: name, index: $slide, width: g.size.width,
+                          style: carousel.style, session: doc.url,
+                          flipped: { say("Showing slide \($0 + 1) of \(c.slides.count)") }, edit: editSlide, drop: dropOnSlide)
+        }
+        .aspectRatio(CarouselPlace.linkedin.ratio, contentMode: .fit))
+    }
+
+    /// The vertical post's photos on the phone, for the place on show.
+    private func photos(_ place: VerticalPlace, _ height: CGFloat) -> AnyView {
+        let c = carousel.file ?? CarouselFile()
+        let name = UserDefaults.standard.string(forKey: "linkedinName") ?? "You"
+        return AnyView(CarouselPhotosPhone(slides: c.slides, place: place == .reels ? .instagram : .tiktok, name: name,
+                                           caption: shownText.wrappedValue, index: $slide, height: height,
+                                           style: carousel.style, session: doc.url,
+                                           flipped: { say("Showing photo \($0 + 1) of \(c.slides.count)") }, edit: editSlide, drop: dropOnSlide))
+    }
+
     /// YouTube's watch page, or the vertical phone with its caption.
     private var videoFeedView: some View {
+        HStack(spacing: 0) {
+        rail
         GeometryReader { geo in
         // The phone takes the pane's height, less the bars above and the place switch below.
         let phone = min(max(geo.size.height - 76 - 40 - 60 - 28, 440), 900)
@@ -689,11 +736,14 @@ struct PlatformPostPane: View {
                                  reveal: reveal, focusToken: focusToken,
                                  onSelect: { selection = $0 }, onComment: startComment,
                                  onExpand: { expanded = true; focusToken += 1 },
-                                 onCollapse: { withAnimation(Theme.motion) { expanded = false }; releaseKeys() })
+                                 onCollapse: { withAnimation(Theme.motion) { expanded = false }; releaseKeys() },
+                                 photos: slidesOn ? photos : nil,
+                                 notes: slidesOn ? CarouselFile.notes(post.content?.places ?? VerticalPlace.allCases) : [])
                 }
             }
             .padding(.horizontal, 24).padding(.top, 76).padding(.bottom, 60)
             .frame(maxWidth: .infinity)
+        }
         }
         }
         .overlay(alignment: .bottomTrailing) { commentPill }
@@ -770,9 +820,11 @@ struct PlatformPostPane: View {
     }
 
     private var linkedinFeedView: some View {
+        HStack(spacing: 0) {
+        rail
         ScrollView {
             LinkedInCard(text: shownText, draft: post.draft,
-                         media: media, expanded: $expanded,
+                         media: media, slides: slidesMedia, expanded: $expanded,
                          highlights: postComments.filter(\.open).compactMap(\.quote),
                          reveal: reveal, focusToken: focusToken,
                          onSelect: { selection = $0 },
@@ -789,9 +841,11 @@ struct PlatformPostPane: View {
                         .allowsHitTesting(false)
                 }
                 .shadow(color: Theme.shadow, radius: 14, y: 6)
-                .frame(maxWidth: 555 * TextSize.shared.factor)
+                // With slides the card is narrower, so a whole 4:5 page fits on the screen.
+                .frame(maxWidth: (slidesOn ? 420 : 555) * TextSize.shared.factor)
                 .padding(.horizontal, 24).padding(.top, 76).padding(.bottom, 60)
                 .frame(maxWidth: .infinity)
+        }
         }
         .overlay(alignment: .bottomTrailing) { commentPill }
         .overlay(alignment: .bottomLeading) { card.padding(12) }
@@ -806,6 +860,7 @@ struct PlatformPostPane: View {
         if m != media { media = m }
         let c = platform == .linkedin ? PostFile.firstComment(doc.url) : ""
         if c != firstComment { firstComment = c }
+        carousel.load(doc.url)
         if !loaded { loaded = true }
     }
 
@@ -815,6 +870,21 @@ struct PlatformPostPane: View {
             PostSideSwitch(doc: doc, current: platform.rawValue, from: from, pick: { post.close(); pick($0) })
             if post.content != nil {
                 PostDraftBar(post: post, showHistory: $showHistory)
+                if CarouselFile.platforms.contains(platform) {
+                    CarouselMediaSwitch(platform: platform, on: slidesOn) { on in
+                        guard on != slidesOn else { return }
+                        withAnimation(Theme.motion) { carousel.set(platform, on: on, title: doc.meta.title) }
+                        say(on ? "The \(platform == .linkedin ? "LinkedIn post is now a carousel (PDF)" : "vertical post is now photos")"
+                               + " with \(carousel.file?.slides.count ?? 0) slides"
+                             : "The \(platform.name) post shows its video again")
+                    }
+                    if slidesOn {
+                        CarouselSlidesMenu(store: carousel, picked: slide, title: doc.meta.title, say: say)
+                            .transition(.opacity)
+                        CarouselExportButton(store: carousel, platform: platform, places: post.content?.places ?? VerticalPlace.allCases, say: say)
+                            .transition(.opacity)
+                    }
+                }
                 Spacer(minLength: 8)
                 counter
                 HStack(spacing: 2) {
@@ -837,7 +907,7 @@ struct PlatformPostPane: View {
                     }
                     .help(expanded ? "Feed view: cut after three lines, as the feed does" : "Show the whole post and edit it")
                     }
-                    if platform != .article, let media, Asset.kind(of: media) == .video {
+                    if platform != .article, !slidesOn, let media, Asset.kind(of: media) == .video {
                         CoverPicker(session: doc.url, platform: platform, video: media)
                     }
                     Button { startComment() } label: { Image(systemName: "text.bubble").frame(width: 30, height: 28) }
@@ -1026,15 +1096,18 @@ struct StatusControl: View {
                 .help("Pick when the post goes out. Then Takes schedules it on \(post.platform.name)")
                 .transition(.scale(scale: 0.9).combined(with: .opacity))
             } else {
+                let auto = post.session.flatMap { Plugins.autopost?.label($0, post.platform, content) }
                 Button { open = true } label: {
-                    HStack(spacing: 6) {
-                        Image(systemName: icon).font(.system(size: 11.5, weight: .semibold))
-                        Text(label).lineLimit(1)
+                    if let auto { auto.view } else {
+                        HStack(spacing: 6) {
+                            Image(systemName: icon).font(.system(size: 11.5, weight: .semibold))
+                            Text(label).lineLimit(1)
+                        }
                     }
                 }
-                .buttonStyle(AccentButtonStyle(kind: content.status == .posted ? .quiet : .accent))
+                .buttonStyle(AccentButtonStyle(kind: auto.map { $0.accent ? .accent : .quiet } ?? (content.status == .posted ? .quiet : .accent)))
                 .fixedSize()
-                .help(help)
+                .help(auto?.help ?? help)
                 .transition(.scale(scale: 0.9).combined(with: .opacity))
             }
         }
@@ -1125,8 +1198,18 @@ struct SchedulePanel: View {
         return f.string(from: date)
     }
 
+    /// A plugin that posts for you has its part here (Plugins.autopost).
+    private var auto: AutopostPanel? {
+        guard let session = post.session, let hook = Plugins.autopost else { return nil }
+        let (d, z) = (date, zone)
+        return hook.panel(AutopostContext(session: session, platform: post.platform, content: content, date: d, zone: z, app: app,
+                                          save: { [post] in post.update { c in c.plan(d, in: z); if c.status == .draft { c.status = .ready } } },
+                                          close: close))
+    }
+
     private var form: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        let auto = auto
+        return VStack(alignment: .leading, spacing: 12) {
             Text(content.status == .posted ? "Posted" : "When does it go out?").font(Theme.sans(15, .bold))
             DatePicker("", selection: $date, displayedComponents: [.date])
                 .datePickerStyle(.graphical).labelsHidden()
@@ -1150,9 +1233,10 @@ struct SchedulePanel: View {
             if zone.identifier != TimeZone.current.identifier {
                 Text("That is \(PostFile.label(date, .current)) here.").font(Theme.sans(11.5)).foregroundStyle(Theme.muted)
             }
-            Text(content.status == .scheduled
+            if let auto { auto.block }
+            Text(auto?.note ?? (content.status == .scheduled
                  ? "It is on \(post.platform.name) for \(content.at.map { PostFile.label($0, content.tz) } ?? "a time"). A new time here: ask Takes to move it."
-                 : "Then tell Takes \"schedule my posts\". It schedules the post on \(post.platform.name) for this time and marks it scheduled here.")
+                 : "Then tell Takes \"schedule my posts\". It schedules the post on \(post.platform.name) for this time and marks it scheduled here."))
                 .font(Theme.sans(11.5)).foregroundStyle(Theme.muted)
                 .fixedSize(horizontal: false, vertical: true)
             HStack(spacing: 8) {
@@ -1163,7 +1247,8 @@ struct SchedulePanel: View {
                 .help("More: ready without a time, remove the time, back to draft")
                 Spacer()
                 Button("Cancel", action: close).keyboardShortcut(.cancelAction)
-                    .buttonStyle(AccentButtonStyle(kind: .quiet))
+                    .buttonStyle(AccentButtonStyle(kind: .quiet)).fixedSize()
+                if let primary = auto?.primary { primary } else {
                 Button(content.at == nil ? "Set time" : "Save") {
                     let (d, z) = (date, zone)
                     post.update { c in
@@ -1174,6 +1259,7 @@ struct SchedulePanel: View {
                 }
                 .keyboardShortcut(.defaultAction)
                 .buttonStyle(AccentButtonStyle(kind: .solid))
+                }
             }
             if more {
                 let (content, post, close) = (content, post, close)
@@ -1245,6 +1331,8 @@ enum LinkedIn {
     static let ink = Color.black.opacity(0.9)
     static let muted = Color.black.opacity(0.6)
     static let blue = Color(red: 10 / 255, green: 102 / 255, blue: 194 / 255)  // #0A66C2
+    /// The headline under the name until one is set in the card's profile editor.
+    static let defaultHeadline = ""
     static let inkNS = NSColor(white: 0, alpha: 0.9)
     static let blueNS = NSColor(srgbRed: 10 / 255, green: 102 / 255, blue: 194 / 255, alpha: 1)
     /// The preview follows the app's text size (⌘+ / ⌘−), like the rest of Takes.
@@ -1284,6 +1372,8 @@ struct LinkedInCard: View {
     @Binding var text: String
     var draft = ""
     let media: URL?
+    /// The carousel in place of the media (Carousel.swift).
+    var slides: AnyView? = nil
     @Binding var expanded: Bool
     let highlights: [String]
     let reveal: (quote: String, token: Int)?
@@ -1295,7 +1385,7 @@ struct LinkedInCard: View {
     /// The comment you post under it first. nil hides the section.
     var firstComment: Binding<String>?
     @AppStorage("linkedinName") private var name = "You"
-    @AppStorage("linkedinHeadline") private var headline = ""
+    @AppStorage("linkedinHeadline") private var headline = LinkedIn.defaultHeadline
     @State private var editingProfile = false
     @State private var liked = false
     @State private var photoStamp = Date()
@@ -1306,7 +1396,7 @@ struct LinkedInCard: View {
         VStack(alignment: .leading, spacing: 0) {
             header.padding(.horizontal, 16).padding(.top, 12)
             textBlock.padding(.horizontal, 16).padding(.top, 8).padding(.bottom, 8)
-            if let media { PostMedia(url: media).padding(.top, 4) }
+            if let slides { slides.padding(.top, 4) } else if let media { PostMedia(url: media).padding(.top, 4) }
             counts.padding(.horizontal, 16).padding(.vertical, 8)
             Rectangle().fill(LinkedIn.line).frame(height: 1).padding(.horizontal, 16)
             actions.padding(.horizontal, 8).padding(.vertical, 4)

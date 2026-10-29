@@ -5,12 +5,19 @@ import XCTest
 final class OfflineTests: XCTestCase {
     var server: String { ProcessInfo.processInfo.environment["TAKES_SERVER"] ?? "http://127.0.0.1:8797" }
 
+    override func setUp() {
+        super.setUp()
+        freshStandin()
+    }
+
     func get(_ path: String) throws -> Data {
         var out: Data?
         let done = expectation(description: path)
         URLSession.shared.dataTask(with: URL(string: server + path)!) { d, _, _ in out = d; done.fulfill() }.resume()
         wait(for: [done], timeout: 10)
-        return try XCTUnwrap(out)
+        // Thrown, not a failure: the polls below ask while the stand-in is away on purpose.
+        guard let out else { throw URLError(.cannotConnectToHost) }
+        return out
     }
 
     func testChangesWaitAndGoOut() throws {
@@ -18,13 +25,18 @@ final class OfflineTests: XCTestCase {
         app.launchEnvironment["TAKES_SERVER"] = server
         app.launch()
         app.buttons["Connect"].tap()
-        if app.tabBars.buttons["Videos"].waitForExistence(timeout: 15) { app.tabBars.buttons["Videos"].tap() }
+        XCTAssertTrue(app.buttons.matching(identifier: "session-row").firstMatch.waitForExistence(timeout: 15), "the videos list")
         let row = text(app, "Offline video")
         XCTAssertTrue(row.waitForExistence(timeout: 15))
+        // The phone keeps a copy of the video a few seconds after the list: the script opens
+        // offline from it. Comments come last.
+        XCTAssertTrue(eventually(timeout: 20) {
+            ((try? JSONSerialization.jsonObject(with: try get("/test/seen"))) as? [String])?.contains("/api/comments") == true
+        }, "the phone never kept its copy")
 
-        // The Mac goes away for a while.
+        // The Mac goes away for a while: the dot by Takes goes grey.
         _ = try get("/test/down?s=40")
-        XCTAssertTrue(app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS 'Changes wait on the phone'")).firstMatch.waitForExistence(timeout: 15))
+        XCTAssertTrue(app.descendants(matching: .any).matching(NSPredicate(format: "label == 'Not connected'")).firstMatch.waitForExistence(timeout: 15))
         shot(app, "offline-1-list")
 
         row.tap()
@@ -39,9 +51,12 @@ final class OfflineTests: XCTestCase {
         // The sheet closes and the script shows the new words while the Mac is away.
         XCTAssertTrue(app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS 'Written offline.' OR value CONTAINS 'Written offline.'")).firstMatch.waitForExistence(timeout: 8))
         app.buttons["Comment on the whole script"].tap()
-        app.textFields["What should change?"].typeText("Offline comment.")
+        // The comment box has the keyboard when it opens.
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
+        app.typeText("Offline comment.")
         app.buttons["Save"].tap()
-        sleep(1)
+        XCTAssertTrue(app.keyboards.firstMatch.waitForNonExistence(timeout: 5))
+        app.settle(timeout: 1)
         shot(app, "offline-2-script")
 
         app.buttons["Back"].firstMatch.tap()
@@ -50,33 +65,31 @@ final class OfflineTests: XCTestCase {
 
         // The Mac comes back: both changes reach it, in order, and the bar goes.
         var log: [[String: Any]] = []
-        for _ in 0..<40 {
-            sleep(2)
+        eventually(timeout: 80, every: 1) {
             log = (try? JSONSerialization.jsonObject(with: try get("/test/log")) as? [[String: Any]]) ?? []
-            print("offline poll:", log)
-            if log.count >= 2 { break }
+            return log.count >= 2
         }
         XCTAssertEqual(log.count, 2, "\(log)")
         XCTAssertTrue((log.first?["script"] as? String)?.hasSuffix("Written offline.") == true, "\(log)")
         XCTAssertEqual(log.last?["comment"] as? String, "Offline comment.")
-        sleep(2)
+        _ = text(app, "wait for the Mac").waitForNonExistence(timeout: 10)
+        app.settle(timeout: 2)
         shot(app, "offline-4-back")
     }
 
     /// A new video made with the Mac away: it opens on its chat, the message waits, and when the Mac
     /// is back it makes the video first, then the message goes to it.
     func testNewVideoOffline() throws {
-        for _ in 0..<30 where (try? get("/api/ping")) == nil { sleep(2) }
         let app = XCUIApplication()
         app.launchEnvironment["TAKES_SERVER"] = server
         app.launch()
         if app.buttons["Connect"].waitForExistence(timeout: 5) { app.buttons["Connect"].tap() }
-        if app.tabBars.buttons["Videos"].waitForExistence(timeout: 15) { app.tabBars.buttons["Videos"].tap() }
+        XCTAssertTrue(app.buttons.matching(identifier: "session-row").firstMatch.waitForExistence(timeout: 15), "the videos list")
         XCTAssertTrue(text(app, "Offline video").waitForExistence(timeout: 15))
         let before = ((try? JSONSerialization.jsonObject(with: try get("/test/log")) as? [[String: Any]]) ?? []).count
 
         _ = try get("/test/down?s=30")
-        XCTAssertTrue(app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS 'Changes wait on the phone'")).firstMatch.waitForExistence(timeout: 15))
+        XCTAssertTrue(app.descendants(matching: .any).matching(NSPredicate(format: "label == 'Not connected'")).firstMatch.waitForExistence(timeout: 15))
         app.buttons["New video"].tap()
         let field = app.textFields["Message Takes"].exists ? app.textFields["Message Takes"] : app.textViews["Message Takes"]
         XCTAssertTrue(field.waitForExistence(timeout: 8))
@@ -87,18 +100,17 @@ final class OfflineTests: XCTestCase {
         shot(app, "offline-5-new-video")
 
         var log: [[String: Any]] = []
-        for _ in 0..<40 {
-            sleep(2)
+        eventually(timeout: 80, every: 1) {
             log = Array(((try? JSONSerialization.jsonObject(with: try get("/test/log")) as? [[String: Any]]) ?? []).dropFirst(before))
-            print("new video poll:", log)
-            if log.count >= 2 { break }
+            return log.count >= 2
         }
         XCTAssertEqual(log.count, 2, "\(log)")
         XCTAssertNotNil(log.first?["new"], "\(log)")
         XCTAssertEqual(log.last?["say"] as? String, "A video about offline mode.", "\(log)")
         // The message goes to the video the Mac made, not to the phone's own id.
         XCTAssertEqual(log.last?["id"] as? String, log.first?["new"] as? String, "\(log)")
-        sleep(2)
+        _ = text(app, "Waits for the Mac").waitForNonExistence(timeout: 10)
+        app.settle(timeout: 2)
         shot(app, "offline-6-new-video-back")
     }
 
@@ -110,7 +122,7 @@ final class OfflineTests: XCTestCase {
         app.launchEnvironment["TAKES_SERVER"] = server
         app.launch()
         app.buttons["Connect"].tap()
-        if app.tabBars.buttons["Videos"].waitForExistence(timeout: 15) { app.tabBars.buttons["Videos"].tap() }
+        XCTAssertTrue(app.buttons.matching(identifier: "session-row").firstMatch.waitForExistence(timeout: 15), "the videos list")
         XCTAssertTrue(text(app, "Xcode lost your Apple ID").waitForExistence(timeout: 15))
         shot(app, "files-1-renew")
 
@@ -122,7 +134,7 @@ final class OfflineTests: XCTestCase {
         shot(app, "files-2-chat-sound")
         play.tap()
         XCTAssertTrue(app.buttons["Stop intro-v1.wav"].waitForExistence(timeout: 5))
-        sleep(1)
+        app.settle(timeout: 1)
         shot(app, "files-3-chat-playing")
 
         app.buttons["Files"].firstMatch.tap()
@@ -134,7 +146,7 @@ final class OfflineTests: XCTestCase {
         XCTAssertTrue(text(app, "hook-v5.mp4").waitForExistence(timeout: 5))
         app.buttons["Fold edits"].tap()
         XCTAssertTrue(app.buttons["Open edits"].waitForExistence(timeout: 5))
-        sleep(1)
+        app.settle(timeout: 1)
         shot(app, "files-5-folded")
         app.buttons["Open edits"].tap()  // the fold stays for every session: leave it open
     }

@@ -167,6 +167,12 @@ skill owns the edit; HyperFrames makes only the layers that go over it.
   (`{file, at, alpha: true}`). `render_edit` runs the step and lays the layer over the cut.
 - **Never open the user's screen:** `npx hyperframes preview --background --no-open`. Look at
   stills of the render, not at the Studio.
+- **Effects, only on request:** Takes ships ready-made effects (over-the-shoulder cards, glass graph,
+  freeze-frame sticker, tier list, text behind, colour grade) on the Styles board. Use one only when
+  the user names it or asks for one: `list_effects effect=<slug>` gives its README and source. Copy
+  `src/` into `_edit/<name>/` and change the copy; set its frame (`data-width`/`data-height`) to the
+  edit's size, since each effect lays itself out for 9:16, 4:5, 1:1 or 16:9. Never add an effect by yourself, and do not let
+  them shape a design the user did not ask for. Asked for ideas, you may name one that fits.
 - **Keep what works:** after the user likes a part, `save_to_library` with the render, a one-line
   `note` and `source_dir` (the composition), so the next video starts from it.
 

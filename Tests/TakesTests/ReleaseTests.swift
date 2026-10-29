@@ -9,6 +9,11 @@ struct ReleaseTests {
         let c = Releaser.command("/Users/a b/it's")
         #expect(c.contains("git -C '/Users/a b/it'\\''s' fetch -q origin"))
         #expect(c.contains("TAKES_REPO='/Users/a b/it'\\''s' bash <(git -C '/Users/a b/it'\\''s' show origin/main:scripts/public/release.sh)"))
+        // The approve script runs from main too.
+        do {
+            let c = Releaser.command("/r", script: "approve-notes.sh")
+            #expect(c.hasSuffix("bash <(git -C '/r' show origin/main:scripts/public/approve-notes.sh)"))
+        }
     }
 
     static let t0 = Date(timeIntervalSince1970: 1_000_000)
@@ -151,6 +156,50 @@ struct ReleaseTests {
                 host.cacheDisplay(in: host.bounds, to: rep)
                 w.orderOut(nil)
                 try rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: dir).appending(path: "release-\(name)\(dark ? "" : "-light").png"))
+            }
+        }
+    }
+}
+
+struct ReleaseNotesTests {
+    @Test func theCardShowsTheLinesWithoutTheHeader() {
+        let file = "---\nsince: 5be30e5\nthrough: 6a4b490\napproved: no\n---\n\n### Help\n- Takes Help opens a guide\n"
+        #expect(ReleaseRun.notesBody(file) == "### Help\n- Takes Help opens a guide")
+        #expect(ReleaseRun.notesBody("### Chat\n- Stop button\n") == "### Chat\n- Stop button")
+    }
+
+    @Test func theCardFindsThePicturesOfTheNotes() {
+        let body = "### Welcome\n![The four pages](media/welcome.webp)\n- A new welcome\n\n### Chat\n  ![Stop](media/chat-commands.png)  \n- ![not a picture line](x)"
+        #expect(ReleaseRun.notesMedia(body) == ["welcome.webp", "chat-commands.png"])
+    }
+}
+
+/// TAKES_SNAPSHOT=dir draws the stopped release with its notes to approve, light and dark (2026-10-24).
+@MainActor
+struct ReleaseNotesShots {
+    @Test func notesToApprove() throws {
+        guard let dir = ProcessInfo.processInfo.environment["TAKES_SNAPSHOT"] else { return }
+        let r = Releaser()
+        var run = ReleaseRun(media: false, started: Date().addingTimeInterval(-2))
+        for l in ["▸ Getting the latest main", "▸ Checking the release notes", "Release notes not ready:",
+                  "- the user has not approved the notes (approved: no). Show them to him; on his yes set approved: yes and push."] {
+            run.read(l, at: Date())
+        }
+        run.end(ok: false, at: Date())
+        r.run = run
+        r.notes = "### Welcome\n- A new four-page welcome shows what Takes does and how it looks\n\n### Help\n- Help > Takes Help opens a short guide and the list of shortcuts"
+        for (name, look) in [("light", NSAppearance.Name.aqua), ("dark", .darkAqua)] {
+            for err in [nil, "Release notes not ready:\n- A personal value: The user"] {
+                r.approveError = err
+                let host = NSHostingView(rootView: ReleaseDetail(releaser: r).background(Theme.surface))
+                host.appearance = NSAppearance(named: look)
+                host.frame = NSRect(x: 0, y: 0, width: 412, height: 820)
+                host.layoutSubtreeIfNeeded()
+                RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+                let rep = try #require(host.bitmapImageRepForCachingDisplay(in: host.bounds))
+                host.cacheDisplay(in: host.bounds, to: rep)
+                try rep.representation(using: .png, properties: [:])?
+                    .write(to: URL(fileURLWithPath: dir).appending(path: "release-notes-\(name)\(err == nil ? "" : "-error").png"))
             }
         }
     }

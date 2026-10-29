@@ -38,11 +38,14 @@ enum Theme {
 
     // MARK: Shape and motion
     static let radius: CGFloat = 12
-    static let motion = Animation.easeOut(duration: 0.18)
+    /// How slow the motion runs: 1 in the app. The release films (Tests ReleaseShots) slow it down,
+    /// because a frame drawn off screen takes longer than a frame of the animation (2026-10-24).
+    @MainActor static var pace = 1.0
+    @MainActor static var motion: Animation { .easeOut(duration: 0.18).speed(1 / pace) }
     /// Things that move: the mode indicator, drawers, the record button. A little overshoot.
-    static let spring = Animation.spring(response: 0.42, dampingFraction: 0.74)
+    @MainActor static var spring: Animation { .spring(response: 0.42, dampingFraction: 0.74).speed(1 / pace) }
     /// The sidebar drawer (⌘B): quick and smooth, no overshoot.
-    static let drawer = Animation.spring(duration: 0.32, bounce: 0)
+    @MainActor static var drawer: Animation { .spring(duration: 0.32, bounce: 0).speed(1 / pace) }
     /// Soft ink-tinted shadow under cards that float on the canvas.
     static var shadow: Color { c.shadow }
 
@@ -59,7 +62,7 @@ enum Theme {
         let name = weight == .black || weight == .heavy ? "Nunito-ExtraBold" : "Nunito-Bold"
         return NSFont(name: name, size: size) != nil ? .custom(name, size: size) : .system(size: size, weight: .bold, design: .rounded)
     }
-    /// Caveat: handwriting, only for the personal note in About.
+    /// Caveat: handwriting, for the personal note in About and the notes on a Note carousel's photos.
     static func hand(_ size: CGFloat) -> Font {
         let size = size * TextSize.shared.factor
         return NSFont(name: "Caveat-Regular", size: size) != nil ? .custom("Caveat", size: size).weight(.bold) : .system(size: size, weight: .medium, design: .serif).italic()

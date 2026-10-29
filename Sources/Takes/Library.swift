@@ -751,6 +751,32 @@ final class Library {
         return doc
     }
 
+    /// A session from words picked in a browser (the extension's "Record in Takes", takes://new):
+    /// in Inbox, titled after the page, the words as its script. It never opens the session or
+    /// changes the selection: any web page can open a takes:// link, so this only ever adds one.
+    @discardableResult
+    func addSession(script: String, title: String) -> URL? {
+        let words = String(script.trimmingCharacters(in: .whitespacesAndNewlines).prefix(20_000))
+        guard !words.isEmpty else { return nil }
+        let name = String(title.trimmingCharacters(in: .whitespacesAndNewlines).prefix(80))
+        let project = root.appending(path: "Inbox")
+        try? FileManager.default.createDirectory(at: project, withIntermediateDirectories: true)
+        let now = Date()
+        let base = "\(SessionDoc.dayFormatter.string(from: now))-\(Self.slug(name).isEmpty ? "untitled" : Self.slug(name))"
+        var url = project.appending(path: base)
+        var n = 2
+        while FileManager.default.fileExists(atPath: url.path) {
+            url = project.appending(path: "\(base)-\(n)"); n += 1
+        }
+        try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        let doc = SessionDoc(url: url)
+        doc.meta = SessionMeta(title: name.isEmpty ? "Untitled" : name, createdAt: now, named: !name.isEmpty)
+        doc.save()
+        try? (words + "\n").write(to: url.appending(path: "script.md"), atomically: true, encoding: .utf8)
+        reload()
+        return url
+    }
+
     /// Call after `current` renamed its folder, so the list and selection follow.
     func currentDidRename() {
         loadSessions()

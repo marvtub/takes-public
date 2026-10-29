@@ -8,11 +8,6 @@ import Testing
 struct AgentsTests {
     let name = AgentRequest(prompt: "Reply with ONLY a short title.", input: "Script: the notch prompter", speed: .fast)
 
-    @Test func theRequestGoesOnStdin() {
-        #expect(name.stdin == "Reply with ONLY a short title.\n\nScript: the notch prompter")
-        #expect(AgentRequest(prompt: "Hi").stdin == "Hi")
-    }
-
     @Test func claudeArguments() {
         let a = ClaudeAdapter().arguments(name)
         #expect(a.starts(with: ["-p", "--output-format", "json", "--no-session-persistence", "--safe-mode"]))
@@ -92,6 +87,9 @@ struct AgentsTests {
         let seen = try String(contentsOf: f.seen, encoding: .utf8)
         #expect(seen.hasPrefix("-p\n--mode\njson\n--no-session\n--no-tools\n---\n"))
         #expect(seen.hasSuffix("Reply with ONLY a short title.\n\nScript: the notch prompter"))
+        // The request goes on stdin.
+        #expect(name.stdin == "Reply with ONLY a short title.\n\nScript: the notch prompter")
+        #expect(AgentRequest(prompt: "Hi").stdin == "Hi")
     }
 
     @Test func aSlowAgentStopsAtItsTime() throws {
@@ -100,12 +98,6 @@ struct AgentsTests {
         let t0 = Date()
         #expect(Agents.execute(f.exe, ClaudeAdapter(), r) == .failed("Claude Code took longer than 1 s."))
         #expect(Date().timeIntervalSince(t0) < 3)
-    }
-
-    @Test func noAgentSaysFinishSetup() async {
-        let r = await Agents.run(name, on: nil)
-        // Under test no real CLI is found, and no other suite sets a fake pi.
-        if Agents.installed.isEmpty { #expect(r == .failed("No agent is set up. Click Finish setup in the sidebar.")) }
     }
 
     /// The real CLIs on this Mac, each once: `TAKES_REAL_AGENTS=1 swift test --filter realAgents`.

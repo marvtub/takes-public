@@ -16,7 +16,7 @@ let demoRoot = ProcessInfo.processInfo.environment["TAKES_DEMO"]
     let size = CGSize(width: 1600, height: 1000)
 
     func shoot(_ name: String, _ view: some View, dark: Bool = true, wait: Double = 2.5, size: CGSize? = nil,
-               tab: SessionMode? = nil) async {
+               tab: SessionMode? = nil, dir: String? = nil) async {
         let size = size ?? self.size
         let host = NSHostingView(rootView: AnyView(view.frame(width: size.width, height: size.height)))
         host.frame = NSRect(origin: .zero, size: size)
@@ -80,7 +80,7 @@ let demoRoot = ProcessInfo.processInfo.environment["TAKES_DEMO"]
         }
         window.orderOut(nil)
         try? rep.representation(using: .png, properties: [:])?
-            .write(to: URL(fileURLWithPath: readmeDir!).appending(path: "\(name).png"))
+            .write(to: URL(fileURLWithPath: dir ?? readmeDir!).appending(path: "\(name).png"))
     }
 
     /// A short made-up conversation in the docked chat, so the shots show Takes at work.

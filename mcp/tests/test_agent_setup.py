@@ -41,8 +41,11 @@ class AgentSetup(unittest.TestCase):
         self.write(".cursor/mcp.json", json.dumps({"mcpServers": {"Pipedream": {"url": "https://x"}}, "z": 1, "a": 2}))
         os.makedirs(os.path.join(self.home, ".pi/agent"))
         os.makedirs(os.path.join(self.home, ".config/opencode"))
+        os.makedirs(os.path.join(self.home, ".gemini/antigravity"))
         got = self.run_setup()
-        self.assertEqual(got, {"Cursor": "added", "opencode": "added", "pi": "added"})
+        self.assertEqual(got, {"Antigravity": "added", "Cursor": "added", "opencode": "added", "pi": "added"})
+        # Antigravity's global config.
+        self.assertEqual(self.read(".gemini/config/mcp_config.json")["mcpServers"]["takes"]["args"], [self.server])
         cursor = self.read(".cursor/mcp.json")
         self.assertEqual(list(cursor), ["mcpServers", "z", "a"])
         self.assertEqual(list(cursor["mcpServers"]), ["Pipedream", "takes"])
@@ -128,11 +131,6 @@ class AgentSetup(unittest.TestCase):
         self.write(".cursor/mcp.json", json.dumps({"mcpServers": {"takes": {"command": "/usr/bin/python3", "args": [self.server], "env": {"TAKES_TOOLS": "all"}}}}))
         self.assertEqual(self.run_setup(once=True), {"Cursor": "ok"})
 
-    def test_antigravity_gets_its_global_config(self):
-        os.makedirs(os.path.join(self.home, ".gemini/antigravity"))
-        self.assertEqual(self.run_setup(), {"Antigravity": "added"})
-        self.assertEqual(self.read(".gemini/config/mcp_config.json")["mcpServers"]["takes"]["args"], [self.server])
-
     def test_the_short_list_fits_cursor_and_every_name_is_a_tool(self):
         names = {n for n, *_ in t.TOOLS}
         self.assertLessEqual(t.CORE_TOOLS, names)
@@ -143,6 +141,19 @@ class AgentSetup(unittest.TestCase):
         finally:
             os.environ.pop("TAKES_TOOLS")
         self.assertTrue(all(t.shown_tool(n) for n in names))
+        # The instructions' tool index lists only the core tools then.
+        got = []
+        old = t.reply
+        t.reply = lambda id_, result=None, error=None: got.append(result)
+        os.environ["TAKES_TOOLS"] = "core"
+        try:
+            t.handle({"id": 1, "method": "initialize", "params": {}})
+        finally:
+            t.reply = old
+            os.environ.pop("TAKES_TOOLS", None)
+        index = got[0]["instructions"].split("Tools by step.")[1].split("Ideas:")[0]
+        self.assertNotIn("broll", index)
+        self.assertIn("check_edit", index)
 
 
 if __name__ == "__main__":

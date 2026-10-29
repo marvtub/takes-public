@@ -112,7 +112,7 @@ extension PhoneServer {
                   FileManager.default.fileExists(atPath: dir.appending(path: n).path) else { return .error(404, "No such font") }
             return .file(dir.appending(path: n), type: "font/woff2")
         case ("GET", "/api/plugins"):
-            // The plugin screens the phone shows at the foot of its list (2026-10-09). None in the public copy.
+            // The plugin screens the phone shows at the foot of its list (2026-10-09). The public copy has Plan only.
             return .encode(Plugins.all.filter { $0.phone != nil }.map { PhonePluginInfo(id: $0.id, title: $0.title, icon: $0.icon) })
         case ("POST", "/api/chat/new"):
             // New conversation: the open one goes to the history, as the Mac's ⌘N in the chat.

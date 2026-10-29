@@ -19,21 +19,48 @@ import SwiftUI
 /// another day. A card covers its slot as planned; a post with a time fills it (2026-10-10: the
 /// buffer stayed 0 with seven videos planned, so cards count now). "Add a week" shows more
 /// weeks (plan.json "weeks", 2 to 12). The plugin id stays "consistency", for the files and the phone.
+///
+/// Phone (2026-10-25): the iPhone draws the same board from GET /api/plan (PlanPhone.swift) and its
+/// buttons call the store's own functions. Each one, on the Mac or the phone, writes a line in the
+/// Plan chat (ConsistencyStore.say).
 enum Consistency {
+    /// The library, for the Plan chat opened from the phone before the board was shown on the Mac.
+    @MainActor static var root: URL?
+    /// The app, for the phone's list of sessions to plan (PlanChoice.all).
+    @MainActor static weak var app: AppModel?
+
+
     static let plugin = TakesPlugin(
         id: "consistency", title: "Plan", icon: "calendar", key: "c",
         help: "Plan your videos on a calendar. Pick the days you post, and Takes shows your next slot, your buffer and your streak (⇧⌘C)",
         badge: { _ in AnyView(EmptyView()) },
         board: { app in
             let root = app.library.root
-            ClaudeChat.boardContexts["consistency"] = { context(root) }
+            attach(app)
             let library = app.library
             return AnyView(ConsistencyBoard(hub: app.chats, root: root, choices: { PlanChoice.all(library) }) { url in
                 app.board = nil
                 app.library.select(url)
             })
         },
-        toggled: { app, on in PostingPlan.setOff(app.library.root, !on) })
+        phone: PlanPhone.hook,
+        toggled: { app, on in PostingPlan.setOff(app.library.root, !on) },
+        chatContext: { root.map(context) ?? "" },
+        start: { app in attach(app) })
+
+    @MainActor static func attach(_ app: AppModel) {
+        let r = app.library.root
+        root = r
+        self.app = app
+        ConsistencyStore.hub = app.chats
+        ClaudeChat.boardContexts["consistency"] = { context(r) }
+        ClaudeChat.boardIntros["consistency"] = (
+            title: "Plan your next videos.",
+            line: "Takes knows your posting days and your videos. It puts a video on each day, moves them when plans change, and says what to record next.",
+            asks: [("Fill my open days", "Put a video on each of my open posting days in the next two weeks with plan_video. Pick the ones closest to done first, and tell me why in one line each."),
+                   ("What should I record next?", "Which video should I record next to keep my posting days covered? Pick one, with one line why."),
+                   ("How does Plan work?", "Explain the Plan board in four short lines: posting days, putting a video on a day, the week rings and the week streak.")])
+    }
 
     @MainActor static func context(_ root: URL) -> String {
         """
@@ -455,6 +482,8 @@ final class ConsistencyStore {
     var loaded = false
     /// The game in a line, for the board chat (Consistency.context).
     static var brief: String?
+    /// The app's chats, for the Plan chat's lines.
+    static weak var hub: ChatHub?
     private var busy = false
     private var again = false
     private var root: URL?
@@ -501,7 +530,22 @@ final class ConsistencyStore {
         }
     }
 
+    /// A line in the Plan chat for what the user did on the board, on the Mac or the phone: the agent
+    /// hears it with his next message (every board button writes one, 2026-10-19).
+    static func say(_ line: String) {
+        hub?.boardChat("consistency").action(line)
+    }
+
+    /// "Tue and Thu at 8:02 AM, on LinkedIn and X".
+    nonisolated static func words(_ p: PostingPlan) -> String {
+        func and(_ l: [String]) -> String { l.count < 2 ? l.joined() : l.dropLast().joined(separator: ", ") + " and " + l.last! }
+        let days = PostingPlan.weekdays.filter(p.days.contains).map { $0.prefix(1).uppercased() + $0.dropFirst() }
+        let places = p.platforms.map { PostPlatform(rawValue: $0)?.name ?? $0 }
+        return and(days) + " at " + PostingPlan.clock(p.time) + (places.isEmpty ? "" : ", on " + and(places))
+    }
+
     func save(_ root: URL, _ plan: PostingPlan) {
+        Self.say((self.plan ?? PostingPlan.read(root)) == nil ? "Set the plan: \(Self.words(plan))." : "Changed the plan: \(Self.words(plan)).")
         var plan = plan
         plan.since = self.plan?.since
         plan.weeks = self.plan?.weeks
@@ -521,6 +565,11 @@ final class ConsistencyStore {
         var card = s.videos.values.joined().first { $0.id == id }
         if card == nil { card = ConsistencyStats.card(root, id) }
         guard var card else { return }
+        let was = s.videos.first { $0.value.contains { $0.id == id } }?.key
+        let other = before.flatMap { b in s.videos.values.joined().first { $0.id == b }?.title }
+        let when = CoachWords.day(day)
+        Self.say(other.map { "Moved “\(card.title)” before “\($0)” on \(when)." }
+                 ?? (was == nil ? "Put “\(card.title)” on \(when)." : "Moved “\(card.title)” to \(when)."))
         card.late = false
         for k in s.videos.keys { s.videos[k]?.removeAll { $0.id == id } }
         var list = s.videos[day] ?? []
@@ -533,6 +582,8 @@ final class ConsistencyStore {
 
     func remove(_ root: URL, _ id: String) {
         var s = stats
+        let title = s.videos.values.joined().first { $0.id == id }?.title ?? ConsistencyStats.card(root, id)?.title ?? id
+        Self.say("Took “\(title)” off the plan.")
         for k in s.videos.keys { s.videos[k]?.removeAll { $0.id == id } }
         withAnimation(Theme.spring) { stats = s }
         change(root) { $0.videos = PostingPlan.moved($0.videos ?? [], id, to: nil) }
@@ -540,13 +591,16 @@ final class ConsistencyStore {
 
     func setWeeks(_ root: URL, _ n: Int) {
         let n = min(max(n, PostingPlan.weekRange.lowerBound), PostingPlan.weekRange.upperBound)
+        guard n != (plan ?? PostingPlan.read(root))?.weekCount else { return }
+        Self.say("Showing the next \(n) weeks.")
         plan?.weeks = n
         change(root) { $0.weeks = n }
     }
 
     /// Changes the plan as the file has it now, so a card the chat just added stays.
     private func change(_ root: URL, _ edit: @escaping @Sendable (inout PostingPlan) -> Void) {
-        guard let mine = plan else { return }
+        // The phone can change the plan before the board was ever shown on the Mac: then the file has it.
+        guard let mine = plan ?? PostingPlan.read(root) else { return }
         Task.detached(priority: .userInitiated) {
             var p = PostingPlan.read(root) ?? mine
             edit(&p)
@@ -574,7 +628,15 @@ struct ConsistencyBoard: View {
         .overlay(alignment: .bottomTrailing) {
             BoardChatCorner(hub: hub, target: target).padding(18)
         }
-        .onAppear { store.refresh(root, urgent: true) }
+        .onAppear {
+            // The first visit, before any plan, shows the setup on its own: the chat opens from the
+            // corner button (2026-10-26, new users did not know where to look).
+            if !UserDefaults.standard.bool(forKey: "planChatShut"), PostingPlan.read(root) == nil {
+                UserDefaults.standard.set(true, forKey: "planChatShut")
+                hub.open = false
+            }
+            store.refresh(root, urgent: true)
+        }
         .onReceive(NotificationCenter.default.publisher(for: .takesFilesChanged)) { n in
             guard ConsistencyStore.matters(n.object as? [String] ?? [], root: root) else { return }
             store.refresh(root)
@@ -594,19 +656,25 @@ struct ConsistencyPage: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            header
-            Rule()
+            if store.plan != nil || !store.loaded {
+                header
+                Rule()
+            }
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
                     if store.loaded {
-                        if store.plan == nil || editing {
-                            CommitCard(start: store.plan, first: store.plan == nil, root: root) { plan in
-                                let first = store.plan == nil
+                        if store.plan == nil {
+                            FirstPlan(mascot: mascot) { plan in
+                                store.save(root, plan)
+                                celebrate = true
+                            }
+                            .arrive(0)
+                        } else if editing {
+                            CommitCard(start: store.plan, first: false, root: root) { plan in
                                 store.save(root, plan)
                                 withAnimation(.page) { editing = false }
-                                if first { celebrate = true }
                             } cancel: {
-                                if store.plan != nil { withAnimation(.page) { editing = false } }
+                                withAnimation(.page) { editing = false }
                             }
                             .arrive(0)
                         } else if let plan = store.plan {
@@ -834,6 +902,210 @@ struct CommitCard: View {
     private var perMonth: String { days.isEmpty ? "Pick at least one day." : CoachWords.perMonth(days.count) }
 }
 
+/// The Plan board's first open (design picked 2026-10-26): one calm, centred screen with
+/// everything the plan needs. The flame grows with the days, time and places sit in one card, a
+/// strip shows the next two weeks, and one line says what comes next. Change days keeps CommitCard.
+struct FirstPlan: View {
+    var mascot: NSImage? = Mascot.image
+    var now = Date()
+    let commit: (PostingPlan) -> Void
+    @State private var days: Set<String>
+    @State private var time = PostingPlan.times[0].value
+    @State private var other = false
+    @State private var custom = ""
+    @State private var platforms: Set<String> = ["linkedin"]
+
+    init(mascot: NSImage? = Mascot.image, now: Date = Date(), start: Set<String> = PostingPlan.suggested,
+         commit: @escaping (PostingPlan) -> Void) {
+        self.mascot = mascot
+        self.now = now
+        self.commit = commit
+        _days = State(initialValue: start)
+    }
+
+    private var ok: Bool { !days.isEmpty && !platforms.isEmpty && PostingPlan.validTime(time) }
+
+    var body: some View {
+        let level = FireLevel(days: days.count)
+        VStack(spacing: 22) {
+            FireMascot(level: level, size: 110, image: mascot)
+            VStack(spacing: 8) {
+                Text(level.name)
+                    .font(Theme.sans(12, .bold))
+                    .foregroundStyle(Self.chipInk(level))
+                    .padding(.horizontal, 12).frame(height: 26)
+                    .background(Self.chipFill(level), in: Capsule())
+                Text("When do you want to post?")
+                    .font(Theme.display(45, .heavy)).foregroundStyle(Theme.ink)
+                Text(coach).font(Theme.sans(14.5)).foregroundStyle(Theme.muted)
+                    .multilineTextAlignment(.center)
+            }
+            .swapIn(days.count)
+
+            HStack(spacing: 8) {
+                ForEach(PostingPlan.weekdays, id: \.self) { d in
+                    DayKey(day: d, on: days.contains(d), suggested: PostingPlan.suggested.contains(d), big: true) {
+                        withAnimation(Theme.spring) { if days.contains(d) { days.remove(d) } else { days.insert(d) } }
+                    }
+                }
+            }
+
+            VStack(spacing: 0) {
+                row("Time") {
+                    HStack(spacing: 4) {
+                        ForEach(PostingPlan.times, id: \.value) { t in
+                            segment(t.label, PostingPlan.clock(t.value), on: !other && time == t.value) {
+                                other = false; time = t.value
+                            }
+                        }
+                        if other {
+                            TextField("09:41", text: $custom)
+                                .textFieldStyle(.plain).font(Theme.sans(13, .semibold)).monospacedDigit()
+                                .multilineTextAlignment(.center)
+                                .frame(maxWidth: .infinity).frame(height: 44)
+                                .background(RoundedRectangle(cornerRadius: 9).fill(Theme.paper).shadow(color: Theme.shadow, radius: 1.5, y: 1))
+                                .overlay(RoundedRectangle(cornerRadius: 9).strokeBorder(!custom.isEmpty && !PostingPlan.validTime(custom) ? Theme.warn : .clear, lineWidth: 1.5))
+                                .onChange(of: custom) { _, v in if PostingPlan.validTime(v) { time = v } }
+                                .help("Any time, 24-hour: 09:41")
+                        } else {
+                            segment("Other", "Pick a time", on: false) { other = true; custom = "" }
+                        }
+                    }
+                    .padding(3)
+                    .background(RoundedRectangle(cornerRadius: 11).fill(Theme.canvas))
+                }
+                Rule()
+                row("Where") {
+                    HStack(spacing: 6) {
+                        ForEach([PostPlatform.linkedin, .x, .youtube, .vertical], id: \.self) { p in
+                            place(p)
+                        }
+                        Spacer(minLength: 0)
+                    }
+                }
+            }
+            .background(RoundedRectangle(cornerRadius: 18).fill(Theme.paper).shadow(color: Theme.shadow, radius: 12, y: 4))
+            .overlay(RoundedRectangle(cornerRadius: 18).strokeBorder(Theme.border))
+
+            strip
+
+            VStack(spacing: 10) {
+                Button { commit(draft) } label: {
+                    Text("I'm in").font(Theme.sans(16, .bold))
+                        .foregroundStyle(ok ? Color.white : Theme.faint)
+                        .padding(.horizontal, 44).frame(height: 52)
+                        .background(RoundedRectangle(cornerRadius: 14).fill(ok ? Theme.accent : Theme.hover)
+                            .shadow(color: ok ? Theme.accent.opacity(0.35) : .clear, radius: 10, y: 6))
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(PressScale()).disabled(!ok).keyboardShortcut(.defaultAction)
+                Text("Next you put a video on each day. Takes can do it for you. Change your days any time.")
+                    .font(Theme.sans(12.5)).foregroundStyle(Theme.muted).multilineTextAlignment(.center)
+            }
+        }
+        .frame(maxWidth: 640)
+        .frame(maxWidth: .infinity)
+        .padding(.top, 8)
+        .animation(Theme.spring, value: other)
+    }
+
+    private var draft: PostingPlan {
+        PostingPlan(days: PostingPlan.weekdays.filter(days.contains), time: time, platforms: platforms.sorted())
+    }
+
+    private var coach: String {
+        days.isEmpty ? "Tap the days you want a post to go out." : Self.cheer[min(days.count, 4) - 1] + " " + CoachWords.perMonth(days.count)
+    }
+
+    /// CoachWords.forCount without the level name: the badge above says it already.
+    static let cheer = ["A calm start. One good post a week adds up.", "Easy to keep, enough to grow.",
+                        "A small buffer will carry you through busy weeks.", "Cheap formats will save you on busy days."]
+
+    static func chipFill(_ l: FireLevel) -> Color {
+        l.rank == 0 ? Theme.hover : l.rank < 3 ? Theme.accentSoft : l.outer.opacity(0.16)
+    }
+
+    static func chipInk(_ l: FireLevel) -> Color {
+        switch l.rank {
+        case 0: return Theme.muted
+        case 1, 2: return Theme.accentInk
+        case 3: return Theme.dynamic(0xB4430A, 0xFFA066)
+        default: return Theme.dynamic(0x8A5A00, 0xFFD25C)
+        }
+    }
+
+    private func row(_ label: String, @ViewBuilder _ content: () -> some View) -> some View {
+        HStack(spacing: 16) {
+            Text(label).font(Theme.sans(12, .semibold)).foregroundStyle(Theme.muted).frame(width: 52, alignment: .leading)
+            content()
+        }
+        .padding(.horizontal, 16).padding(.vertical, 14)
+    }
+
+    private func segment(_ title: String, _ detail: String, on: Bool, tap: @escaping () -> Void) -> some View {
+        Button { withAnimation(Theme.motion, tap) } label: {
+            VStack(spacing: 1) {
+                Text(title).font(Theme.sans(12.5, .semibold))
+                Text(detail).font(Theme.sans(11)).opacity(0.8)
+            }
+            .foregroundStyle(on ? Theme.ink : Theme.muted)
+            .frame(maxWidth: .infinity).frame(height: 44)
+            .background(RoundedRectangle(cornerRadius: 9).fill(on ? Theme.paper : .clear)
+                .shadow(color: on ? Theme.shadow : .clear, radius: 1.5, y: 1))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(PressScale())
+    }
+
+    private func place(_ p: PostPlatform) -> some View {
+        let on = platforms.contains(p.rawValue)
+        return Button {
+            withAnimation(Theme.motion) { if on { platforms.remove(p.rawValue) } else { platforms.insert(p.rawValue) } }
+        } label: {
+            Text(p.name).font(Theme.sans(12.5, .semibold))
+                .foregroundStyle(on ? Theme.accentInk : Theme.muted)
+                .padding(.horizontal, 14).frame(height: 36)
+                .background(RoundedRectangle(cornerRadius: 13).fill(on ? Theme.accentSoft : Theme.paper))
+                .overlay(RoundedRectangle(cornerRadius: 13).strokeBorder(on ? Theme.accent : Theme.border))
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(PressScale())
+    }
+
+    /// The next two weeks from today, the posting days dashed.
+    private var strip: some View {
+        let cal = Calendar.current
+        let today = cal.startOfDay(for: now)
+        let dates = (0..<14).compactMap { cal.date(byAdding: .day, value: $0, to: today) }
+        let posting = dates.filter { days.contains(PostingPlan.weekday($0, cal)) }
+        return VStack(spacing: 8) {
+            HStack(alignment: .firstTextBaseline) {
+                Text("Your next two weeks").font(Theme.sans(12, .semibold)).foregroundStyle(Theme.muted)
+                Spacer()
+                Text("\(posting.count) posting day\(posting.count == 1 ? "" : "s") to fill")
+                    .font(Theme.sans(12)).foregroundStyle(Theme.muted).contentTransition(.numericText())
+            }
+            HStack(spacing: 4) {
+                ForEach(dates, id: \.self) { d in
+                    let on = posting.contains(d)
+                    let isToday = d == today
+                    VStack(spacing: 1) {
+                        Text(PostingPlan.weekday(d, cal).prefix(1).uppercased()).font(Theme.sans(9.5, .semibold)).opacity(0.75)
+                        Text("\(cal.component(.day, from: d))").font(Theme.sans(12, .bold))
+                    }
+                    .foregroundStyle(on ? Theme.accentInk : isToday ? Theme.ink : Theme.faint)
+                    .frame(maxWidth: .infinity).frame(height: 46)
+                    .background(RoundedRectangle(cornerRadius: 10).fill(on ? Theme.paper : isToday ? Theme.hover : Theme.canvas))
+                    .overlay(RoundedRectangle(cornerRadius: 10)
+                        .strokeBorder(on ? Theme.accent : .clear, style: StrokeStyle(lineWidth: 1.5, dash: [4, 3])))
+                }
+            }
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("\(posting.count) posting days in the next two weeks")
+    }
+}
+
 /// How hot the plan runs: the mascot's flame, from none (no days) to a gold "Super Takes" (four
 /// or more). The user asked for super-saiyan levels (2026-10-11).
 struct FireLevel: Equatable {
@@ -922,19 +1194,23 @@ struct DayKey: View {
     let day: String
     let on: Bool
     let suggested: Bool
+    /// The first open's taller keys, with a glow under the picked ones.
+    var big = false
     let tap: () -> Void
     @State private var hover = false
 
     var body: some View {
         Button(action: tap) {
-            VStack(spacing: 4) {
-                Text(day.prefix(1).uppercased() + day.dropFirst()).font(Theme.sans(13, .semibold))
-                Circle().fill(suggested ? (on ? Color.white.opacity(0.85) : Theme.accentInk) : .clear).frame(width: 4, height: 4)
+            VStack(spacing: big ? 6 : 4) {
+                Text(day.prefix(1).uppercased() + day.dropFirst()).font(Theme.sans(big ? 15 : 13, big ? .bold : .semibold))
+                Circle().fill(suggested ? (on ? Color.white.opacity(0.85) : Theme.accentInk) : .clear).frame(width: big ? 5 : 4, height: big ? 5 : 4)
             }
             .foregroundStyle(on ? Color.white : Theme.ink)
-            .frame(maxWidth: .infinity).frame(height: 50)
-            .background(RoundedRectangle(cornerRadius: 12).fill(on ? Theme.accent : hover ? Theme.hover : Theme.canvas))
-            .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(on ? .clear : Theme.border))
+            .frame(maxWidth: .infinity).frame(height: big ? 64 : 50)
+            .background(RoundedRectangle(cornerRadius: big ? 16 : 12)
+                .fill(on ? Theme.accent : hover ? Theme.hover : big ? Theme.paper : Theme.canvas)
+                .shadow(color: big && on ? Theme.accent.opacity(0.32) : .clear, radius: 8, y: 6))
+            .overlay(RoundedRectangle(cornerRadius: big ? 16 : 12).strokeBorder(on ? .clear : Theme.border))
             .contentShape(Rectangle())
         }
         .buttonStyle(PressScale())

@@ -47,7 +47,7 @@ rest with `grep`. Most files start with a comment that says what they are for.
 | Recording | `AppModel.swift`, `CameraRecorder.swift`, `ScreenRecorder.swift`, `Notch.swift` (the script in the notch), `ScriptFollower.swift` |
 | Transcripts and search | `Transcripts.swift`, `Search.swift` (⌘K), `ScreenFind.swift` (⌘F) |
 | Storyboard | `Storyboard.swift` |
-| Posts | `Post.swift` (LinkedIn), `XPost.swift`, `VideoPost.swift` (YouTube, vertical), `PostDrafts.swift`, `Hooks.swift`, `PostQueue.swift`, `Publish.swift`, `Cover.swift` |
+| Posts | `Post.swift` (LinkedIn), `XPost.swift`, `VideoPost.swift` (YouTube, vertical), `PostDrafts.swift`, `Hooks.swift`, `PostQueue.swift`, `Publish.swift`, `Cover.swift`, `Carousel.swift` (slides in place of the video: file, templates, export), `CarouselSlides.swift` (every layout in every look) |
 | Review comments | `Comments.swift`, `OpenComments.swift` |
 | Chat | `Chat.swift` (one Claude Code, Codex or pi run per turn; `Agents/ChatAdapters.swift` per agent), `ChatAgents.swift` (agent and model pick, Settings › Agents), `ChatAttach.swift`, `ChatRefs.swift`, `Dictation.swift` |
 | Long jobs (renders the chat starts with `run_job`) | `Jobs.swift` (the Jobs row, and the note to the chat when a job ends) |

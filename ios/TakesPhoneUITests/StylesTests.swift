@@ -4,6 +4,11 @@ import XCTest
 final class StylesTests: XCTestCase {
     private var server: String { ProcessInfo.processInfo.environment["TAKES_SERVER"] ?? "http://127.0.0.1:8797" }
 
+    override func setUp() {
+        super.setUp()
+        freshStandin()
+    }
+
     private func get(_ path: String) -> String {
         let done = expectation(description: path)
         var body = ""
@@ -34,8 +39,7 @@ final class StylesTests: XCTestCase {
         shot(app, "styles-1-gallery")
 
         app.buttons["Keep"].tap()
-        sleep(1)
-        XCTAssertTrue(get("/test/log").contains("\"keep\""))
+        XCTAssertTrue(eventually { self.get("/test/log").contains("\"keep\"") })
 
         magazine.tap()
         XCTAssertTrue(app.staticTexts["Guide, colours, type and parts"].waitForExistence(timeout: 10))

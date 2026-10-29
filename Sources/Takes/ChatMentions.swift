@@ -1,21 +1,22 @@
 import AppKit
 import SwiftUI
 
-// @ in the chat box (2026-10-13). Typing @ opens one list of the styles, skills and files of this
-// session, and the words after @ filter it. ↑ ↓ move, Return or Tab picks, Esc closes. A pick
-// writes "@Name " into the box, tinted like a chip; Backspace right after it takes the whole name.
-// On send, Takes adds what each name is for the agent: a style to switch this video to
-// (set_style), a skill to read and follow, a file's path. The chat shows the message without it.
+// @ in the chat box (2026-10-13). Typing @ opens one list of the styles, effects (2026-10-29),
+// skills and files of this session, and the words after @ filter it. ↑ ↓ move, Return or Tab
+// picks, Esc closes. A pick writes "@Name " into the box, tinted like a chip; Backspace right after
+// it takes the whole name. On send, Takes adds what each name is for the agent: a style to switch
+// this video to (set_style), an effect to use (list_effects), a skill to read and follow, a file's
+// path. The chat shows the message without it.
 // Design board, variant A "One list": https://claude.ai/artifact/2YE4US6uuJYdBBtvG8fXWo
 
 struct Mention: Identifiable, Hashable {
-    enum Kind: String, CaseIterable { case style = "Styles", skill = "Skills", asset = "Assets" }
+    enum Kind: String, CaseIterable { case style = "Styles", effect = "Effects", skill = "Skills", asset = "Assets" }
     let kind: Kind
     let name: String
     var detail: String?
     /// A picture for the row: a style's preview.png, a still, an edit.
     var image: URL?
-    /// The style or skill folder, or the file.
+    /// The style, effect or skill folder, or the file.
     let path: URL
     var id: String { kind.rawValue + ":" + path.path }
     var token: String { "@" + name }
@@ -69,6 +70,9 @@ enum Mentions {
                     ?? "the project I mean (set_style with project; ask which if it is not clear)"
                 return "- \(m.token): the style \"\(m.name)\". Switch \(target) to it, then make the work "
                     + "in this message in that style: get_library gives its guide and parts."
+            case .effect:
+                return "- \(m.token): the effect \"\(m.name)\". Use it in the work in this message: "
+                    + "list_effects \(m.path.lastPathComponent) gives its README and source."
             case .skill:
                 return "- \(m.token): the skill \(m.path.lastPathComponent), at \(m.path.appending(path: "SKILL.md").path). "
                     + "Read it and follow it for this message."
@@ -116,7 +120,7 @@ enum Mentions {
     }
 
     /// Everything the list can show for a chat. Reads a few folders: call it when the list opens.
-    static func all(session: URL?, root: URL) -> [Mention] {
+    static func all(session: URL?, root: URL, effects: URL = EffectLib.shipped) -> [Mention] {
         let fm = FileManager.default
         var out: [Mention] = []
         let inUse = session.flatMap { s in
@@ -127,6 +131,11 @@ enum Mentions {
             let png = dir.appending(path: "preview.png")
             out.append(Mention(kind: .style, name: name, detail: name == inUse ? "In use" : nil,
                                image: fm.fileExists(atPath: png.path) ? png : nil, path: dir))
+        }
+        // Effects are opt-in: picking one with @ is asking for it.
+        for c in EffectLib.cards(shipped: effects, root: root) {
+            out.append(Mention(kind: .effect, name: c.name, detail: c.kind.isEmpty ? nil : c.kind,
+                               image: c.poster, path: c.dir ?? EffectLib.own(root: root).appending(path: c.slug)))
         }
         var titles = Set<String>()
         // Takes' own skills and packs first: the rest of ~/.claude/skills can be long.
@@ -218,7 +227,7 @@ struct MentionMenu: View {
         }
         .menuChrome()
         .shadow(color: Theme.ink.opacity(0.14), radius: 16, y: 8)
-        .accessibilityLabel("Mention a style, skill or file")
+        .accessibilityLabel("Mention a style, effect, skill or file")
     }
 }
 
@@ -245,7 +254,7 @@ private struct MentionRow: View {
     }
 }
 
-/// A 20 pt picture: the style's preview, the still, the edit's frame. A skill has its icon.
+/// A 20 pt picture: the style's or effect's preview, the still, the edit's frame. A skill has its icon.
 private struct MentionThumb: View {
     let mention: Mention
     @State private var image: NSImage?
@@ -290,6 +299,7 @@ private struct MentionThumb: View {
     private var icon: String {
         switch mention.kind {
         case .style: "square.grid.2x2"
+        case .effect: "sparkles"
         case .skill: "wand.and.stars"
         case .asset: "doc"
         }

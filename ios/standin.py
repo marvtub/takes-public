@@ -3,7 +3,8 @@
 
 It answers the calls the phone makes with one session. GET /test/down?s=N makes it go away
 for N seconds: the port refuses connections, as when the Mac sleeps. GET /test/log lists the
-changes it got (script saves, comments, chat messages, uploads).
+changes it got (script saves, comments, chat messages, uploads). GET /test/reset puts it back as
+it started: every UI test calls it first (TakesPhoneUITests/Standin.swift).
 """
 import json, sys, threading, time, uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -54,6 +55,65 @@ def wav(seconds=2, rate=8000):
 
 
 
+def carousel():
+    """GET /test/carousel turns this on: four slides, shown on the LinkedIn post in place of the video."""
+    state["carousel"] = {"slides": [
+        {"kicker": "Swipe →", "title": "5 things I wish I knew before filming on my phone", "body": "Save this for your next video."},
+        {"kicker": "Tip 1", "title": "Light from the front", "body": "Face a window."},
+        {"kicker": "Tip 2", "title": "Lock the exposure", "body": "Hold on your face until AE/AF Lock shows."},
+        {"kicker": "That's it", "title": "Save this. Film one today.", "body": "Follow for a tip every week."}],
+        "on": {"linkedin": True}, "docTitle": "5 things"}
+
+
+# GET /test/screens turns these on for ScreensTests (2026-10-28: they walked the Mac's own library
+# before): the post with a variant and hooks, two more videos, and comment drafts to review.
+POST = {"text": "Four days and 75 updates.\n\nThis is the body of the post.", "status": "draft",
+        "variants": [{"slug": "short", "name": "Short", "author": "claude", "note": "Tighter, one idea", "text": "Short one"}],
+        "hooks": [{"id": "h1", "text": "Four days and 75 updates.", "note": "Numbers first"},
+                  {"id": "h2", "text": "I shipped 75 updates in four days."}]}
+SHOP = dict(session, id="Tests/claude-ran-a-shop", title="Claude ran a shop", created="2026-09-20T10:00:00Z",
+            updated="2026-09-20T10:00:00Z", takes=2, stage="edit")
+BOARD = dict(session, id="Tests/make-videos", title="How I make videos with Takes", created="2026-09-10T10:00:00Z",
+             updated="2026-09-10T10:00:00Z", stage="board", shots=6)
+
+
+def screens_detail(sid):
+    """The detail of SHOP or BOARD."""
+    if sid == SHOP["id"]:
+        return {"session": SHOP, "folder": "/tmp/" + sid, "script": "Claude ran a shop for a month.", "files": [],
+                "post": {"text": "Claude ran a shop for a month. Here is what it sold.", "status": "posted",
+                         "media": "/tmp/%s/edits/shop-v1.mp4" % sid},
+                "chat": {"running": False, "messages": []}, "openComments": 0, "profile": None, "storyboard": None}
+    shots = [{"id": "s%d" % i, "section": "hook" if i == 1 else "main", "kind": "SHOT", "say": "Line %d of the video." % i,
+              "how": "At the desk.", "seconds": 4, "start": 4.0 * (i - 1),
+              "image": "/tmp/%s/storyboard/s%d.png" % (sid, i),
+              "comments": [], "ratio": 0.8} for i in range(1, 7)]
+    shots[4]["how"] = "Close up on the phone. Note: hold it still."
+    return {"session": BOARD, "folder": "/tmp/" + sid, "script": "How I make videos.", "files": [], "post": None,
+            "chat": {"running": False, "messages": []}, "openComments": 0, "profile": None, "storyboard": shots}
+
+
+def suggestion(i, status, author, text, **more):
+    s = {"id": "s%d" % i, "created": NOW, "status": status, "angle": "Agrees, adds one number",
+         "post": {"url": "https://www.linkedin.com/feed/update/urn:li:activity:%d" % i, "author": author,
+                  "headline": "Founder", "text": text, "posted": "2d", "comments": 12, "reactions": 140},
+         "drafts": [{"text": "Same here: the second take is always better.",
+                     "variants": ["Same here: the second take is always better.", "We film twice too. The first one is a warm-up.",
+                                  "Two takes, every time. The first finds the words."]}]}
+    s.update(more)
+    return s
+
+
+def copilot():
+    return {"finding": True, "posting": False, "redrafting": False, "items": [
+        suggestion(1, "review", "Ana Lopez", "I record every video twice. Here is why."),
+        suggestion(2, "review", "Ben Ito", "Filming on a phone is enough."),
+        suggestion(3, "review", "Cleo Park", "Scripts make videos worse."),
+        suggestion(4, "approved", "Dev Shah", "The first take is a draft."),
+        suggestion(5, "posted", "Eli Moss", "Short videos win.", posted={"url": "https://www.linkedin.com/feed/update/5", "at": NOW},
+                   stats=[{"at": NOW, "impressions": 900, "likes": 12, "replies": 2}])]}
+
+
 STYLES = {"styles": [
     {"name": "Bold", "description": "Big type", "isNew": True, "usedBy": [], "openComments": 0},
     {"name": "Magazine", "description": "Paper pages", "isNew": False, "poster": "/tmp/styles/Magazine/preview.png",
@@ -81,17 +141,23 @@ STYLE = {"id": "_library/styles/Magazine", "name": "Magazine", "folder": "/tmp/_
 def detail():
     d = {"session": session, "folder": FOLDER, "script": state["script"], "files": files(),
          "post": None, "chat": state["chat"],
-         "openComments": len(state["comments"]), "profile": None, "storyboard": None}
+         "openComments": len(state["comments"]), "profile": None, "storyboard": None,
+         # The Mac always sends the script's draft bar, empty or not: it holds the Edit button.
+         "scriptVariants": [], "scriptFavorite": "main", "scriptHistory": 0}
     if state.get("sides"):
         d["sides"] = state["sides"]
     if state.get("parity"):
         d.update(PARITY_DETAIL())
+    if state.get("carousel"):
+        d["carousel"] = state["carousel"]
+        if d.get("posts"):
+            d["posts"] = d["posts"] + [dict(platform="vertical", name="Vertical", text="5 phone filming tips #filmingtips", title="",
+                                            status="draft", limit=2200, history=0, variants=[], hooks=[], places=["tiktok", "reels", "shorts"])]
     if state.get("styles"):
         d["style"] = state["video_style"]
-        d["post"] = {"text": "Four days and 75 updates.\n\nThis is the body of the post.", "status": "draft",
-                     "variants": [{"slug": "short", "name": "Short", "author": "claude", "note": "Tighter, one idea", "text": "Short one"}],
-                     "hooks": [{"id": "h1", "text": "Four days and 75 updates.", "note": "Numbers first"},
-                               {"id": "h2", "text": "I shipped 75 updates in four days."}]}
+        d["post"] = POST
+    if state.get("screens"):
+        d["post"] = POST
     return d
 
 
@@ -148,9 +214,19 @@ class H(BaseHTTPRequestHandler):
         return self.rfile.read(n) if n else b""
 
     def route(self, method):
+        if not state["up"]:
+            # Away: a kept-alive connection gets no answer either, as when the Mac sleeps. Without
+            # this the phone and the tests still reached it on an open connection.
+            self.close_connection = True
+            return
         u = urlparse(self.path)
         q = {k: v[0] for k, v in parse_qs(u.query).items()}
         p = u.path
+        if not p.startswith("/test/"):
+            state.setdefault("seen", []).append(p)
+        if p == "/test/seen":
+            # What the phone read: its copy for offline is in once it read the comments.
+            return self.send(sorted(set(state.get("seen", []))))
         if p == "/test/down":
             secs = float(q.get("s", "20"))
             self.send({"ok": True})
@@ -158,6 +234,18 @@ class H(BaseHTTPRequestHandler):
             return
         if p == "/test/log":
             return self.send(state["log"])
+        if p == "/test/reset":
+            # Each UI test starts here: the whole suite shares one stand-in, and the last test's
+            # fixtures, changes and log broke the next one (2026-10-28).
+            state.clear()
+            state.update(json.loads(json.dumps(FRESH)))
+            session.clear()
+            session.update(FRESH_SESSION)
+            return self.send({"ok": True})
+        if p == "/test/screens":
+            state["screens"] = True
+            state["copilot"] = copilot()
+            return self.send({"ok": True})
         if p == "/test/chat/start":
             messages = [message(i, "Earlier message %d.\n\n" % i +
                                 "A paragraph about making a video and reading its script.\n\n" * 4)
@@ -201,6 +289,9 @@ class H(BaseHTTPRequestHandler):
             chat["messages"][-1]["done"] = True
             state["chat"] = chat
             state["chat_revision"] += 1
+            return self.send({"ok": True})
+        if p == "/test/carousel":
+            carousel()
             return self.send({"ok": True})
         if p == "/test/files":
             state["files"] = True
@@ -284,9 +375,13 @@ class H(BaseHTTPRequestHandler):
             hits = [{"kind": "session", "path": FOLDER, "start": 0, "text": "Tests", "title": "Offline video", "session": SID},
                     {"kind": "board", "path": "/tmp", "start": 0, "title": "Styles", "board": "styles"},
                     {"kind": "video", "path": FOLDER + "/take-01-camera.mov", "start": 0, "session": SID},
-                    {"kind": "speech", "path": FOLDER + "/edits/hook-v2.mp4", "start": 12.5, "text": "hands typing on the keyboard", "session": SID}]
+                    {"kind": "speech", "path": FOLDER + "/edits/hook-v2.mp4", "start": 12.5, "text": "hands typing on the keyboard", "session": SID,
+                     "w": 1080, "h": 1920, "seconds": 48.0},
+                    {"kind": "video", "path": FOLDER + "/edits/hook-v2.mp4", "start": 31.0, "session": SID, "w": 1080, "h": 1920, "seconds": 48.0}]
             if q.get("filter", "all") != "all":
                 hits = [h for h in hits if h["kind"] in ("video", "speech")]
+            if q.get("sort", "best") != "best":
+                hits = [dict(h, section="This week" if i < 2 else "September 2026") for i, h in enumerate(hits)]
             return self.send({"hits": hits, "status": "Ready. 812 files indexed."})
         if p == "/api/projects":
             return self.send(["Tests", "Later"])
@@ -317,6 +412,33 @@ class H(BaseHTTPRequestHandler):
             else:
                 vs["own"] = j.get("style") or None
             return self.send(vs)
+        if p == "/api/plugins" and state.get("parity"):
+            return self.send([{"id": "consistency", "title": "Plan", "icon": "calendar"}])
+        if p == "/api/plan":
+            # Plan (2026-10-25): the Mac's own answers for its test library (PlanPhoneTests.writeStandIn).
+            if method == "POST":
+                state["log"].append({p: json.loads(self.body() or b"{}")})
+                return self.send({"ok": True})
+            import os
+            with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "TakesPhoneUITests/plan-standin.json")) as f:
+                c = json.load(f)
+            if "choices" in q:
+                return self.send(c["choices"])
+            return self.send(c["plan"])
+        if p == "/api/carousel" and method == "POST":
+            j = json.loads(self.body())
+            c = state.get("carousel") or {"slides": [], "on": {}, "docTitle": ""}
+            if "platform" in j:
+                c["on"][j["platform"]] = j.get("on") == "true"
+            elif j.get("action") == "add":
+                c["slides"].append({"kicker": "", "title": "New slide", "body": ""})
+            elif "look" in j:
+                c["look"] = j["look"]
+            elif "slide" in j:
+                c["slides"][int(j["slide"])].update({k: j[k] for k in ("title", "body", "layout") if k in j})
+            state["carousel"] = c
+            state["log"].append({p: j})
+            return self.send({"ok": True})
         if p == "/api/side" and method == "POST":
             j = json.loads(self.body())
             post = next((x for x in state.get("sides") or [] if x["file"] == j.get("file")), None)
@@ -374,13 +496,22 @@ class H(BaseHTTPRequestHandler):
         if p == "/api/sessions":
             if method == "POST":
                 j = json.loads(self.body())
-                n = dict(session, id="%s/new-%d" % (j.get("project") or "Inbox", len(state["log"])), title="")
+                # A new id each time, as the Mac's new folders: the phone keeps a copy of each session it saw.
+                n = dict(session, id="%s/new-%s" % (j.get("project") or "Inbox", uuid.uuid4().hex[:8]), title="")
                 state["log"].append({"new": n["id"]})
+                state.setdefault("made", {})[n["id"]] = n
                 return self.send(n)
             if state.get("parity") and state.get("post_status", "draft") != "draft":
                 return self.send([dict(session, plan=[{"platform": "linkedin", "status": state["post_status"], "at": state.get("post_at")}])])
-            return self.send([session])
+            return self.send([session] + ([SHOP, BOARD] if state.get("screens") else []))
         if p == "/api/session":
+            if q.get("id") in state.get("made", {}):
+                # A new video: no script, no files, no chat, so it shows "Just record".
+                return self.send({"session": state["made"][q["id"]], "folder": "/tmp/" + q["id"], "script": "", "files": [],
+                                  "post": None, "chat": {"running": False, "messages": []}, "openComments": 0,
+                                  "profile": None, "storyboard": None})
+            if state.get("screens") and q.get("id") in (SHOP["id"], BOARD["id"]):
+                return self.send(screens_detail(q["id"]))
             return self.send(detail())
         if p == "/api/chat":
             if method == "POST":
@@ -430,7 +561,16 @@ class H(BaseHTTPRequestHandler):
                 return self.send(c)
             return self.send(state["comments"])
         if p == "/api/copilot":
-            return self.send({"items": [], "finding": False, "posting": False, "redrafting": False})
+            c = state.get("copilot") or {"items": [], "finding": False, "posting": False, "redrafting": False}
+            if method == "POST":
+                j = json.loads(self.body() or b"{}")
+                state["log"].append({p: j})
+                a = j.get("action")
+                for s in c["items"]:
+                    if s["id"] == j.get("id"):
+                        s["status"] = {"approve": "approved", "posted": "posted", "decline": "declined", "feedback": "redraft"}.get(a, "review")
+                        s["skipped"] = NOW if a == "skip" else None
+            return self.send(c if method == "GET" else {"ok": True})
         if p == "/api/upload":
             n = len(self.body())
             state["log"].append({"upload": q.get("name"), "bytes": n})
@@ -447,6 +587,9 @@ class H(BaseHTTPRequestHandler):
         self.route("PUT")
 
 
+# The first state, for GET /test/reset.
+FRESH = json.loads(json.dumps(state))
+FRESH_SESSION = dict(session)
 server = None
 
 

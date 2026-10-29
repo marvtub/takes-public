@@ -77,7 +77,7 @@ struct SessionView: View {
                     case .board: BoardView(sessionID: session.id, detail: detail, show: { showing = $0 },
                                            record: { shooting = $0 }, reload: { await reload() }, toChat: { tab = .chat })
                     case .post: PostView(sessionID: session.id, post: detail.post, posts: detail.posts ?? [], sides: detail.sides ?? [], profile: detail.profile,
-                                         show: { showing = $0 }, files: detail.files, reload: { await reload() })
+                                         carousel: detail.carousel, show: { showing = $0 }, files: detail.files, reload: { await reload() })
                     }
                 } else if let failed {
                     MascotEmpty(title: "Can't load the video", message: failed, mood: .sorry)
@@ -1356,6 +1356,8 @@ struct PostView: View {
     /// Posts on the sides the Mac's plugins add (2026-10-07).
     let sides: [SidePost]
     let profile: Profile?
+    /// The session's slides: the LinkedIn and vertical posts can show them in place of the video (2026-10-26).
+    let carousel: Carousel?
     let show: (RemoteFile) -> Void
     let files: [RemoteFile]
     let reload: () async -> Void
@@ -1377,8 +1379,11 @@ struct PostView: View {
     /// A + was tapped: the new variant shows once it arrives.
     @State private var made = false
     @State private var failed: String?
+    /// The slide on show when the post shows slides.
+    @State private var slide = 0
 
     private var name: String { profile?.name ?? "You" }
+    private func slidesOn(_ p: String) -> Bool { carousel?.isOn(p) == true }
     /// Every platform has variants and hooks, as on the Mac (2026-10-09).
     private var variants: [PostVariant] { other.map { $0.variants ?? [] } ?? post?.variants ?? [] }
     private var hooks: [PostHook] { other.map { $0.hooks ?? [] } ?? post?.hooks ?? [] }
@@ -1425,7 +1430,7 @@ struct PostView: View {
             if made, let new = slugs.first(where: { !old.contains($0) }) { draft = new; made = false }
             if draft != "main" && !slugs.contains(draft) { draft = "main" }
         }
-        .onChange(of: platform) { draft = "main"; made = false }
+        .onChange(of: platform) { draft = "main"; made = false; slide = 0 }
         .asks(confirm: $confirm, name: $ask)
         .sheet(isPresented: $scheduling) {
             if let planned { ScheduleSheet(sessionID: sessionID, post: planned) { scheduling = false; Task { await reload() } } }
@@ -1523,11 +1528,17 @@ struct PostView: View {
     private func platformPost(_ p: PlatformPost) -> some View {
         let vertical = p.platform == "vertical"
         let picture = p.cover ?? p.media
+        let photos = vertical && slidesOn("vertical")
         return VStack(alignment: .leading, spacing: 14) {
             statusRow(p.status, count: text.count, limit: p.limit, write: false)
             drafts
+            if vertical { CarouselSwitch(sessionID: sessionID, platform: "vertical", on: photos, reload: reload) }
             VStack(alignment: .leading, spacing: 10) {
-                if let picture {
+                if photos, let carousel {
+                    CarouselPager(sessionID: sessionID, carousel: carousel, place: (p.places ?? ["tiktok"]).contains("tiktok") ? .tiktok : .instagram, index: $slide)
+                        .frame(maxWidth: 260).clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                        .frame(maxWidth: .infinity)
+                } else if let picture {
                     let f = files.first { $0.path == picture } ?? Bubble.guess(picture)
                     Button { show(f) } label: {
                         RemoteImage(url: model.api.thumb(picture, width: 900)) { $0.resizable().scaledToFill() } placeholder: { Color.black.opacity(0.06) }
@@ -1550,6 +1561,11 @@ struct PostView: View {
             .padding(14)
             .background(Palette.paper, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
             .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(Palette.border))
+            if photos, let carousel {
+                CarouselTools(sessionID: sessionID, carousel: carousel, index: $slide,
+                              tiktok: (p.places ?? ["tiktok"]).contains("tiktok"), shorts: (p.places ?? []).contains("shorts"),
+                              reload: reload)
+            }
             if vertical, let places = p.places, !places.isEmpty {
                 HStack(spacing: 6) {
                     Text("Goes to").font(.inter(.footnote)).foregroundStyle(Palette.muted)
@@ -1625,12 +1641,16 @@ struct PostView: View {
     @ViewBuilder private var linkedIn: some View {
                 statusRow(post?.status, count: post == nil ? nil : text.count, limit: 3000, write: post == nil)
                 if post != nil { drafts }
+                if post != nil { CarouselSwitch(sessionID: sessionID, platform: "linkedin", on: slidesOn("linkedin"), reload: reload) }
                 if let post {
                     CommentedText(sessionID: sessionID, file: file, text: text, font: LinkedIn.body,
                                   what: "post", color: LinkedIn.uiInk) { shown in
                         card(post, text: shown)
                     } below: { EmptyView() }
                     .id(draft)
+                    if slidesOn("linkedin"), let carousel {
+                        CarouselTools(sessionID: sessionID, carousel: carousel, index: $slide, reload: reload)
+                    }
                     if !hooks.isEmpty { hookList }
                 } else {
                     MascotEmpty(title: "No post yet", message: "Ask Takes to write the LinkedIn post, or write it here.")
@@ -1720,7 +1740,9 @@ struct PostView: View {
                 .padding(.horizontal, 12).padding(.top, 12)
             FeedText(text: self.text, expanded: $expanded) { text }
                 .padding(.horizontal, 12).padding(.top, 10).padding(.bottom, 10)
-            if let m = post.media { media(files.first { $0.path == m } ?? Bubble.guess(m)) }
+            if slidesOn("linkedin"), let carousel {
+                CarouselPager(sessionID: sessionID, carousel: carousel, place: .linkedin, index: $slide)
+            } else if let m = post.media { media(files.first { $0.path == m } ?? Bubble.guess(m)) }
             Rectangle().fill(LinkedIn.line).frame(height: 1).padding(.horizontal, 12).padding(.top, 8)
             LinkedInActions().padding(.horizontal, 4)
             if let first = post.firstComment { firstComment(first) }

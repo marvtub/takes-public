@@ -219,7 +219,8 @@ struct NewComment: View {
             Button("Save") {
                 saving = true
                 Task {
-                    if await save(text.trimmingCharacters(in: .whitespacesAndNewlines)) { dismiss() } else { failed = true }
+                    // Saved: the kept draft goes too, or the next comment opened with this one's words.
+                    if await save(text.trimmingCharacters(in: .whitespacesAndNewlines)) { text = ""; dismiss() } else { failed = true }
                     saving = false
                 }
             }

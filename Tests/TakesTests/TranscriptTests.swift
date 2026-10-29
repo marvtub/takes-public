@@ -73,8 +73,10 @@ import Testing
         #expect(!FileManager.default.fileExists(atPath: s.appending(path: "take-01-camera.words.json").path))
     }
 
-    /// Real speech through Apple's model: the words and their times come out in order.
+    /// Real speech through Apple's model: the words and their times come out in order. Off by default
+    /// like SpokenFollowTests (it tests the OS model, and may download it): `TAKES_SPEECH=1`.
     @Test func transcribesSpeech() async throws {
+        guard ProcessInfo.processInfo.environment["TAKES_SPEECH"] != nil else { return }
         guard #available(macOS 26, *) else { return }
         let d = try tempDir()
         defer { try? FileManager.default.removeItem(at: d) }

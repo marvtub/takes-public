@@ -61,6 +61,7 @@ final class ScreenPill {
             panel = p
         }
         p.orderFrontRegardless()
+        app.screenPillOpen = true
         syncBubble()
         if hidden.isEmpty { putAway() }
         // Not under tests: listing windows asks for screen recording access.
@@ -106,6 +107,7 @@ final class ScreenPill {
         guard let app, app.phase == .idle else { return }
         panel?.orderOut(nil)
         bubble?.orderOut(nil)
+        app.screenPillOpen = false
         app.mode = .camera
         app.screen.windowID = nil
         bringBack()

@@ -11,13 +11,8 @@ struct TimelineDragTests {
     @Test func plainDragScrubs() {
         #expect(!ReviewBar.picksRange(commentMode: false, modifiers: []))
         #expect(!ReviewBar.picksRange(commentMode: false, modifiers: [.shift]))
-    }
-
-    @Test func commentModeDragPicksRange() {
+        // Comment mode or ⌥ picks a range.
         #expect(ReviewBar.picksRange(commentMode: true, modifiers: []))
-    }
-
-    @Test func optionDragPicksRange() {
         #expect(ReviewBar.picksRange(commentMode: false, modifiers: [.option]))
     }
 }
@@ -35,9 +30,7 @@ struct AssetPickTests {
         // Click a, then ⌘-click b: both.
         #expect(AssetPick.click(b, picked: [], anchor: a, command: true, shift: false) == [a, b])
         #expect(AssetPick.click(c, picked: [a, b], anchor: b, command: true, shift: false) == [a, b, c])
-    }
-
-    @Test func shiftClickAddsToo() {
+        // ⇧-click adds too.
         #expect(AssetPick.click(c, picked: [a], anchor: a, command: false, shift: true) == [a, c])
     }
 
@@ -64,18 +57,6 @@ struct IdleTests {
         #expect(CameraRecorder().paused)
     }
 
-    @Test func cameraStopsWhileAFilePlaysOverIt() {
-        #expect(AppModel.holdsCamera(idle: true, preview: true, seen: true))
-    }
-
-    @Test func cameraStopsWhenNoWindowShowsIt() {
-        #expect(AppModel.holdsCamera(idle: true, preview: false, seen: false))
-    }
-
-    @Test func cameraRunsWhenLive() {
-        #expect(!AppModel.holdsCamera(idle: true, preview: false, seen: true))
-    }
-
     // 2026-10-11: Assets and Sound hid the camera, but it and the mic meter kept running.
     @Test func assetsAndSoundCoverTheCameraUntilAFileOpens() {
         #expect(DetailView.covers("assets", previewing: false))
@@ -86,6 +67,10 @@ struct IdleTests {
 
     @Test func recordingAndCountdownKeepTheCamera() {
         #expect(!AppModel.holdsCamera(idle: false, preview: true, seen: false))
+        // The camera stops while a file plays over it, or when no window shows it, and runs when live.
+        #expect(AppModel.holdsCamera(idle: true, preview: true, seen: true))
+        #expect(AppModel.holdsCamera(idle: true, preview: false, seen: false))
+        #expect(!AppModel.holdsCamera(idle: true, preview: false, seen: true))
     }
 
     @Test func playheadRate() {
@@ -125,13 +110,12 @@ struct IdleTests {
             Thread.isMainThread ? seen.hit() : offMain.hit()
         }
         defer { NotificationCenter.default.removeObserver(token) }
-        // The stream starts on its own queue, and fseventsd can take seconds to start it and to send
-        // an event: one write 300 ms in was missed in about 1 run in 6 (2026-10-20). Write again
-        // every half second and wait up to 20 s (one run needed 7 s on a busy Mac).
-        for i in 0..<200 where !seen.value {
-            if i % 5 == 0 { try Data("x\(i)".utf8).write(to: dir.appending(path: "comments.json")) }
-            try await Task.sleep(for: .milliseconds(100))
-        }
+        // Write only once the stream runs: a write before it is never seen (one 300 ms in was missed
+        // in 1 run in 6, 2026-10-20). fseventsd can still take seconds to send it on a busy Mac.
+        await withCheckedContinuation { c in watch.started { c.resume() } }
+        try Data("x".utf8).write(to: dir.appending(path: "comments.json"))
+        let end = Date().addingTimeInterval(30)
+        while !seen.value && Date() < end { try await Task.sleep(for: .milliseconds(50)) }
         #expect(seen.value)
         #expect(!offMain.value)
     }
@@ -154,12 +138,12 @@ struct ComposerTests {
         draft = nil                                   // sent
         composer.wrappedValue = ReviewPlayer.Draft(text: "cut this")  // late write-back
         #expect(draft == nil)
-    }
-
-    @Test func typingStillUpdatesTheDraft() {
-        var draft: ReviewPlayer.Draft? = ReviewPlayer.Draft()
-        let composer = Composer.bind(Binding(get: { draft }, set: { draft = $0 }), ReviewPlayer.Draft())
-        composer.wrappedValue.text = "tighter"
-        #expect(draft?.text == "tighter")
+        // Typing still updates the draft.
+        do {
+            var draft: ReviewPlayer.Draft? = ReviewPlayer.Draft()
+            let composer = Composer.bind(Binding(get: { draft }, set: { draft = $0 }), ReviewPlayer.Draft())
+            composer.wrappedValue.text = "tighter"
+            #expect(draft?.text == "tighter")
+        }
     }
 }

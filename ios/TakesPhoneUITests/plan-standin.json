@@ -1,0 +1,417 @@
+{
+  "choices" : [
+    {
+      "done" : false,
+      "id" : "Proj/Why I film on my phone",
+      "project" : "Proj",
+      "title" : "Why I film on my phone"
+    },
+    {
+      "done" : false,
+      "id" : "Proj/Teleprompter tricks",
+      "project" : "Proj",
+      "title" : "Teleprompter tricks"
+    },
+    {
+      "done" : false,
+      "id" : "Proj/Three cheap formats",
+      "project" : "Proj",
+      "title" : "Three cheap formats"
+    },
+    {
+      "done" : false,
+      "id" : "Proj/Mic test",
+      "project" : "Proj",
+      "title" : "Mic test"
+    },
+    {
+      "done" : false,
+      "id" : "Proj/Office tour",
+      "project" : "Proj",
+      "title" : "Office tour"
+    }
+  ],
+  "first" : {
+    "days" : [
+
+    ],
+    "goal" : 0,
+    "headline" : "Your plan is set.",
+    "level" : "Pick a day to start",
+    "maxWeeks" : 12,
+    "minWeeks" : 2,
+    "note" : "No takes yet this week.",
+    "perMonth" : "Pick at least one day.",
+    "rank" : 0,
+    "ready" : [
+
+    ],
+    "restWords" : "1 rest week free this month. Miss a week? One rest week a month keeps your streak.",
+    "streak" : 0,
+    "streakWords" : "Reach your posting goal this week to start one",
+    "stripTitle" : "Next two weeks",
+    "subtitle" : "Show up on the days you choose",
+    "summary" : "0 of 0 posting days have a video",
+    "weekCount" : 2,
+    "weeks" : [
+
+    ]
+  },
+  "plan" : {
+    "crown" : {
+      "label" : "Your best post ever",
+      "platform" : "LinkedIn",
+      "reach" : "4.8k",
+      "session" : "Proj/Why I film on my phone",
+      "title" : "Why I film on my phone",
+      "week" : 6
+    },
+    "days" : [
+      {
+        "cards" : [
+          {
+            "id" : "Proj/Why I film on my phone",
+            "late" : false,
+            "status" : "posted",
+            "statusText" : "Posted",
+            "step" : 4,
+            "title" : "Why I film on my phone"
+          }
+        ],
+        "day" : "2026-10-07",
+        "label" : "Today",
+        "open" : false,
+        "planned" : false,
+        "today" : true
+      },
+      {
+        "cards" : [
+
+        ],
+        "day" : "2026-10-08",
+        "filled" : "Mic test",
+        "label" : "Thu 8",
+        "open" : false,
+        "planned" : true,
+        "today" : false
+      },
+      {
+        "cards" : [
+
+        ],
+        "day" : "2026-10-09",
+        "label" : "Fri 9",
+        "open" : false,
+        "planned" : false,
+        "today" : false
+      },
+      {
+        "cards" : [
+
+        ],
+        "day" : "2026-10-10",
+        "label" : "Sat 10",
+        "open" : false,
+        "planned" : false,
+        "today" : false
+      },
+      {
+        "cards" : [
+
+        ],
+        "day" : "2026-10-11",
+        "label" : "Sun 11",
+        "open" : false,
+        "planned" : false,
+        "today" : false
+      },
+      {
+        "cards" : [
+
+        ],
+        "day" : "2026-10-12",
+        "label" : "Mon 12",
+        "open" : false,
+        "planned" : false,
+        "today" : false
+      },
+      {
+        "cards" : [
+          {
+            "id" : "Proj/Teleprompter tricks",
+            "late" : false,
+            "status" : "scheduled",
+            "statusText" : "Scheduled Thu 8:02 AM",
+            "step" : 1,
+            "title" : "Teleprompter tricks"
+          },
+          {
+            "id" : "Proj/Three cheap formats",
+            "late" : false,
+            "step" : 1,
+            "title" : "Three cheap formats"
+          }
+        ],
+        "day" : "2026-10-13",
+        "label" : "Tue 13",
+        "open" : false,
+        "planned" : true,
+        "today" : false
+      },
+      {
+        "cards" : [
+
+        ],
+        "day" : "2026-10-14",
+        "label" : "Wed 14",
+        "open" : false,
+        "planned" : false,
+        "today" : false
+      },
+      {
+        "cards" : [
+
+        ],
+        "day" : "2026-10-15",
+        "label" : "Thu 15",
+        "open" : false,
+        "planned" : true,
+        "today" : false
+      },
+      {
+        "cards" : [
+
+        ],
+        "day" : "2026-10-16",
+        "label" : "Fri 16",
+        "open" : false,
+        "planned" : false,
+        "today" : false
+      },
+      {
+        "cards" : [
+
+        ],
+        "day" : "2026-10-17",
+        "label" : "Sat 17",
+        "open" : false,
+        "planned" : false,
+        "today" : false
+      },
+      {
+        "cards" : [
+
+        ],
+        "day" : "2026-10-18",
+        "label" : "Sun 18",
+        "open" : false,
+        "planned" : false,
+        "today" : false
+      },
+      {
+        "cards" : [
+
+        ],
+        "day" : "2026-10-19",
+        "label" : "Mon 19",
+        "open" : false,
+        "planned" : false,
+        "today" : false
+      },
+      {
+        "cards" : [
+
+        ],
+        "day" : "2026-10-20",
+        "label" : "Tue 20",
+        "open" : true,
+        "planned" : true,
+        "today" : false
+      },
+      {
+        "cards" : [
+
+        ],
+        "day" : "2026-10-21",
+        "label" : "Wed 21",
+        "open" : false,
+        "planned" : false,
+        "today" : false
+      },
+      {
+        "cards" : [
+
+        ],
+        "day" : "2026-10-22",
+        "label" : "Thu 22",
+        "open" : true,
+        "planned" : true,
+        "today" : false
+      },
+      {
+        "cards" : [
+
+        ],
+        "day" : "2026-10-23",
+        "label" : "Fri 23",
+        "open" : false,
+        "planned" : false,
+        "today" : false
+      },
+      {
+        "cards" : [
+
+        ],
+        "day" : "2026-10-24",
+        "label" : "Sat 24",
+        "open" : false,
+        "planned" : false,
+        "today" : false
+      },
+      {
+        "cards" : [
+
+        ],
+        "day" : "2026-10-25",
+        "label" : "Sun 25",
+        "open" : false,
+        "planned" : false,
+        "today" : false
+      },
+      {
+        "cards" : [
+
+        ],
+        "day" : "2026-10-26",
+        "label" : "Mon 26",
+        "open" : false,
+        "planned" : false,
+        "today" : false
+      },
+      {
+        "cards" : [
+
+        ],
+        "day" : "2026-10-27",
+        "label" : "Tue 27",
+        "open" : true,
+        "planned" : true,
+        "today" : false
+      }
+    ],
+    "goal" : 2,
+    "headline" : "Your next 3 posting days have a video. Next free one: Tue, Oct 20.",
+    "level" : "The sweet spot",
+    "maxWeeks" : 12,
+    "minWeeks" : 2,
+    "note" : "No takes yet this week.",
+    "perMonth" : "That's 2 posts a week, about 9 a month.",
+    "plan" : {
+      "days" : [
+        "tue",
+        "thu"
+      ],
+      "platforms" : [
+        "linkedin"
+      ],
+      "time" : "08:02",
+      "weeks" : 3
+    },
+    "rank" : 2,
+    "ready" : [
+
+    ],
+    "restWords" : "1 rest week free this month. Miss a week? One rest week a month keeps your streak.",
+    "streak" : 2,
+    "streakWords" : "1 more post this week adds week 3",
+    "stripTitle" : "Next 3 weeks",
+    "subtitle" : "Tue, Thu at 8:02 AM",
+    "summary" : "3 videos planned · 3 of 6 posting days have a video",
+    "weekCount" : 3,
+    "weeks" : [
+      {
+        "label" : "Aug 23",
+        "now" : false,
+        "planned" : 0,
+        "posted" : 0,
+        "scheduled" : 0,
+        "words" : "Week of Aug 23: no videos"
+      },
+      {
+        "label" : "Aug 30",
+        "now" : false,
+        "planned" : 0,
+        "posted" : 0,
+        "scheduled" : 0,
+        "words" : "Week of Aug 30: no videos"
+      },
+      {
+        "label" : "Sep 6",
+        "now" : false,
+        "planned" : 0,
+        "posted" : 0,
+        "scheduled" : 0,
+        "words" : "Week of Sep 6: no videos"
+      },
+      {
+        "label" : "Sep 13",
+        "now" : false,
+        "planned" : 0,
+        "posted" : 0,
+        "scheduled" : 0,
+        "words" : "Week of Sep 13: no videos"
+      },
+      {
+        "label" : "Sep 20",
+        "link" : "counted",
+        "now" : false,
+        "planned" : 0,
+        "posted" : 0,
+        "scheduled" : 0,
+        "words" : "Week of Sep 20: no videos"
+      },
+      {
+        "label" : "Sep 27",
+        "link" : "counted",
+        "now" : false,
+        "planned" : 0,
+        "posted" : 0,
+        "scheduled" : 0,
+        "words" : "Week of Sep 27: no videos"
+      },
+      {
+        "label" : "Oct 4",
+        "link" : "open",
+        "now" : true,
+        "planned" : 1,
+        "posted" : 1,
+        "scheduled" : 0,
+        "words" : "This week: 1 posted, 1 planned"
+      },
+      {
+        "label" : "Oct 11",
+        "now" : false,
+        "planned" : 1,
+        "posted" : 0,
+        "scheduled" : 1,
+        "words" : "Week of Oct 11: 1 scheduled, 1 planned"
+      },
+      {
+        "label" : "Oct 18",
+        "now" : false,
+        "planned" : 0,
+        "posted" : 0,
+        "scheduled" : 0,
+        "words" : "Week of Oct 18: no videos"
+      },
+      {
+        "label" : "Oct 25",
+        "now" : false,
+        "planned" : 0,
+        "posted" : 0,
+        "scheduled" : 0,
+        "words" : "Week of Oct 25: no videos"
+      }
+    ]
+  }
+}

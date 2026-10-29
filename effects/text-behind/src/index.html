@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <!-- Text behind: a huge headline word rises up BEHIND the speaker's head.
+         Three layers: the footage (dimmed), the word, then the speaker cut out of the same footage
+         on top. The footage pulls back into a dark frame first, so a close-up has room above the head.
+         Inputs next to this file: footage.mp4 (the part of the cut the effect covers, at the frame size) and
+         person.webm (the speaker with a transparent background, from `hyperframes remove-background`).
+         The frame size is data-width / data-height on #root: in a tall or square frame the word sits above
+         the head; in a wide frame (16:9) it sits beside the head, its inner end just behind it.
+         Edit TEXT, LOOK and AT below. The video is as long as footage.mp4. -->
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+    <style>
+      @font-face { font-family: "Montserrat"; src: url("fonts/Montserrat-Variable.ttf"); font-weight: 100 900; }
+      @font-face { font-family: "Inter"; src: url("fonts/Inter-SemiBold.ttf"); font-weight: 600; }
+      :root { --canvas: #0c0c0e; --ink: #f7f5f2; --accent: #ff9a4d; }
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      html, body { width: 100%; height: 100%; overflow: hidden; background: var(--canvas); }
+      #root { position: relative; width: 100%; height: 100%; overflow: hidden; background: var(--canvas); }
+      /* Two stages with the same transform: footage under the word, the speaker over it. */
+      .stage { position: absolute; inset: 0; transform-origin: 50% 100%; overflow: hidden; border-radius: 0; }
+      .stage video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+      .matte { position: absolute; inset: 0; filter: url(#choke); }
+      #dim { position: absolute; inset: 0; background: #000; opacity: 0; }
+      #headline { position: absolute; left: 0; right: 0; top: 0; display: flex; flex-direction: column; align-items: center; }
+      #headline.side { right: auto; }
+      #kicker { font-family: "Inter", sans-serif; font-weight: 600; font-size: 34px; letter-spacing: 0.22em;
+                text-transform: uppercase; color: var(--accent); white-space: nowrap; }
+      #word { font-family: "Montserrat", sans-serif; font-weight: 900; line-height: 0.82; letter-spacing: -0.045em;
+              color: var(--ink); white-space: nowrap; margin-top: 18px; }
+      .ch { display: inline-block; }
+    </style>
+  </head>
+  <body>
+    <div id="root" data-composition-id="main" data-start="0" data-width="1080" data-height="1920">
+      <div class="stage" id="back">
+        <video id="footage" class="clip" src="footage.mp4" muted playsinline data-start="0" data-track-index="0"></video>
+        <div id="dim"></div>
+      </div>
+      <div id="headline"><div id="kicker"></div><div id="word"></div></div>
+      <div class="stage" id="front">
+        <div class="matte">
+          <video id="person" class="clip" src="person.webm" muted playsinline data-start="0" data-track-index="1"></video>
+        </div>
+      </div>
+      <!-- Tightens the cutout's soft edge, so no light rim of the old background shows around the hair. -->
+      <svg width="0" height="0" style="position: absolute">
+        <filter id="choke"><feComponentTransfer><feFuncA type="linear" slope="1.7" intercept="-0.55" /></feComponentTransfer></filter>
+      </svg>
+    </div>
+    <script>
+      // The words. Keep WORD short (1 to 5 characters reads best: "20K", "3X", "NO").
+      const TEXT = { kicker: "Followers in 30 days", word: "20K" };
+      // PULL: how far the footage pulls back (1 = not at all; use 1 when the shot has room above the
+      // head). DIM: how dark the background gets behind the word (0 to 1). SIZE: the word in px and
+      // TOP: where the top of the kicker sits, both for a 1080x1920 frame (other frames scale them).
+      // SIDE (wide frames only): the side of the head the word sits on, and END: where its inner end
+      // sits, as a part of the frame width from that side (0.47 = just behind the head in a centred shot).
+      const LOOK = { pull: 0.82, dim: 0.55, size: 455, top: 104, side: "left", end: 0.47 };
+      // When things happen, in seconds of footage.mp4. out = when the word starts to leave.
+      const AT = { pull: 0.1, word: 0.45, out: 4.7 };
+
+      const root = document.getElementById("root");
+      const FRAME = { w: Number(root.dataset.width), h: Number(root.dataset.height) };
+      // Wide: the word beside the head. Tall and square: above it, scaled to the frame (1 at 1080x1920).
+      const wide = FRAME.w >= FRAME.h * 1.3;
+      const k = wide ? FRAME.h / 1080 : Math.min(FRAME.w / 1080, (FRAME.h / 1920) * 1.35);
+      document.getElementById("kicker").textContent = TEXT.kicker;
+      const word = document.getElementById("word"), head = document.getElementById("headline");
+      word.style.fontSize = LOOK.size * k + "px";
+      const chars = [...TEXT.word].map((c) => {
+        const s = document.createElement("span"); s.className = "ch"; s.textContent = c; word.appendChild(s); return s;
+      });
+      if (k !== 1) {
+        document.getElementById("kicker").style.fontSize = 34 * k + "px";
+        word.style.marginTop = 18 * k + "px";
+      }
+      if (!wide) head.style.top = LOOK.top * k + "px";
+      else {
+        // Beside the head: the word's inner end sits at LOOK.end of the width; it shrinks to keep 80 px from the edge.
+        // It is measured once the fonts are in.
+        head.classList.add("side");
+        head.style.alignItems = LOOK.side === "left" ? "flex-start" : "flex-end";
+      }
+      document.fonts.load(`900 ${LOOK.size * k}px Montserrat`).then(() => document.fonts.ready).then(build);
+
+      function build() {
+      if (wide) {
+        const room = FRAME.w * LOOK.end - 80 * k;
+        if (word.offsetWidth > room) word.style.fontSize = (LOOK.size * k * room) / word.offsetWidth + "px";
+        const edge = FRAME.w * LOOK.end - head.offsetWidth;
+        head.style.left = (LOOK.side === "left" ? edge : FRAME.w - FRAME.w * LOOK.end) + "px";
+        head.style.top = (FRAME.h - head.offsetHeight) / 2 - 40 * k + "px";
+      }
+      const tl = gsap.timeline({ paused: true });
+      const stages = [".stage"];
+      // In: pull back and dim (0.7 s), then the word rises letter by letter, then the kicker.
+      tl.fromTo(stages, { scale: 1, borderRadius: 0 }, { scale: LOOK.pull, borderRadius: 44, duration: 0.7, ease: "power3.out" }, AT.pull);
+      tl.fromTo("#dim", { opacity: 0 }, { opacity: LOOK.dim, duration: 0.7, ease: "power2.out" }, AT.pull);
+      tl.fromTo(chars, { y: 220 * k, opacity: 0 }, { y: 0, opacity: 1, duration: 0.75, ease: "power4.out", stagger: 0.07 }, AT.word);
+      tl.fromTo("#kicker", { y: 24 * k, opacity: 0 }, { y: 0, opacity: 1, duration: 0.45, ease: "power3.out" }, AT.word + 0.35);
+      // Out: about half as long, ease in. The word sinks back behind the head, then the frame returns.
+      tl.to("#kicker", { opacity: 0, y: -12, duration: 0.25, ease: "power2.in" }, AT.out);
+      tl.to(chars, { y: 220 * k, opacity: 0, duration: 0.35, ease: "power3.in", stagger: 0.03 }, AT.out);
+      tl.to("#dim", { opacity: 0, duration: 0.35, ease: "power2.in" }, AT.out + 0.3);
+      tl.to(stages, { scale: 1, borderRadius: 0, duration: 0.4, ease: "power3.in" }, AT.out + 0.3);
+      window.__timelines["main"] = tl;
+      }
+    </script>
+  </body>
+</html>

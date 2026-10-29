@@ -79,6 +79,18 @@ class ElevenLabs(unittest.TestCase):
     def test_without_a_default_voice_it_says_where_to_pick_one(self):
         with self.assertRaisesRegex(ValueError, "Plugins › Voices"):
             t.t_voiceover({"session": self.s, "text": "Hi"})
+        # Without a key it says where to put it.
+        t.eleven_http = self.real
+        old = os.environ.pop("ELEVENLABS_API_KEY", None)
+        home = os.environ.get("HOME")
+        os.environ["HOME"] = self.root  # no ~/.claude/.env
+        try:
+            with self.assertRaisesRegex(ValueError, "Plugins › Voices"):
+                t.t_voices({"set_default": "x"})
+        finally:
+            os.environ["HOME"] = home
+            if old:
+                os.environ["ELEVENLABS_API_KEY"] = old
 
     def test_a_voice_is_found_by_the_start_of_its_name_and_becomes_the_default(self):
         r = t.t_voices({"set_default": "nora"})
@@ -166,19 +178,6 @@ class ElevenLabs(unittest.TestCase):
                          ["generated/voice-anna-%d.mp3" % i for i in (1, 2, 3)])
         r = t.t_design_voice({"save": "g1", "name": "Anna", "set_default": True})
         self.assertEqual(r["default"], {"id": "v-new", "name": "Anna"})
-
-    def test_no_key_says_where_to_put_it(self):
-        t.eleven_http = self.real
-        old = os.environ.pop("ELEVENLABS_API_KEY", None)
-        home = os.environ.get("HOME")
-        os.environ["HOME"] = self.root  # no ~/.claude/.env
-        try:
-            with self.assertRaisesRegex(ValueError, "Plugins › Voices"):
-                t.t_voices({"set_default": "x"})
-        finally:
-            os.environ["HOME"] = home
-            if old:
-                os.environ["ELEVENLABS_API_KEY"] = old
 
 
 if __name__ == "__main__":

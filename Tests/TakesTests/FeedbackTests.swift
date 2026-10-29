@@ -53,22 +53,21 @@ struct FeedbackTests {
         #expect(st.weeks.count == 12)
         #expect(st.weeks.map(\.comments).reduce(0, +) == 8)
         #expect(st.unlabeled == 0)
-    }
-
-    /// Built-in check failures (2026-10-11) count apart from the rules'; old entries count as before.
-    @Test func builtinChecksCountApart() throws {
-        let (root, s) = try library()
-        defer { try? FileManager.default.removeItem(at: root) }
-        try Data(#"""
-        {"edits/a-v1.mp4": {"at": "x", "results": [{"rule": "cut-1", "pass": false}]},
-         "edits/a-v2.mp4": {"v": 2, "mtime": 1, "results": [{"check": "echo", "pass": false, "label": "Echo"},
-           {"check": "words", "pass": null, "skip": "x"}, {"check": "streams", "pass": true},
-           {"rule": "sound-1", "text": "Loud.", "pass": false}]}}
-        """#.utf8).write(to: s.appending(path: "checks.json"))
-        let st = FeedbackStats.scan(root, rules: [])
-        #expect(st.checksRun == 2)
-        #expect(st.checksCaught == 2)
-        #expect(st.builtinCaught == 1)
+        // Built-in check failures count apart from the rules'; old entries count as before.
+        do {
+            let (root, s) = try library()
+            defer { try? FileManager.default.removeItem(at: root) }
+            try Data(#"""
+            {"edits/a-v1.mp4": {"at": "x", "results": [{"rule": "cut-1", "pass": false}]},
+             "edits/a-v2.mp4": {"v": 2, "mtime": 1, "results": [{"check": "echo", "pass": false, "label": "Echo"},
+               {"check": "words", "pass": null, "skip": "x"}, {"check": "streams", "pass": true},
+               {"rule": "sound-1", "text": "Loud.", "pass": false}]}}
+            """#.utf8).write(to: s.appending(path: "checks.json"))
+            let st = FeedbackStats.scan(root, rules: [])
+            #expect(st.checksRun == 2)
+            #expect(st.checksCaught == 2)
+            #expect(st.builtinCaught == 1)
+        }
     }
 
     /// A rule from the board is yours; an edit makes an agent's rule yours; a full area takes no more.
@@ -175,6 +174,16 @@ struct FeedbackTests {
         #expect(raw.contains("\"merged_into\" : \"cut-1\""))
         #expect(raw.contains("\"was\" : \"A.\""))
         #expect(rule(root, "cut-2")?.merge == RuleMerge(into: "cut-1", text: "A and B.", was: "A."))
+        // Details can be edited and cleared.
+        do {
+            let (root, _) = try library()
+            defer { try? FileManager.default.removeItem(at: root) }
+            Lessons.add(root, area: "cut", text: "Tight.")
+            Lessons.edit(root, "cut-1") { $0.details = "x" }
+            #expect(rule(root, "cut-1")?.details == "x")
+            Lessons.edit(root, "cut-1") { $0.details = nil }
+            #expect(!(try String(contentsOf: Lessons.file(root, area: "cut"), encoding: .utf8)).contains("details"))
+        }
     }
 
     /// Merge: the other rule gets the merged text and the comments, keeps its owner; this one turns off.
@@ -290,16 +299,6 @@ struct FeedbackTests {
                                        merge: RuleMerge(into: "cut-2", text: "Both.", was: "Rule 2.")))
         }
         #expect(Lessons.add(root, area: "cut", text: "One more.")?.id == "cut-14")
-    }
-
-    @Test func detailsEditAndClear() throws {
-        let (root, _) = try library()
-        defer { try? FileManager.default.removeItem(at: root) }
-        Lessons.add(root, area: "cut", text: "Tight.")
-        Lessons.edit(root, "cut-1") { $0.details = "x" }
-        #expect(rule(root, "cut-1")?.details == "x")
-        Lessons.edit(root, "cut-1") { $0.details = nil }
-        #expect(!(try String(contentsOf: Lessons.file(root, area: "cut"), encoding: .utf8)).contains("details"))
     }
 }
 

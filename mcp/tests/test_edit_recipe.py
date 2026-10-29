@@ -792,6 +792,12 @@ class Render(Base):
         job = jload(os.path.join(self.s, ".jobs", r["job"] + ".json"))
         self.assertEqual(job["label"], "New version of hook")
         self.assertEqual(job["stage"], t.RENDER_DONE)
+        # get_job and check_edit know a render.
+        b = t.t_get_job({"id": r["job"]})
+        self.assertIn("publish_edit render=%s" % r["job"], b["next"])
+        self.assertEqual(b["result"]["render"], r["render"])
+        c = t.t_check_edit({"session": self.s, "file": r["render"]})
+        self.assertEqual(c["file"], r["render"])
         out = t.t_publish_edit({"session": self.s, "render": r["job"], "note": "First cut.",
                                 "accept": [{"rule": x.split(" ")[0], "why": "Music under the voice."}
                                            for x in r["checks"].get("failed", [])]})
@@ -840,15 +846,6 @@ class Render(Base):
         out = os.path.join(self.s, r["render"])
         self.assertGreater(rgb_at(out, 0.5)[1], 40)  # the green half covers the take's black picture
         self.assertTrue(os.path.exists(os.path.join(self.s, "_edit/hook/words.json")))
-
-    def test_get_job_and_check_edit_know_a_render(self):
-        self.add_take()
-        r = self.render(recipe={"name": "hook", "cut": self.CUT})
-        b = t.t_get_job({"id": r["job"]})
-        self.assertIn("publish_edit render=%s" % r["job"], b["next"])
-        self.assertEqual(b["result"]["render"], r["render"])
-        c = t.t_check_edit({"session": self.s, "file": r["render"]})
-        self.assertEqual(c["file"], r["render"])
 
     def test_a_session_renamed_during_the_render(self):
         self.add_take()

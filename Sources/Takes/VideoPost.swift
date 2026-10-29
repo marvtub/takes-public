@@ -214,12 +214,22 @@ struct VerticalCard: View {
     let onComment: () -> Void
     let onExpand: () -> Void
     var onCollapse: () -> Void = {}
+    /// The photo post in place of the video (Carousel.swift): the phone for a place and a height.
+    var photos: ((VerticalPlace, CGFloat) -> AnyView)? = nil
+    /// Under the card while the photos are on: what to know before posting them.
+    var notes: [String] = []
     @AppStorage("verticalPreview") private var previewRaw = VerticalPlace.tiktok.rawValue
     @AppStorage("linkedinName") private var name = "You"
     /// The app's own mode: the card below draws light like the feeds, the empty frame does not.
     @Environment(\.colorScheme) private var scheme
 
-    private var preview: VerticalPlace { VerticalPlace(rawValue: previewRaw) ?? .tiktok }
+    private var preview: VerticalPlace {
+        let p = VerticalPlace(rawValue: previewRaw) ?? .tiktok
+        // Shorts has no photo posts: the photos show as TikTok shows them.
+        return photos != nil && !previewPlaces.contains(p) ? .tiktok : p
+    }
+    /// The places the switch under the phone offers: photos go to TikTok and Instagram only.
+    private var previewPlaces: [VerticalPlace] { photos == nil ? VerticalPlace.allCases : [.tiktok, .reels] }
 
     var body: some View {
         ViewThatFits(in: .horizontal) {
@@ -237,7 +247,10 @@ struct VerticalCard: View {
 
     private var phoneColumn: some View {
         VStack(spacing: 16) {
-            if media == nil {
+            if let photos {
+                photos(preview, phoneHeight)
+                placePicker
+            } else if media == nil {
                 VerticalEmpty(height: phoneHeight).environment(\.colorScheme, scheme)
             } else {
                 VerticalPhone(place: preview, media: media, name: name, caption: text, title: title, height: phoneHeight)
@@ -250,7 +263,7 @@ struct VerticalCard: View {
 
     private var placePicker: some View {
         HStack(spacing: 2) {
-            ForEach(VerticalPlace.allCases) { p in
+            ForEach(previewPlaces) { p in
                 Button { withAnimation(Theme.spring) { previewRaw = p.rawValue } } label: {
                     HStack(spacing: 6) {
                         PlatformLogo(platform: p.logo, size: 14)
@@ -288,6 +301,16 @@ struct VerticalCard: View {
             }
             Divider()
             goesTo.padding(.horizontal, 20).padding(.vertical, 16)
+            ForEach(notes, id: \.self) { n in
+                HStack(alignment: .top, spacing: 10) {
+                    Image(systemName: "exclamationmark.circle.fill").foregroundStyle(Theme.warn)
+                    Text(n).font(YouTube.font(12.5)).foregroundStyle(YouTube.ink).fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(.horizontal, 12).padding(.vertical, 10)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Theme.warn.opacity(0.12), in: RoundedRectangle(cornerRadius: 10))
+                .padding(.horizontal, 20).padding(.bottom, 12)
+            }
         }
         .background(.white, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).strokeBorder(Theme.border))

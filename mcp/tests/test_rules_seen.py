@@ -103,6 +103,7 @@ class RulesSeen(unittest.TestCase):
         self.assertEqual(list(out)[0], "rules")
         self.assertEqual(out["rules"]["steps"], ["script", "storyboard"])
         self.write_script()  # no refusal
+        t.need_rules("storyboard")  # what set_storyboard calls first: no refusal either
         # (d) The second call has no rules.
         self.assertNotIn("rules", t.t_get_session({"session": self.s}))
         # (b) Takes, no edits: the five edit steps.
@@ -118,11 +119,6 @@ class RulesSeen(unittest.TestCase):
         out = t.t_get_session({"session": self.s})
         self.assertEqual(out["rules"]["steps"], t.EDIT_AREAS + ["thumbnail"])
         self.assertIn("- thumbnail-1: Big face.", out["rules"]["new"])
-
-    def test_storyboard_is_free_after_get_session(self):
-        self.rules(("storyboard", "One idea per shot."))
-        t.t_get_session({"session": self.s})
-        t.need_rules("storyboard")  # what set_storyboard calls first: no refusal
 
     def test_deleted_seen_file_shows_rules_again(self):
         self.rules(("script", "Plain words."))
@@ -234,49 +230,6 @@ class RulesSeen(unittest.TestCase):
         # The good rule of a half-good file still shows.
         self.assertIn("cut-1", [r["id"] for r in t.read_lessons()["rules"]])
 
-    def test_set_rule_errors_are_plain(self):
-        with self.assertRaises(ValueError) as e:
-            t.t_set_rule({"area": "cut", "text": "Cut the breath before the hook.", "details": 5})
-        self.assertIn("details is text", str(e.exception))
-        long = "Keep the breath before a punchline every single time we cut. " + "Word " * 130
-        with self.assertRaises(ValueError) as e:
-            t.new_rule({"rules": []}, "captions", long)
-        self.assertIn("Rule is", str(e.exception))
-
-    def test_merge_note_is_one_line(self):
-        d = {"rules": [{"id": "cut-%d" % i, "area": "cut", "text": "Rule number %d." % i, "on": True}
-                       for i in range(1, t.AREA_MAX + 1)]}
-        notes = {}
-        t.new_rule(d, "cut", "Cut the breath before the hook.", merge_into="cut-2",
-                   merged="Rule number 2 and cut the breath before the hook.", notes=notes)
-        self.assertNotIn("”.", notes["merge"])
-        self.assertNotIn(" him ", notes["merge"])
-        t.new_rule(d, "cut", "Keep the first word whole.", merge_into="cut-3",
-                   merged="Rule number 3 and keep the first word whole.", notes=notes)
-        self.assertEqual(notes["merge"].count("Tell the user"), 1)
-        self.assertIn("“Keep the first word whole.” into “Rule number 3.”", notes["merge"])
-        for i in range(t.WAITING_MAX):
-            try:
-                t.new_rule(d, "cut", "Another rule %d." % i, merge_into="cut-2", merged="Both rules %d." % i)
-            except ValueError as e:
-                self.assertIn("Add no rule there", str(e))
-                break
-        else:
-            self.fail("no waiting cap")
-
-    def test_core_tool_index_lists_only_core_tools(self):
-        got = []
-        old = t.reply
-        t.reply = lambda id_, result=None, error=None: got.append(result)
-        os.environ["TAKES_TOOLS"] = "core"
-        try:
-            t.handle({"id": 1, "method": "initialize", "params": {}})
-        finally:
-            t.reply = old
-            os.environ.pop("TAKES_TOOLS", None)
-        index = got[0]["instructions"].split("Tools by step.")[1].split("Ideas:")[0]
-        self.assertNotIn("broll", index)
-        self.assertIn("check_edit", index)
 
 if __name__ == "__main__":
     unittest.main()

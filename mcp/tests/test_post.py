@@ -34,6 +34,12 @@ class SetPost(unittest.TestCase):
         post = t.t_get_session({"session": self.s})["post"]
         self.assertEqual(post["text"], "Hook line.\n\nBody.\n")
         self.assertIsNone(post["media"])
+        # The post is not an asset, and a comment on it names the whole text.
+        t.t_set_post({"session": self.s, "text": "Hi"})
+        files = [a["file"] for a in t.t_get_session({"session": self.s})["assets"]]
+        self.assertNotIn("posts/linkedin.md", files)
+        view = t.comment_view(self.s, {"id": "c1", "file": "posts/linkedin.md", "text": "shorter"})
+        self.assertEqual(view["when"], "whole text")
 
     def test_media_is_kept_and_checked(self):
         t.t_set_post({"session": self.s, "text": "A", "media": os.path.join(self.s, "edits", "cut-v2.mp4")})
@@ -53,13 +59,6 @@ class SetPost(unittest.TestCase):
             with open(os.path.join(self.s, "posts", "history", n)) as f:
                 texts.append(t.parse_fm(f.read())[1])
         self.assertEqual(texts, ["Claude one\n", "The user edit\n", "Claude two\n"])
-
-    def test_not_an_asset_and_comments_name_it(self):
-        t.t_set_post({"session": self.s, "text": "Hi"})
-        files = [a["file"] for a in t.t_get_session({"session": self.s})["assets"]]
-        self.assertNotIn("posts/linkedin.md", files)
-        view = t.comment_view(self.s, {"id": "c1", "file": "posts/linkedin.md", "text": "shorter"})
-        self.assertEqual(view["when"], "whole text")
 
 
     def write(self, fm):

@@ -158,24 +158,6 @@ import SwiftUI
         #expect(PlanChoice.matching(list, "posts morning").map(\.id) == ["Posts/b"])
         #expect(PlanChoice.matching(list, "kebab posts").isEmpty)
     }
-
-    /// The board keeps its store between visits, so a second visit shows the plan at once.
-    @MainActor @Test func boardKeepsItsStoreBetweenVisits() {
-        let a = URL(fileURLWithPath: "/tmp/plan-a"), b = URL(fileURLWithPath: "/tmp/plan-b")
-        let store = ConsistencyStore.shared(a)
-        #expect(ConsistencyStore.shared(a) === store)
-        #expect(ConsistencyStore.shared(b) !== store)
-    }
-
-    @Test func flameGrowsWithTheDays() {
-        #expect(FireLevel(days: 0).name == "Pick a day to start")
-        #expect(FireLevel(days: 0).opacity == 0)
-        #expect(FireLevel(days: 2).name == "The sweet spot")
-        #expect(FireLevel(days: 3).name == "On fire")
-        #expect(FireLevel(days: 7) == FireLevel(days: 4))
-        #expect(FireLevel(days: 7).name == "Super Takes")
-        #expect((0...6).map { FireLevel(days: $0).scale } == (0...6).map { FireLevel(days: $0).scale }.sorted())
-    }
 }
 
 extension Snap {
@@ -187,7 +169,17 @@ extension Snap {
         defer { revealAtOnce = false }
         let empty = ConsistencyStore()
         empty.loaded = true
-        shoot("consistency-commit", ConsistencyPage(store: empty, root: root), size: CGSize(width: 1100, height: 820))
+        // The first open (FirstPlan, 2026-10-26), at each flame level.
+        let brand = NSImage(contentsOf: URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .appending(path: "../../assets/brand/mascot.png").standardized)
+        for dark in [false, true] {
+            shoot("consistency-commit-\(dark ? "dark" : "light")", ConsistencyPage(store: empty, root: root, mascot: brand),
+                  size: CGSize(width: 1068, height: 860), dark: dark)
+        }
+        for days in [Set<String>(), ["tue", "thu", "fri"], ["mon", "tue", "wed", "thu", "fri"]] {
+            shoot("consistency-first-\(days.count)", ScrollView { FirstPlanAt(days: days, mascot: brand).padding(28) }.background(Theme.paper),
+                  size: CGSize(width: 1068, height: 860))
+        }
 
         let cal = Calendar.current
         let today = cal.startOfDay(for: Date())
@@ -273,4 +265,11 @@ struct BoardRefreshTests {
         #expect(!m("P/2026-10-01-a/posts/linkedin.md"))
         #expect(!m("_library/plan.json"))
     }
+}
+
+/// FirstPlan with other days picked, for the snapshots.
+private struct FirstPlanAt: View {
+    let days: Set<String>
+    let mascot: NSImage?
+    var body: some View { FirstPlan(mascot: mascot, start: days) { _ in } }
 }

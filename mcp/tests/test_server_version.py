@@ -27,8 +27,7 @@ class ServerVersion(unittest.TestCase):
     def test_the_release_tag_wins(self):
         self.plist(ReleaseTag="v2026.10.15", CFBundleShortVersionString="2026.10.14")
         self.assertEqual(t.server_version(self.res), "2026.10.15")
-
-    def test_a_local_build_names_its_version(self):
+        # Without a tag, a local build names its version.
         self.plist(CFBundleShortVersionString="2026.10.14")
         self.assertEqual(t.server_version(self.res), "2026.10.14")
 

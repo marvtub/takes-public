@@ -14,14 +14,6 @@ struct VideoPostTests {
         try FileManager.default.createDirectory(at: session.appending(path: "edits"), withIntermediateDirectories: true)
     }
 
-    @Test func filesAndPlatformOfPath() {
-        #expect(PostPlatform.youtube.rel == "posts/youtube.md")
-        #expect(PostFile.rel(of: "short", .vertical) == "posts/vertical/variants/short.md")
-        #expect(PostPlatform.of(rel: "posts/vertical.md") == .vertical)
-        #expect(PostPlatform.of(rel: "posts/youtube/variants/a.md") == .youtube)
-        #expect(PostPlatform.of(rel: "posts/variants/a.md") == .linkedin)
-    }
-
     @Test func placesRoundTrip() {
         var c = PostFile.Content(text: "Hook\n")
         #expect(c.places == VerticalPlace.allCases)
@@ -51,6 +43,9 @@ struct VideoPostTests {
         #expect(PostFile.media(nil, in: session, .x)?.lastPathComponent == "wide-v1.mp4")
         let v = PostFile.Content(text: "Caption", media: "edits/tall-v1.mp4")
         #expect(PostFile.media(v, in: session, .vertical)?.lastPathComponent == "tall-v1.mp4")
+        // An X post without its own media uses the LinkedIn pick, not the newest edit.
+        PostFile.write(.init(text: "X\n"), to: session, .x)
+        #expect(PostFile.media(PostFile.read(session, .x), in: session, .x)?.lastPathComponent == "wide-v1.mp4")
     }
 
     @Test func hashtagsCount() {

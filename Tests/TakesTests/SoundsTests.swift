@@ -43,12 +43,12 @@ struct SoundsTests {
         let found = SoundLib.scan(lib)
         #expect(found.map(\.rel) == ["Music/1_A.mp3", "SFX/2_Whoosh.wav"])
         #expect(found.map(\.group) == ["Music", "SFX"])
-    }
-
-    @Test func effectsAreNotSongs() {
-        let u = URL(fileURLWithPath: "/x")
-        #expect(!SoundsPane.isEffect(Sound(url: u, group: "Music", rel: "Music/a.mp3")))
-        #expect(SoundsPane.isEffect(Sound(url: u, group: "SFX", rel: "SFX/whoosh.mp3")))
+        // Effects are not songs.
+        do {
+            let u = URL(fileURLWithPath: "/x")
+            #expect(!SoundsPane.isEffect(Sound(url: u, group: "Music", rel: "Music/a.mp3")))
+            #expect(SoundsPane.isEffect(Sound(url: u, group: "SFX", rel: "SFX/whoosh.mp3")))
+        }
     }
 
     /// A session.json from before 2026-10-09 still opens; its old song and effects are ignored.

@@ -43,12 +43,11 @@ class ChatStandinTests(unittest.TestCase):
                 return json.loads(line[6:])
         self.fail("no chat event")
 
-    def test_offline_default_is_unchanged(self):
+    def test_long_reply_keeps_identity_and_streams_completion(self):
+        # Before the test chat starts, the offline stand-in is as it was.
         self.assertEqual(self.get("/api/chat"), {"running": False, "messages": []})
         self.assertEqual(self.get("/api/session")["script"],
                          "The first line of the script.\n\nThe second paragraph.")
-
-    def test_long_reply_keeps_identity_and_streams_completion(self):
         self.get("/test/chat/start")
         chat = self.get("/api/chat")
         # 24 earlier messages, 5 + 2 tool steps, a reply and the latest one.

@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=1080, height=1920" />
+    <!-- Split screen: the full-frame speaker shot, then the frame splits in two. One half keeps the speaker, the other half shows the screen recording (or any
+         b-roll clip). Then it returns to full frame.
+         The speaker is made smaller (CAM.scale) so the whole head fits in the half, with room above
+         it; a soft, blurred copy of the same shot fills the sides.
+         Inputs next to this file: footage.mp4 (the camera, at the size of the edit) and screen.mp4 (the second
+         source, any shape). Both start at the same moment.
+         The size of the edit is data-width / data-height on #root (1080x1920, 1080x1350, 1080x1080, 1920x1080 all work).
+         9:16, 4:5 and 1:1 split top and bottom. 16:9 splits side by side: the speaker on the left, the screen on the right.
+         Edit SPLIT, CAM, SCREEN, LABELS and AT below. The video is as long as footage.mp4. -->
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+    <style>
+      @font-face { font-family: "Inter"; src: url("fonts/Inter-SemiBold.ttf"); font-weight: 600; }
+      :root { --canvas: #0c0c0e; --ink: #f7f5f2; --accent: #ff9a4d;
+              --chip: rgba(14, 14, 18, 0.62); --edge: rgba(255, 255, 255, 0.16); }
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      html, body { width: 1080px; height: 1920px; overflow: hidden; background: var(--canvas); }
+      #root { position: relative; width: 100%; height: 100%; overflow: hidden; background: var(--canvas); }
+      /* The screen half. Its box is set from SPLIT in the script. */
+      #screenBox { position: absolute; overflow: hidden; background: #000; opacity: 0; }
+      /* The videos fill wrappers; the script moves and sizes the wrappers, never the videos. */
+      .fill { position: absolute; left: 0; top: 0; width: 100%; height: 100%; }
+      .fill video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+      #bgWrap { filter: blur(38px) brightness(0.55) saturate(1.2); transform: scale(1.15); display: none; }
+      #screenEdge { position: absolute; inset: 0; border-radius: inherit; box-shadow: inset 0 0 0 2px var(--edge); pointer-events: none; }
+      /* The speaker: full frame, clipped to its half. Never scaled. */
+      #camBox { position: absolute; inset: 0; }
+      /* --soft: the sharp speaker fades into the blurred copy at its left and right edges (0% = no fade). */
+      #camWrap { transform-origin: 0 0; --soft: 0%;
+                 -webkit-mask-image: linear-gradient(90deg, transparent, #000 var(--soft), #000 calc(100% - var(--soft)), transparent);
+                 mask-image: linear-gradient(90deg, transparent, #000 var(--soft), #000 calc(100% - var(--soft)), transparent); }
+      /* The same shot, stretched to the full width of the half and blurred: it fills the sides. */
+      #camBgWrap { transform-origin: 0 0; filter: blur(48px) brightness(0.8); }
+      .chip { position: absolute; display: flex; align-items: center; gap: 14px; padding: 14px 26px 14px 22px;
+              border-radius: 999px; background: var(--chip); border: 2px solid var(--edge);
+              backdrop-filter: blur(18px); -webkit-backdrop-filter: blur(18px);
+              font-family: "Inter", sans-serif; font-weight: 600; font-size: 34px; letter-spacing: -0.01em;
+              color: var(--ink); white-space: nowrap; opacity: 0; }
+      .chip::before { content: ""; width: 14px; height: 14px; border-radius: 50%; background: var(--accent); }
+    </style>
+  </head>
+  <body>
+    <div id="root" data-composition-id="main" data-start="0" data-width="1080" data-height="1920">
+      <div id="screenBox">
+        <div class="fill" id="bgWrap"><video id="screenBg" class="clip" src="screen.mp4" muted playsinline data-start="0" data-track-index="1"></video></div>
+        <div class="fill" id="scrWrap"><video id="screen" class="clip" src="screen.mp4" muted playsinline data-start="0" data-track-index="2"></video></div>
+        <div id="screenEdge"></div>
+      </div>
+      <div id="camBox">
+        <div class="fill" id="camBgWrap"><video id="footageBg" class="clip" src="footage.mp4" muted playsinline data-start="0" data-track-index="3"></video></div>
+        <div class="fill" id="camWrap"><video id="footage" class="clip" src="footage.mp4" muted playsinline data-start="0" data-track-index="0"></video></div>
+      </div>
+      <div class="chip" id="camChip"></div>
+      <div class="chip" id="screenChip"></div>
+    </div>
+    <script>
+      // ratio: the share of the height for the top half (0.5 = equal halves); in 16:9, the share of the width for the left half.
+      // top: "speaker" or "screen", the half that goes on top (in 16:9: on the left).
+      // gutter: the dark edge around the halves. gap: the space between them. radius: the corners.
+      const SPLIT = { ratio: 0.53, top: "speaker", gutter: 20, gap: 22, radius: 44 };
+      // Per shape of the edit (tall = 9:16, 4:5, square = 1:1, wide = 16:9):
+      // scale: the size of the speaker in the half (1 = full size). Make it smaller until the whole
+      //        head fits with some room above it: about 0.68 for a close-up, 0.85 for a wide shot (9:16).
+      //        In 16:9 the speaker always fills the height of its half, so scale is at least that.
+      // y: the row of footage.mp4 (px, 0 to its height) that goes in the middle of the speaker half.
+      //    Put it a little below the chin, so the head sits in the upper part of the half.
+      // x (16:9 only): the column of footage.mp4 (0 to 1) that goes in the middle of the speaker half: the face.
+      const CAM = { tall: { scale: 0.68, y: 740 }, "4:5": { scale: 0.78, y: 430 }, square: { scale: 0.75, y: 360 },
+                    wide: { scale: 0.96, y: 540, x: 0.52 } };
+      // fit: "cover" fills the half with a part of the screen, so the text stays readable.
+      //      "contain" shows the whole clip, on a blurred copy of itself.
+      // aspect: the clip's width / height (ffprobe gives both). The layout needs it before the clip loads.
+      // x, y: the point of the clip (0 to 1) that goes in the middle of the half (cover only).
+      // show: the share of the clip's width that fills the half (cover only; 1 = the full width), per shape of the edit.
+      //       The halves of 4:5 and 1:1 are short, so they show a little more of the width.
+      const SCREEN = { fit: "cover", aspect: 1920 / 1200, x: 0.52, y: 0.36, show: { tall: 0.5, "4:5": 0.6, square: 0.7, wide: 0.5 } };
+      // The chip on each half. "" hides it.
+      const LABELS = { speaker: "Me", screen: "Notes" };
+      // When things happen, in seconds of footage.mp4. split = the frame starts to split.
+      // back = the frame starts to return to full.
+      const AT = { split: 0.5, back: 4.9 };
+
+      // The frame comes from data-width / data-height on #root. 16:9 splits side by side, the others top and bottom.
+      const comp = document.getElementById("root"), W = +comp.dataset.width, H = +comp.dataset.height;
+      const SHAPE = W / H < 0.7 ? "tall" : W / H < 0.95 ? "4:5" : W / H < 1.3 ? "square" : "wide";
+      const SIDE = SHAPE === "wide", C = CAM[SHAPE], G = SPLIT.gutter, R = SPLIT.radius;
+      let topBox, botBox;
+      if (!SIDE) {
+        const mid = Math.round(H * SPLIT.ratio);
+        topBox = { x: G, y: G, w: W - 2 * G, h: mid - SPLIT.gap / 2 - G };
+        botBox = { x: G, y: mid + SPLIT.gap / 2, w: W - 2 * G, h: H - G - mid - SPLIT.gap / 2 };
+      } else {
+        const mid = Math.round(W * SPLIT.ratio);
+        topBox = { x: G, y: G, w: mid - SPLIT.gap / 2 - G, h: H - 2 * G };
+        botBox = { x: mid + SPLIT.gap / 2, y: G, w: W - G - mid - SPLIT.gap / 2, h: H - 2 * G };
+      }
+      const camRect = SPLIT.top === "speaker" ? topBox : botBox;
+      const scrRect = SPLIT.top === "speaker" ? botBox : topBox;
+      // Make the speaker smaller and move it so C.y is in the middle of the half,
+      // but never show its top or bottom edge (in 16:9, never its sides either).
+      const cs = SIDE ? Math.max(C.scale, camRect.h / H) : C.scale;
+      const clamp = (lo, v, hi) => Math.min(hi, Math.max(lo, v));
+      const camX = SIDE ? clamp(camRect.x + camRect.w - W * cs, camRect.x + camRect.w / 2 - C.x * W * cs, camRect.x) : (W - W * cs) / 2;
+      const shift = Math.min(camRect.y, Math.max(camRect.y + camRect.h - H * cs, camRect.y + camRect.h / 2 - C.y * cs));
+      ["camWrap", "camBgWrap"].forEach((id) => Object.assign(document.getElementById(id).style, { width: W + "px", height: H + "px" }));
+
+      const sb = document.getElementById("screenBox");
+      Object.assign(sb.style, { left: scrRect.x + "px", top: scrRect.y + "px", width: scrRect.w + "px",
+        height: scrRect.h + "px", borderRadius: R + "px" });
+
+      // Fit the screen clip in its half (sizes in units of the clip's height).
+      (() => {
+        const pw = scrRect.w, ph = scrRect.h, vw = SCREEN.aspect, vh = 1;
+        let s, l, t;
+        if (SCREEN.fit === "contain") {
+          s = Math.min(pw / vw, ph / vh);
+          l = (pw - vw * s) / 2; t = (ph - vh * s) / 2;
+          document.getElementById("bgWrap").style.display = "block";
+        } else {
+          s = Math.max(pw / (vw * SCREEN.show[SHAPE]), ph / vh);
+          l = Math.min(0, Math.max(pw - vw * s, pw / 2 - SCREEN.x * vw * s));
+          t = Math.min(0, Math.max(ph - vh * s, ph / 2 - SCREEN.y * vh * s));
+        }
+        Object.assign(document.getElementById("scrWrap").style,
+          { width: vw * s + "px", height: vh * s + "px", left: l + "px", top: t + "px" });
+      })();
+
+      // The chips sit in the top-left corner of each half.
+      const chips = [["camChip", LABELS.speaker, camRect], ["screenChip", LABELS.screen, scrRect]].map(([id, text, r]) => {
+        const c = document.getElementById(id);
+        c.textContent = text;
+        c.style.left = r.x + 30 + "px"; c.style.top = r.y + 30 + "px";
+        if (!text) c.style.display = "none";
+        return c;
+      });
+
+      // The speaker is clipped to its half, made smaller and moved.
+      const inset = (t, r, b, l, rad) => `inset(${t}px ${r}px ${b}px ${l}px round ${rad}px)`;
+      const FULL = inset(0, 0, 0, 0, 0);
+      const HALF = inset(camRect.y, W - camRect.x - camRect.w, H - camRect.y - camRect.h, camRect.x, R);
+      const from = SPLIT.top === "speaker" ? 1 : -1; // the screen half comes in from its own edge
+      const IN = SIDE ? "x" : "y";
+
+      const camWrap = document.getElementById("camWrap");
+      const tl = gsap.timeline({ paused: true });
+      // In: the frame opens into two halves.
+      tl.fromTo("#camBox", { clipPath: FULL }, { clipPath: HALF, duration: 0.75, ease: "power3.inOut" }, AT.split);
+      tl.fromTo("#camBgWrap", { y: 0, scaleY: 1 }, { y: shift, scaleY: cs, duration: 0.75, ease: "power3.inOut" }, AT.split);
+      tl.fromTo(camWrap, { x: 0, y: 0, scale: 1, "--soft": "0%" }, { x: camX, y: shift, scale: cs, "--soft": "9%", duration: 0.75, ease: "power3.inOut" }, AT.split);
+      tl.fromTo(sb, { opacity: 0, [IN]: 140 * from }, { opacity: 1, [IN]: 0, duration: 0.75, ease: "power3.inOut" }, AT.split);
+      chips.forEach((c, i) => tl.fromTo(c, { opacity: 0, y: -12, scale: 0.92 },
+        { opacity: 1, y: 0, scale: 1, duration: 0.4, ease: "back.out(1.6)" }, AT.split + 0.55 + i * 0.12));
+      // Out: shorter, ease in. The chips go, the halves close.
+      tl.to(chips, { opacity: 0, duration: 0.2, ease: "power2.in" }, AT.back);
+      tl.to("#camBox", { clipPath: FULL, duration: 0.6, ease: "power3.inOut" }, AT.back + 0.1);
+      tl.to("#camBgWrap", { y: 0, scaleY: 1, duration: 0.6, ease: "power3.inOut" }, AT.back + 0.1);
+      tl.to(camWrap, { x: 0, y: 0, scale: 1, "--soft": "0%", duration: 0.6, ease: "power3.inOut" }, AT.back + 0.1);
+      tl.to(sb, { opacity: 0, [IN]: 140 * from, duration: 0.6, ease: "power3.inOut" }, AT.back + 0.1);
+      window.__timelines["main"] = tl;
+    </script>
+  </body>
+</html>

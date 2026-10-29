@@ -31,6 +31,11 @@ class VideoPostTests(unittest.TestCase):
         self.assertEqual(fm["title"], "Why I record every day")
         self.assertTrue(body.startswith("0:00 Intro"))
         self.assertTrue(os.path.exists(os.path.join(self.s, "posts", "youtube.md")))
+        # get_session lists them.
+        t.t_set_post({"session": self.s, "platform": "youtube", "title": "T", "text": "D"})
+        out = t.t_get_session({"session": self.s})
+        self.assertEqual(out["youtube_post"]["title"], "T")
+        self.assertIsNone(out["vertical_post"])
 
     def test_tiktok_reels_shorts_share_the_vertical_post(self):
         for name in ("tiktok", "reels", "shorts", "instagram"):
@@ -61,12 +66,6 @@ class VideoPostTests(unittest.TestCase):
         t.t_set_post({"session": self.s, "platform": "vertical", "text": "Caption", "media": "edits/tall-v1.mp4"})
         self.assertTrue(t.read_post(self.s, "x")["media_path"].endswith("wide-v1.mp4"))
         self.assertTrue(t.read_post(self.s, "vertical")["media_path"].endswith("tall-v1.mp4"))
-
-    def test_get_session_lists_them(self):
-        t.t_set_post({"session": self.s, "platform": "youtube", "title": "T", "text": "D"})
-        out = t.t_get_session({"session": self.s})
-        self.assertEqual(out["youtube_post"]["title"], "T")
-        self.assertIsNone(out["vertical_post"])
 
 
 if __name__ == "__main__":

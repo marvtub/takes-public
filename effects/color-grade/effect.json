@@ -1,0 +1,13 @@
+{
+  "name": "Colour grade",
+  "description": "A before/after wipe: flat, log-like footage on one side, a cinematic grade on the other, and a divider with a handle that sweeps across, then leaves the frame graded.",
+  "when": "When you talk about the look of a video, editing or colour, or to make a plain shot feel produced.",
+  "needs": [
+    "the cut time and length of the moment",
+    "optional: the before and after label text"
+  ],
+  "kind": "Full frame",
+  "length_s": 6,
+  "shape": "any",
+  "shipped": true
+}

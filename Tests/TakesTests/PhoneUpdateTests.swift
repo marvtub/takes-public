@@ -7,10 +7,6 @@ import Testing
 struct PhoneUpdateTests {
     let staged = PhoneUpdate.Staged(stamp: "abc1234 Oct 3 20:00", changes: ["One", "Two"], device: "D", staged: nil)
 
-    @Test func nothingStagedSaysNothing() {
-        #expect(PhoneUpdate.status(staged: nil, installing: false, error: "old") == PhoneUpdate.Status())
-    }
-
     @Test func installingHidesTheLastError() {
         let s = PhoneUpdate.status(staged: staged, installing: true, error: "old")
         #expect(s.installing == true && s.error == nil && s.stamp == staged.stamp)
@@ -20,6 +16,8 @@ struct PhoneUpdateTests {
         let r = PhoneUpdate.Renew(problem: "Xcode lost your Apple ID.", stops: 1_000_000 + 30 * 3600)
         #expect(PhoneUpdate.status(staged: nil, installing: false, error: nil, renew: r, now: now).renew == "Xcode lost your Apple ID. The app stops in 30 h.")
         #expect(PhoneUpdate.status(staged: staged, installing: false, error: nil, renew: r, now: now).stamp == staged.stamp)
+        // Nothing staged says nothing, even with an old error.
+        #expect(PhoneUpdate.status(staged: nil, installing: false, error: "old") == PhoneUpdate.Status())
     }
 
     @Test func readsWhatInstallShWrote() throws {

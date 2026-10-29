@@ -1,0 +1,15 @@
+{
+  "name": "Tier list",
+  "description": "An S/A/B/C/D board in the lower half; tiles drop into their rows one by one while a chip says 'Ranking…', then 'Ranked'.",
+  "when": "When you rank or compare a handful of things: tools, apps, habits, options.",
+  "needs": [
+    "the items in the order they drop, each with a tier",
+    "a short mark per item (one or two letters, or a shape) and a colour",
+    "the chip text",
+    "the cut time where it starts"
+  ],
+  "kind": "Overlay",
+  "length_s": 6,
+  "shape": "any",
+  "shipped": true
+}

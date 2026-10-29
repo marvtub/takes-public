@@ -1,0 +1,15 @@
+{
+  "name": "Glass graph",
+  "description": "A frosted-glass card rises in the lower third: a label, a big number that counts up, and five bars that grow, with the footage blurred behind the glass.",
+  "when": "The moment you say a result out loud: views, revenue, sign-ups, any number with a few parts.",
+  "needs": [
+    "the label (for example 'Views · one reel')",
+    "the total number",
+    "five names with a value each",
+    "the cut time where it starts"
+  ],
+  "kind": "Full frame",
+  "length_s": 6,
+  "shape": "any",
+  "shipped": true
+}

@@ -1,0 +1,15 @@
+{
+  "name": "Proof card",
+  "description": "A screenshot flies up into the lower middle as a card with a soft shadow and a slight 3D tilt, settles flat, gets a highlighter swipe over one area, then leaves. A small chip says 'Real numbers'.",
+  "when": "When you say a result and have the screenshot to back it: a post, a tweet, an email, a dashboard, a review.",
+  "needs": [
+    "the screenshot as a PNG (any size)",
+    "the area to highlight, in screenshot pixels (optional)",
+    "the chip text (optional)",
+    "the cut time where it starts"
+  ],
+  "kind": "Overlay",
+  "length_s": 6,
+  "shape": "any",
+  "shipped": true
+}

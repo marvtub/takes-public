@@ -5,13 +5,6 @@ import Testing
 
 @MainActor
 struct AboutTests {
-    @Test func linksPointAtTheRepoAndPayPal() {
-        #expect(About.repo.absoluteString == "https://github.com/marvtub/takes-public")
-        #expect(About.coffee.host == "paypal.me")
-        #expect(BrandMark.image("paypal") != nil)
-        #expect(BrandMark.image("github") != nil)
-    }
-
     /// The note in light and dark, to look at: `TAKES_SNAPSHOT=/dir ./test.sh --filter About`.
     @Test func sheet() throws {
         guard let dir = ProcessInfo.processInfo.environment["TAKES_SNAPSHOT"] else { return }

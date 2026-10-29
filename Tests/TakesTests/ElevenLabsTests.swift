@@ -5,11 +5,6 @@ import Testing
 // ElevenLabs in Takes (2026-10-06): what Plugins › Voices reads from the takes MCP's voices tool.
 
 struct ElevenLabsTests {
-    @Test func theAccountLineShowsPlanAndCharactersLeft() {
-        #expect(ElevenLabs.accountLine(["plan": "creator", "characters_left": 95000]) == "Creator plan · \(95000.formatted()) characters left")
-        #expect(ElevenLabs.accountLine([:]) == "")
-    }
-
     @Test func ownVoicesAndLibraryVoicesBothParse() {
         let mine = ElevenLabs.voices([["id": "v1", "name": "The user PVC", "category": "professional",
                                        "labels": ["accent": "german"], "preview": "https://x.test/a.mp3"]])

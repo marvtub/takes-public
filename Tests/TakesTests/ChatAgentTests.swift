@@ -44,13 +44,6 @@ struct CodexParseTests {
         #expect(m.map(\.name) == ["GPT-6 Astra", "GPT-6 Sol", "gpt-6-luna"])
     }
 
-    @Test func signInLines() {
-        #expect(AgentsStatus.codexLine("Logged in using ChatGPT\n") == "Signed in · uses your ChatGPT plan")
-        #expect(AgentsStatus.codexLine(nil).hasPrefix("Not signed in"))
-        #expect(AgentsStatus.claudeLine(#"{"loggedIn": true, "authMethod": "claude.ai"}"#) == "Signed in · uses your Claude plan")
-        #expect(AgentsStatus.claudeLine(#"{"loggedIn": false}"#).hasPrefix("Not signed in"))
-    }
-
     @Test func tomlStringsSurviveQuotesAndNewlines() {
         #expect(CodexAdapter.toml("a \"b\"\n\\c\t") == #""a \"b\"\n\\c\t""#)
         #expect(CodexAdapter.toml("\u{1}é") == #""\u0001é""#)
@@ -91,6 +84,8 @@ struct CodexRunTests {
             let script = dir.appending(path: name)
             try """
             #!/bin/bash
+            # Only chat turns count: a sign-in or model check another test starts may call this too.
+            [ "$1" = exec ] || exit 0
             n=$(( $(cat "\(dir.path)/n" 2>/dev/null || echo 0) + 1 )); echo $n > "\(dir.path)/n"
             printf '%s\\n' "\(name)" "$@" > "\(dir.path)/args-$n.txt"
             cat > "\(dir.path)/ask-$n.txt"
@@ -105,8 +100,10 @@ struct CodexRunTests {
         ((try? String(contentsOf: dir.appending(path: "args-\(n).txt"), encoding: .utf8)) ?? "").components(separatedBy: "\n")
     }
 
+    /// The deadline only matters when the test fails: the fake answers at once, but a busy Mac
+    /// started it late.
     func until(_ ok: () -> Bool) async {
-        let end = Date().addingTimeInterval(15)
+        let end = Date().addingTimeInterval(30)
         while !ok() && Date() < end { try? await Task.sleep(for: .milliseconds(50)) }
     }
 

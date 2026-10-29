@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <!-- Over the shoulder: two stat cards pop in BEHIND the speaker, one on each side of the head,
+         and their numbers count up. Three layers: the footage (dimmed), the cards, then the speaker
+         cut out of the same footage on top. The frame never moves or scales: the footage stays
+         full-bleed, and only a light vignette comes in so the cards read.
+         Inputs next to this file: footage.mp4 (the part of the cut the effect covers, at the frame size) and
+         person.webm (the speaker with a transparent background, from `hyperframes remove-background`).
+         The frame size is data-width / data-height on #root. PLACE holds where the cards go in tall,
+         square and wide frames: in a wide frame (16:9) they sit one on each side of the head.
+         Edit DATA, PLACE, LOOK and AT below. The video is as long as footage.mp4. -->
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+    <style>
+      @font-face { font-family: "Montserrat"; src: url("fonts/Montserrat-Variable.ttf"); font-weight: 100 900; }
+      @font-face { font-family: "Inter"; src: url("fonts/Inter-SemiBold.ttf"); font-weight: 600; }
+      :root { --canvas: #0c0c0e; --ink: #f7f5f2; --muted: #a9a49c; --accent: #ff9a4d;
+              --card: rgba(20, 20, 24, 0.82); --edge: rgba(255, 255, 255, 0.14); }
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      html, body { width: 100%; height: 100%; overflow: hidden; background: var(--canvas); }
+      #root { position: relative; width: 100%; height: 100%; overflow: hidden; background: var(--canvas); }
+      /* Two full-frame stages: footage under the cards, the speaker over them. They never move. */
+      .stage { position: absolute; inset: 0; overflow: hidden; }
+      .stage video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+      .matte { position: absolute; inset: 0; filter: url(#choke); }
+      /* A soft vignette, darker at the edges where the cards sit. No zoom, no film look. */
+      #dim { position: absolute; inset: 0; opacity: 0;
+             background: radial-gradient(ellipse 75% 60% at 50% 42%, rgba(0, 0, 0, 0) 30%, rgba(0, 0, 0, 0.9) 100%); }
+      /* --size scales the card (LOOK.size). */
+      #cards { --size: 1; }
+      .card { position: absolute; padding: calc(26px * var(--size)) calc(32px * var(--size)) calc(30px * var(--size));
+              border-radius: calc(30px * var(--size)); background: var(--card);
+              border: 2px solid var(--edge); box-shadow: 0 24px 60px rgba(0, 0, 0, 0.45); }
+      .card.right { text-align: right; }
+      .label { font-family: "Inter", sans-serif; font-weight: 600; font-size: calc(24px * var(--size)); letter-spacing: 0.14em;
+               text-transform: uppercase; color: var(--muted); white-space: nowrap; }
+      .num { font-family: "Montserrat", sans-serif; font-weight: 800; font-size: calc(118px * var(--size)); line-height: 1;
+             letter-spacing: -0.035em; color: var(--ink); margin-top: calc(12px * var(--size)); white-space: nowrap;
+             font-variant-numeric: tabular-nums; }
+      .delta { display: inline-block; margin-top: calc(16px * var(--size)); padding: calc(7px * var(--size)) calc(16px * var(--size));
+               border-radius: 999px; font-family: "Inter", sans-serif; font-weight: 600; font-size: calc(24px * var(--size)); color: #1a120b;
+               background: var(--accent); white-space: nowrap; }
+    </style>
+  </head>
+  <body>
+    <div id="root" data-composition-id="main" data-start="0" data-width="1080" data-height="1920">
+      <div class="stage" id="back">
+        <video id="footage" class="clip" src="footage.mp4" muted playsinline data-start="0" data-track-index="0"></video>
+        <div id="dim"></div>
+      </div>
+      <div id="cards"></div>
+      <div class="stage" id="front">
+        <div class="matte">
+          <video id="person" class="clip" src="person.webm" muted playsinline data-start="0" data-track-index="1"></video>
+        </div>
+      </div>
+      <!-- Tightens the cutout's soft edge, so no light rim of the old background shows around the hair. -->
+      <svg width="0" height="0" style="position: absolute">
+        <filter id="choke"><feComponentTransfer><feFuncA type="linear" slope="1.7" intercept="-0.55" /></feComponentTransfer></filter>
+      </svg>
+    </div>
+    <script>
+      // The two cards. value counts up from 0 and shows as 377K / 1.2M. delta is optional ("" hides it).
+      const DATA = [
+        { label: "Views", value: 377000, delta: "+48% vs avg" },
+        { label: "Followers", value: 12400, delta: "+2.1K this week" },
+      ];
+      // Where the cards go, by the shape of the frame: tall (9:16, 4:5), square (1:1) or wide (16:9).
+      // side: which side of the head. x: px from that side of the frame. y: from the top, as a part of
+      // the frame height. size: how big the cards are (1 = full size; about 0.7 for a close-up).
+      // The head hides the inner part of each card, so the text sits on the outer side.
+      // Both cards can go on one side when the head leaves no room on the other (a close-up).
+      const PLACE = {
+        tall: { size: 0.7, cards: [{ side: "left", x: 32, y: 250 / 1920 }, { side: "left", x: 32, y: 620 / 1920 }] },
+        square: { size: 0.62, cards: [{ side: "left", x: 32, y: 0.1 }, { side: "left", x: 32, y: 0.42 }] },
+        wide: { size: 0.85, cards: [{ side: "left", x: 440, y: 0.24 }, { side: "right", x: 470, y: 0.36 }] },
+      };
+      // DIM: how dark the edges of the frame get behind the cards (0 to 1, 0 = no vignette).
+      const LOOK = { dim: 0.35 };
+      // When things happen, in seconds of footage.mp4. cards = the first card; the next comes `gap`
+      // later. count = how long the numbers count up. out = when the cards start to leave.
+      const AT = { cards: 0.45, gap: 0.25, count: 1.2, out: 4.7 };
+
+      const fmt = (v) => v >= 1e6 ? (v / 1e6).toFixed(v < 1e7 ? 1 : 0) + "M"
+        : v >= 1e4 ? Math.round(v / 1e3) + "K" : v >= 1e3 ? (v / 1e3).toFixed(1) + "K" : String(Math.round(v));
+      const root = document.getElementById("root");
+      const FRAME = { w: Number(root.dataset.width), h: Number(root.dataset.height) };
+      const shape = FRAME.w >= FRAME.h * 1.3 ? "wide" : FRAME.h >= FRAME.w * 1.2 ? "tall" : "square";
+      const place = PLACE[shape], U = Math.min(FRAME.w, FRAME.h) / 1080;
+      document.getElementById("cards").style.setProperty("--size", place.size * U);
+      const cards = DATA.map((d, i) => {
+        const p = place.cards[i], c = document.createElement("div");
+        c.className = "card " + p.side;
+        c.id = "card" + i;
+        c.style[p.side] = p.x + "px";
+        c.style.top = Math.round(p.y * FRAME.h) + "px";
+        c.innerHTML = '<div class="label"></div><div class="num"></div>' + (d.delta ? '<div class="delta"></div>' : "");
+        c.querySelector(".label").textContent = d.label;
+        c.querySelector(".num").textContent = fmt(d.value);
+        if (d.delta) c.querySelector(".delta").textContent = d.delta;
+        document.getElementById("cards").appendChild(c);
+        return c;
+      });
+
+      const tl = gsap.timeline({ paused: true });
+      // In: the vignette fades in, then each card slides out from behind the head and counts up.
+      // The footage never moves or scales.
+      tl.fromTo("#dim", { opacity: 0 }, { opacity: LOOK.dim, duration: 0.6, ease: "power2.out" }, Math.max(0, AT.cards - 0.3));
+      cards.forEach((c, i) => {
+        const t = AT.cards + i * AT.gap, d = DATA[i], dir = place.cards[i].side === "left" ? 1 : -1;
+        tl.fromTo(c, { opacity: 0, scale: 0.7, x: 90 * dir, y: 40 },
+          { opacity: 1, scale: 1, x: 0, y: 0, duration: 0.6, ease: "back.out(1.5)" }, t);
+        const n = { v: 0 }, el = c.querySelector(".num");
+        tl.fromTo(n, { v: 0 }, { v: d.value, duration: AT.count, ease: "power2.out",
+          onUpdate: () => { el.textContent = fmt(n.v); } }, t + 0.1);
+        const pill = c.querySelector(".delta");
+        if (pill) tl.fromTo(pill, { opacity: 0, y: 10 }, { opacity: 1, y: 0, duration: 0.35, ease: "power3.out" }, t + AT.count - 0.2);
+      });
+      // Out: about half as long, ease in. The cards slide back behind the head, the vignette fades.
+      cards.forEach((c, i) => {
+        const dir = place.cards[i].side === "left" ? 1 : -1;
+        tl.to(c, { opacity: 0, scale: 0.85, x: 70 * dir, duration: 0.3, ease: "power2.in" }, AT.out + i * 0.06);
+      });
+      tl.to("#dim", { opacity: 0, duration: 0.4, ease: "power2.in" }, AT.out + 0.2);
+      window.__timelines["main"] = tl;
+    </script>
+  </body>
+</html>

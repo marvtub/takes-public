@@ -98,6 +98,46 @@ struct SearchTests {
         #expect(MediaSearch.relevant([.init(path: root.appending(path: "n.mov"), kind: "video", start: 0)]).count == 1)
     }
 
+    /// Best match keeps the panel's order, so no row moves when the results page opens.
+    @Test func bestMatchKeepsTheOrderInOneGroup() {
+        let hits = ["b", "a", "c"].map { MediaSearch.Hit(path: URL(fileURLWithPath: "/l/p/\($0).mov"), kind: "video", start: 0) }
+        let s = MediaSearch.sections(hits, sort: .best)
+        #expect(s.count == 1 && s[0].title == nil && s[0].hits == hits)
+        #expect(MediaSearch.sections([], sort: .newest).isEmpty)
+    }
+
+    /// A date sort groups by Today, This week, This month, then by month, undated last.
+    @Test func dateSortGroupsByWhenItWasMade() throws {
+        let f = DateFormatter(); f.locale = Locale(identifier: "en_US_POSIX"); f.dateFormat = "yyyy-MM-dd"
+        let now = try #require(f.date(from: "2026-10-27"))
+        let path = { (s: String) in URL(fileURLWithPath: "/l/Weekly Challenge/\(s)/edits/a.mp4") }
+        let hits = ["2026-09-30-old", "2026-10-27-today", "2026-10-22-week", "2026-10-03-month", "no-date"]
+            .map { MediaSearch.Hit(path: path($0), kind: "video", start: 0) }
+        let day = { (h: MediaSearch.Hit) -> Date? in
+            let c = h.path.pathComponents[3]
+            return c.first == "2" ? f.date(from: String(c.prefix(10))) : nil
+        }
+        let newest = MediaSearch.sections(hits, sort: .newest, now: now, date: day)
+        #expect(newest.map(\.title) == ["Today", "This week", "This month", "September 2026", "Undated"])
+        let oldest = MediaSearch.sections(hits, sort: .oldest, now: now, date: day)
+        #expect(oldest.first?.title == "September 2026" && oldest.last?.title == "Undated")
+        #expect(MediaSearch.day(of: path("2026-10-06-bookkeeping-agent")) == f.date(from: "2026-10-06"))
+    }
+
+    @Test func theCountSaysWhere() {
+        #expect(MediaSearch.countLine(23, project: nil) == "23 results in all projects")
+        #expect(MediaSearch.countLine(1, project: "Weekly Challenge") == "1 result in Weekly Challenge")
+    }
+
+    @Test func theShapeIsSaidInWords() {
+        #expect(MediaSearch.shapeLine(width: 1080, height: 1920) == "Vertical 9:16 · 1080×1920")
+        #expect(MediaSearch.shapeLine(width: 3840, height: 2160) == "Wide 16:9 · 3840×2160")
+        #expect(MediaSearch.shapeLine(width: 1080, height: 1350) == "Portrait 4:5 · 1080×1350")
+        #expect(MediaSearch.shapeLine(width: 1000, height: 1000) == "Square 1:1 · 1000×1000")
+        #expect(MediaSearch.shapeLine(width: 2000, height: 900) == "Wide · 2000×900")
+        #expect(MediaSearch.shapeLine(width: 0, height: 10) == "")
+    }
+
     @Test func theModelIsPinnedAndAbout510MB() {
         #expect(MediaSearch.files.allSatisfy { $0.sha.count == 64 })
         #expect(MediaSearch.revision.count == 40)

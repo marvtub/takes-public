@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <!-- Freeze sticker: the picture freezes, the speaker lifts off the frame as a sticker with a thick
+         white outline, the background blurs and darkens, and a name tag pops on. Then it all settles
+         back and the live footage goes on. The voice keeps playing under the freeze.
+         Inputs next to this file: footage.mp4 (the part of the cut the effect covers, at the frame size),
+         still.png (the frame of footage.mp4 at AT.freeze) and sticker.png (still.png with a transparent
+         background, from `hyperframes remove-background`).
+         The frame size is data-width / data-height on #root; LOOK.tag says where the name tag sits in
+         tall, square and wide frames.
+         Edit TEXT, LOOK and AT below. The video is as long as footage.mp4. -->
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+    <style>
+      @font-face { font-family: "Montserrat"; src: url("fonts/Montserrat-Variable.ttf"); font-weight: 100 900; }
+      @font-face { font-family: "Inter"; src: url("fonts/Inter-SemiBold.ttf"); font-weight: 600; }
+      :root { --canvas: #0c0c0e; --ink: #f7f5f2; --dark: #16110c; --accent: #ff9a4d; }
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      html, body { width: 100%; height: 100%; overflow: hidden; background: var(--canvas); }
+      #root { position: relative; width: 100%; height: 100%; overflow: hidden; background: var(--canvas); }
+      #footage { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+      /* The freeze sits over the live footage and is shown only while it holds. */
+      #freeze { position: absolute; inset: 0; opacity: 0; }
+      #plate { position: absolute; inset: 0; }
+      #plate img { width: 100%; height: 100%; object-fit: cover; }
+      #dim { position: absolute; inset: 0; background: #000; opacity: 0; }
+      #sticker { position: absolute; inset: 0; transform-origin: 50% 100%; }
+      #sticker img { position: absolute; inset: 0; width: 100%; height: 100%; filter: url(#outline); }
+      #tag { position: absolute; display: flex; flex-direction: column; align-items: flex-start; }
+      #name { font-family: "Montserrat", sans-serif; font-weight: 900; font-size: 108px; line-height: 1;
+              letter-spacing: -0.03em; color: var(--dark); background: var(--accent); padding: 18px 34px 22px;
+              border-radius: 22px; white-space: nowrap; box-shadow: 0 18px 40px rgba(0, 0, 0, 0.35); }
+      #role { font-family: "Inter", sans-serif; font-weight: 600; font-size: 34px; letter-spacing: 0.16em;
+              text-transform: uppercase; color: var(--dark); background: var(--ink); padding: 10px 20px;
+              border-radius: 12px; margin: -10px 0 0 26px; white-space: nowrap; }
+    </style>
+  </head>
+  <body>
+    <div id="root" data-composition-id="main" data-start="0" data-width="1080" data-height="1920">
+      <video id="footage" class="clip" src="footage.mp4" muted playsinline data-start="0" data-track-index="0"></video>
+      <div id="freeze">
+        <div id="plate"><img src="still.png" alt="" /></div>
+        <div id="dim"></div>
+        <div id="sticker"><img src="sticker.png" alt="" /></div>
+        <div id="tag"><div id="name"></div><div id="role"></div></div>
+      </div>
+      <!-- The sticker edge: grow the cutout's shape by `radius` px, fill it white, put the cutout on top. -->
+      <svg width="0" height="0" style="position: absolute">
+        <filter id="outline" x="-10%" y="-10%" width="120%" height="120%">
+          <feComponentTransfer in="SourceAlpha" result="solid"><feFuncA type="linear" slope="3" intercept="-0.6" /></feComponentTransfer>
+          <feMorphology id="grow" in="solid" operator="dilate" radius="0" result="fat" />
+          <feFlood flood-color="#ffffff" />
+          <feComposite in2="fat" operator="in" result="edge" />
+          <feDropShadow in="edge" dx="0" dy="14" stdDeviation="16" flood-color="#000000" flood-opacity="0.45" result="edgeShadow" />
+          <feMerge><feMergeNode in="edgeShadow" /><feMergeNode in="SourceGraphic" /></feMerge>
+        </filter>
+      </svg>
+    </div>
+    <script>
+      // The name tag.
+      const TEXT = { name: "Your name", role: "What you do" };
+      // OUTLINE: the white edge in px. LIFT: the sticker's size while it is lifted (1 = same size).
+      // TILT: its turn in degrees. BLUR and DIM: what happens to the frozen background.
+      // TAG: where the name tag sits, by the shape of the frame: tall (9:16, 4:5), square (1:1) or wide (16:9).
+      // x: px from the left. y: from the top, as a part of the frame height. In a wide frame it sits beside the head.
+      const LOOK = { outline: 16, lift: 0.9, tilt: -2.5, blur: 22, dim: 0.5,
+        tag: { tall: { x: 90, y: 1210 / 1920 }, square: { x: 60, y: 0.66 }, wide: { x: 230, y: 0.6 } } };
+      // When things happen, in seconds of footage.mp4. freeze = the frame still.png shows (make
+      // still.png from this exact time). back = when it starts to settle back. The live footage
+      // returns about 0.5 s after `back`.
+      const AT = { freeze: 0.4, tag: 0.85, back: 3.6 };
+
+      document.getElementById("name").textContent = TEXT.name;
+      document.getElementById("role").textContent = TEXT.role;
+      const root = document.getElementById("root");
+      const FRAME = { w: Number(root.dataset.width), h: Number(root.dataset.height) };
+      const shape = FRAME.w >= FRAME.h * 1.3 ? "wide" : FRAME.h >= FRAME.w * 1.2 ? "tall" : "square";
+      const tag = document.getElementById("tag");
+      tag.style.left = LOOK.tag[shape].x + "px";
+      tag.style.top = Math.round(LOOK.tag[shape].y * FRAME.h) + "px";
+
+      const tl = gsap.timeline({ paused: true });
+      const live = AT.back + 0.5;
+      // Freeze: a hard cut to the still (the same frame, so it does not jump).
+      tl.set("#freeze", { opacity: 1 }, AT.freeze);
+      // In: the background blurs (and grows a little, so its blurred edge stays out of the frame) and darkens while the sticker lifts and its white edge grows.
+      tl.fromTo("#plate", { filter: "blur(0px)", scale: 1 }, { filter: "blur(" + LOOK.blur + "px)", scale: 1.06, duration: 0.55, ease: "power2.out" }, AT.freeze);
+      tl.fromTo("#dim", { opacity: 0 }, { opacity: LOOK.dim, duration: 0.55, ease: "power2.out" }, AT.freeze);
+      tl.fromTo("#grow", { attr: { radius: 0 } }, { attr: { radius: LOOK.outline }, duration: 0.4, ease: "power3.out" }, AT.freeze + 0.05);
+      tl.fromTo("#sticker", { scale: 1, rotation: 0, y: 0 }, { scale: LOOK.lift, rotation: LOOK.tilt, y: 30, duration: 0.6, ease: "back.out(1.4)" }, AT.freeze + 0.05);
+      // The tag pops on: name first, then the role.
+      tl.fromTo("#name", { scale: 0.4, rotation: -14, opacity: 0 }, { scale: 1, rotation: -4, opacity: 1, duration: 0.5, ease: "back.out(1.8)", transformOrigin: "0% 100%" }, AT.tag);
+      tl.fromTo("#role", { y: -16, rotation: -4, opacity: 0 }, { y: 0, rotation: -4, opacity: 1, duration: 0.35, ease: "power3.out", transformOrigin: "0% 0%" }, AT.tag + 0.2);
+      // Out: about half as long, ease in. The tag goes, the sticker settles flat, then cut back to live.
+      tl.to(["#role", "#name"], { opacity: 0, scale: 0.85, duration: 0.2, ease: "power2.in" }, AT.back);
+      tl.to("#sticker", { scale: 1, rotation: 0, y: 0, duration: 0.3, ease: "power3.in" }, AT.back + 0.15);
+      tl.to("#grow", { attr: { radius: 0 }, duration: 0.3, ease: "power2.in" }, AT.back + 0.15);
+      tl.to("#plate", { filter: "blur(0px)", scale: 1, duration: 0.3, ease: "power2.in" }, AT.back + 0.15);
+      tl.to("#dim", { opacity: 0, duration: 0.3, ease: "power2.in" }, AT.back + 0.15);
+      tl.set("#freeze", { opacity: 0 }, live);
+      window.__timelines["main"] = tl;
+    </script>
+  </body>
+</html>

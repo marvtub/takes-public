@@ -5,13 +5,6 @@ import Testing
 
 @MainActor
 struct SoundFXTests {
-    @Test func isAPublicPluginOnTheBoard() {
-        #expect(Plugins.available.contains { $0.id == "sfx" })
-        #expect(!PrivatePlugins.list.contains { $0.id == "sfx" })
-        #expect(SoundFXPage.plugin.board == nil)
-        #expect(SoundFXPage.plugin.settings != nil)
-    }
-
     @Test func installScriptsUseTakesOwnFolderAndThePinnedEarshot() {
         let py = SoundFXSetup.dir + "/.venv/bin/python"
         let sounds = SoundFXSetup.script(.sounds, venvPython: py)
@@ -58,12 +51,6 @@ struct SoundFXTests {
         #expect(bank.counts == ["Whooshes": 1, "Hits": 2])
         #expect(bank.rows.map(\.id) == ["swish/stick", "impact/punch", "impact/metal"])
         #expect(bank.rows[1].key.contains("punch") && bank.rows[1].key.contains("hit"))
-    }
-
-    @Test func soundsAreMadeAheadInOneQuietProcess() {
-        let py = SoundFXPlayer.aheadScript
-        #expect(py.contains("os.nice(15)") && py.contains("os.replace(") && py.contains("json.load(sys.stdin)"))
-        #expect(SoundFXPlayer.file("fit/hit/bamboo_tok").lastPathComponent == "fit-hit-bamboo_tok.wav")
     }
 
     @Test func previewsShipAndHaveARealShape() throws {

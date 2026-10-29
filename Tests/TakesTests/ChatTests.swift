@@ -115,6 +115,12 @@ struct ChatTests {
         p.consume(#"{"type":"assistant","message":{"content":[{"type":"text","text":"File says hi."}]}}"#)
         #expect(p.messages.count == 1)
         #expect(p.messages.last?.done == true)
+        // A subagent's own steps stay hidden.
+        do {
+            var p = ChatParser([])
+            p.consume(#"{"type":"assistant","parent_tool_use_id":"t9","message":{"content":[{"type":"text","text":"inner"}]}}"#)
+            #expect(p.messages.isEmpty)
+        }
     }
 
     @Test func toolCallRunsThenEnds() {
@@ -124,6 +130,9 @@ struct ChatTests {
         #expect(p.messages.first?.done == false)
         p.consume(#"{"type":"user","message":{"content":[{"tool_use_id":"t1","type":"tool_result","content":"x"}]}}"#)
         #expect(p.messages.first?.done == true)
+        // How MCP and Bash calls read.
+        #expect(ChatParser.describe("mcp__takes__get_comments", [:]) == "get comments")
+        #expect(ChatParser.describe("Bash", ["command": "ffmpeg -i a.mov\nmore", "description": "Cut the silences"]) == "Bash · Cut the silences")
     }
 
     @Test func openCommentsGoWithATypedMessageButTheChatShowsOnlyTheMessage() {
@@ -136,9 +145,7 @@ struct ChatTests {
         #expect(!sent.contains("c2"))
         #expect(CopilotAsk.shown(sent) == "fix that one")
         #expect(ClaudeChat.withComments("hi", [c[1]]) == "hi")
-    }
-
-    @Test func openCommentsSayWhereTheyAre() {
+        // Where each open comment is, and the label.
         let v17 = Comment(id: "c7", file: "edits/short-v17.mp4", start: 12, text: "Captions\ntoo low", status: "open", by: "user", at: "")
         let v18 = Comment(id: "c8", file: "edits/short-v18.mp4", text: "Cut", status: "open", by: "user", at: "")
         let shot = Comment(id: "c9", file: "storyboard/storyboard.json", text: "Wider", status: "open", by: "user", at: "", shot: "s4")
@@ -227,12 +234,6 @@ struct ChatTests {
         #expect(inner.contains("t9"))
     }
 
-    @Test func subagentStepsStayHidden() {
-        var p = ChatParser([])
-        p.consume(#"{"type":"assistant","parent_tool_use_id":"t9","message":{"content":[{"type":"text","text":"inner"}]}}"#)
-        #expect(p.messages.isEmpty)
-    }
-
     @Test func errorResultShows() {
         var p = ChatParser([ChatMessage(role: .tool, text: "Bash", toolID: "t", done: false)])
         p.consume(#"{"type":"result","subtype":"error_during_execution","is_error":true,"result":""}"#)
@@ -272,11 +273,6 @@ struct ChatTests {
         #expect(FileManager.default.fileExists(atPath: other.path))
         #expect(file.path.hasSuffix("_library/.rules-seen/abc-123.json"))
     }
-
-    @Test func describesMcpAndBash() {
-        #expect(ChatParser.describe("mcp__takes__get_comments", [:]) == "get comments")
-        #expect(ChatParser.describe("Bash", ["command": "ffmpeg -i a.mov\nmore", "description": "Cut the silences"]) == "Bash · Cut the silences")
-    }
 }
 
 struct ChatRefTests {
@@ -292,9 +288,11 @@ struct ChatRefTests {
         let p = ChatRefs.split(reply) { files.contains($0) }
         #expect(p == [.text("Your best edit:"), .file(URL(fileURLWithPath: "/m/WebMCP/edits/webmcp-short-v11.mp4")),
                       .text("It did well:"), .post(URL(string: "https://www.linkedin.com/posts/jane-doe_abc-ugcPost-1")!)])
-    }
-
-    @Test func wrappedReferencesCount() {
+        // Missing files and plain links stay text.
+        #expect(ChatRefs.reference("/m/missing.mp4") { files.contains($0) } == nil)
+        #expect(ChatRefs.reference("https://example.com/a") { _ in false } == nil)
+        #expect(ChatRefs.reference("See https://x.com/a/status/1 for it") { _ in false } == nil)
+        // A path in backticks or a markdown link still counts.
         #expect(ChatRefs.reference("`/m/WebMCP/posts/linkedin.md`") { files.contains($0) } == .file(URL(fileURLWithPath: "/m/WebMCP/posts/linkedin.md")))
         #expect(ChatRefs.reference("- [the post](https://x.com/janedoe/status/1)") { _ in false } == .post(URL(string: "https://x.com/janedoe/status/1")!))
     }
@@ -330,12 +328,6 @@ struct ChatRefTests {
         #expect(url.pathExtension == (ChatAttach.cwebp == nil ? "png" : "webp"))
         #expect(NSImage(contentsOf: url)?.size == NSSize(width: 4, height: 4))
         #expect(!FileManager.default.fileExists(atPath: url.deletingPathExtension().appendingPathExtension("png").path) || url.pathExtension == "png")
-    }
-
-    @Test func otherLinesStayText() {
-        #expect(ChatRefs.reference("/m/missing.mp4") { files.contains($0) } == nil)
-        #expect(ChatRefs.reference("https://example.com/a") { _ in false } == nil)
-        #expect(ChatRefs.reference("See https://x.com/a/status/1 for it") { _ in false } == nil)
     }
 
     @Test func postKeysMatchAcrossForms() {
@@ -401,11 +393,6 @@ struct AgentCommandTests {
 }
 
 struct ChatParagraphTests {
-    @Test func blankLinesAndListsSplitBlocks() {
-        let t = "Intro line\nmore\n\n- one\n- two\nAfter the list"
-        #expect(ChatRefs.paragraphs(t) == [["Intro line", "more"], ["- one", "- two"], ["After the list"]])
-        #expect(ChatRefs.bullet("- **Bold.** rest") == "**Bold.** rest")
-    }
 
     @Test func tablesHeadingsListsCodeAndQuotesBecomeBlocks() {
         let t = """
@@ -447,6 +434,12 @@ struct ChatParagraphTests {
             .rule,
             .text(["Ship it?"]),
         ])
+        // Blank lines and lists split paragraphs.
+        do {
+            let t = "Intro line\nmore\n\n- one\n- two\nAfter the list"
+            #expect(ChatRefs.paragraphs(t) == [["Intro line", "more"], ["- one", "- two"], ["After the list"]])
+            #expect(ChatRefs.bullet("- **Bold.** rest") == "**Bold.** rest")
+        }
     }
 
     @Test func aTableWithoutItsSeparatorYetStaysText() {
@@ -499,7 +492,7 @@ struct ChatParagraphTests {
         }
     }
 
-    @Test func everyToolRunIsOneTimeline() {
+    @MainActor @Test func everyToolRunIsOneTimeline() {
         let tool = { (t: String) in ChatMessage(role: .tool, text: t) }
         let msgs = [tool("computer"), tool("computer"), ChatMessage(role: .claude, text: "ok"),
                     tool("computer"), tool("javascript tool"), tool("computer"), tool("Bash · ls")]
@@ -508,24 +501,14 @@ struct ChatParagraphTests {
         guard case .tools(let run) = items[2] else { Issue.record("no run"); return }
         #expect(run.count == 4)
         #expect(ChatItem.summary(run) == "4 steps · computer, javascript tool, Bash")
-    }
-
-    @Test func stepWordsChangeTenseWhenDone() {
-        func w(_ line: String) -> (String, String) {
-            let (tool, d) = StepWords.split(line)
-            let r = StepWords.words(tool, details: d.map { [$0] } ?? [], count: 1)
-            return (r.run, r.done)
-        }
-        #expect(w("get session") == ("Opening the session", "Opened the session"))
-        #expect(w("Read · script.md") == ("Reading script.md", "Read script.md"))
-        #expect(w("Bash · Cut the silences") == ("Cutting the silences", "Cut the silences"))
-        #expect(w("Bash · List the stills") == ("Listing the stills", "Listed the stills"))
-        #expect(w("Bash · Render edit v3") == ("Rendering edit v3", "Rendered edit v3"))
-        #expect(w("Bash · Make a thumbnail") == ("Making a thumbnail", "Made a thumbnail"))
-        #expect(w("Grep · silence") == ("Searching for “silence”", "Searched for “silence”"))
-        #expect(w("set post hooks") == ("Writing hooks", "Wrote hooks"))
-        #expect(w("add broll") == ("Adding the broll", "Added the broll"))
-        #expect(w("Bash · ffmpeg -i a.mov").0 == "Running a command")
+        // A job's note stays its own line and does not fold into the steps.
+        let note = ChatMessage(role: .tool, text: "Render edit v3 is done", toolID: ChatMessage.jobNote)
+        let tools = (1...3).map { ChatMessage(role: .tool, text: "Bash · step \($0)", toolID: "t\($0)") }
+        let noted = ChatItem.group([note] + tools)
+        #expect(noted.count == 2)
+        if case .message(let m) = noted[0] { #expect(m.isJobNote) } else { Issue.record("the note was folded") }
+        if case .tools(let t) = noted[1] { #expect(t.count == 3) } else { Issue.record("the steps did not fold") }
+        #expect(ClaudeChat.recap([note]).contains("Render edit v3 is done"))
     }
 
     @Test func callsOfOneToolInARowJoin() {
@@ -543,6 +526,24 @@ struct ChatParagraphTests {
         let dead = StepWords.steps([tool("Read · cut.md", true), failed])
         #expect(dead.count == 2 && dead[1].failed && !dead[0].failed)
         #expect(StepWords.time(72) == "1m 12s" && StepWords.time(9) == "9s")
+        // Each step's words change tense when done.
+        do {
+            func w(_ line: String) -> (String, String) {
+                let (tool, d) = StepWords.split(line)
+                let r = StepWords.words(tool, details: d.map { [$0] } ?? [], count: 1)
+                return (r.run, r.done)
+            }
+            #expect(w("get session") == ("Opening the session", "Opened the session"))
+            #expect(w("Read · script.md") == ("Reading script.md", "Read script.md"))
+            #expect(w("Bash · Cut the silences") == ("Cutting the silences", "Cut the silences"))
+            #expect(w("Bash · List the stills") == ("Listing the stills", "Listed the stills"))
+            #expect(w("Bash · Render edit v3") == ("Rendering edit v3", "Rendered edit v3"))
+            #expect(w("Bash · Make a thumbnail") == ("Making a thumbnail", "Made a thumbnail"))
+            #expect(w("Grep · silence") == ("Searching for “silence”", "Searched for “silence”"))
+            #expect(w("set post hooks") == ("Writing hooks", "Wrote hooks"))
+            #expect(w("add broll") == ("Adding the broll", "Added the broll"))
+            #expect(w("Bash · ffmpeg -i a.mov").0 == "Running a command")
+        }
     }
 }
 
@@ -672,6 +673,38 @@ struct PoliteOpenTests {
         #expect(app.notices.count == 1)
     }
 
+    /// The browser extension's "Record in Takes": a new Inbox session with the words as its
+    /// script, left as a notice; the screen stays where it was.
+    @Test func recordInTakesAddsAnInboxSession() throws {
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory.appending(path: "new-\(UUID().uuidString)")
+        try fm.createDirectory(at: root.appending(path: "P"), withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: root) }
+        let app = AppModel()
+        let home = app.library.root
+        defer { app.library.setRoot(home) }
+        app.library.setRoot(root)
+        var c = URLComponents(string: "takes://new")!
+        c.queryItems = [.init(name: "text", value: "  Most founders never post video.\nHere is why.  "),
+                        .init(name: "title", value: "Why founders skip video")]
+        app.handle(url: c.url!)
+        let made = try #require(app.notices.first?.session)
+        #expect(made.deletingLastPathComponent().lastPathComponent == "Inbox")
+        #expect(made.lastPathComponent.hasSuffix("-why-founders-skip-video"))
+        #expect(try String(contentsOf: made.appending(path: "script.md"), encoding: .utf8)
+                == "Most founders never post video.\nHere is why.\n")
+        #expect(SessionDoc(url: made).meta.title == "Why founders skip video")
+        #expect(app.library.current == nil)
+        // No words, no session.
+        app.handle(url: URL(string: "takes://new?title=Empty")!)
+        #expect(app.notices.count == 1)
+        // The link exactly as the extension writes it (extension/takes.js, encodeURIComponent).
+        app.handle(url: URL(string: "takes://new?text=Hi%20%26%20bye%3F%0A%232&title=A%2FB%20title")!)
+        let second = try #require(app.notices.last?.session)
+        #expect(try String(contentsOf: second.appending(path: "script.md"), encoding: .utf8) == "Hi & bye?\n#2\n")
+        #expect(SessionDoc(url: second).meta.title == "A/B title")
+    }
+
     /// Show on a new edit: its session, the Assets tab, the file on the stage, the chat open.
     /// Before (2026-10-04), from Post the file played unseen behind it.
     @Test func showingANoticePlaysTheFileInSight() async throws {
@@ -765,6 +798,8 @@ struct ChatRunTests {
         let script = dir.appending(path: "claude")
         try """
         #!/bin/bash
+        # Only chat turns count: a sign-in check another test starts may call this too.
+        case "$1" in auth|mcp|--version) exit 0;; esac
         n=$(( $(cat "\(dir.path)/n" 2>/dev/null || echo 0) + 1 ))
         # The ask is whole before the run counts: a test that sees the run reads all of it.
         cat > "\(dir.path)/ask-$n.part"; mv "\(dir.path)/ask-$n.part" "\(dir.path)/ask-$n.txt"; echo $n > "\(dir.path)/n"
@@ -779,10 +814,17 @@ struct ChatRunTests {
     func ask(_ n: Int) -> String? { try? String(contentsOf: dir.appending(path: "ask-\(n).txt"), encoding: .utf8) }
     var runs: Int { Int((try? String(contentsOf: dir.appending(path: "n"), encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "") ?? 0 }
 
-    func until(_ seconds: Double = 10, _ ok: () -> Bool) async {
+    /// Waits until `ok`. The deadline only matters when the test fails: a busy Mac (load 20+)
+    /// took over 10 s for a fast fake run.
+    func until(_ seconds: Double = 30, _ ok: () -> Bool) async {
         let end = Date().addingTimeInterval(seconds)
         while !ok() && Date() < end { try? await Task.sleep(for: .milliseconds(50)) }
     }
+
+    /// Bash that waits until the test calls `openGate()`, or until its folder is gone. In place of
+    /// a fixed sleep: the run ends when the test or the chat ends it, never because the Mac was slow.
+    var gate: String { #"while [ -d "\#(dir.path)" ] && [ ! -e "\#(dir.path)/gate" ]; do sleep 0.05; done"# }
+    func openGate() { FileManager.default.createFile(atPath: dir.appending(path: "gate").path, contents: nil) }
 
     func cleanup() {
         ClaudeChat.claudeOverride = nil
@@ -815,6 +857,10 @@ struct ChatRunTests {
         // The takes MCP loads its main tools at the start only in Takes' own chats.
         #expect(env["TAKES_CHAT"] == "1")
         #expect(!env.keys.contains { $0.hasPrefix("CLAUDE_CODE_") || $0.hasPrefix("CLAUDECODE") })
+        // A board's chat says which board it is.
+        #expect(ClaudeChat.environment()["TAKES_BOARD"] == nil)
+        #expect(ClaudeChat.environment(board: "styles")["TAKES_BOARD"] == "styles")
+        #expect(ClaudeChat.environment(board: "styles")["TAKES_CHAT"] == "1")
     }
 
     @Test func aKillFromOutsideEndsTheRunAndSendsWhatWaited() async throws {
@@ -849,16 +895,19 @@ struct ChatRunTests {
         await until(30) { runs == 2 && !next.running }
         #expect(ask(2)?.hasSuffix(ClaudeChat.goOn) == true)
         #expect(next.queued.isEmpty)
+        // A message that waited at the quit goes out on load, and the chat settles.
+        #expect(!next.running)
     }
 
     @Test func aSteerShowsNoErrorAndGoesOn() async throws {
         defer { cleanup() }
-        // The sleep outlives bash and keeps its output pipe open: the end must not wait for it.
-        try fake(#"if [ $n = 1 ]; then sleep 20; fi"#)
+        // Run 1 waits on a gate that never opens. Its child outlives bash and keeps the output pipe
+        // open: the end must not wait for it.
+        try fake("if [ $n = 1 ]; then \(gate) & \(gate); fi")
         let chat = ClaudeChat(session: session)
         chat.send("Find posts", title: "T", onStage: nil)
         // Steer once run 1 counted (2026-10-21): a steer before bash saved ask-1 made the next run
-        // number 1 again, and it slept 20 s.
+        // number 1 again, and it waited.
         await until { runs == 1 }
         chat.send("Still on it?!", title: "T", onStage: nil, now: true)
         await until { runs == 2 && !chat.running }
@@ -902,13 +951,17 @@ struct ChatRunTests {
 
     @Test func compactQueuesAloneAndRunsFirst() async throws {
         defer { cleanup() }
-        try fake(#"if [ $n = 1 ]; then sleep 0.8; fi"#)
+        try fake("if [ $n = 1 ]; then \(gate); fi")
         let chat = ClaudeChat(session: session)
         chat.send("Find posts", title: "T", onStage: nil)
         // From the phone every message steers; /compact must not become part of a steer.
         chat.send("/compact", title: "T", onStage: nil, now: true)
         chat.send("And then this", title: "T", onStage: nil)
         #expect(chat.queued == ["/compact", "And then this"])
+        // Run 1 goes on: a steer would have ended it.
+        await until { runs == 1 }
+        #expect(chat.running && chat.queued == ["/compact", "And then this"])
+        openGate()
         await until { runs == 3 && !chat.running }
         #expect(ask(2) == "/compact")
         #expect(ask(3) == "And then this")
@@ -917,7 +970,7 @@ struct ChatRunTests {
 
     @Test func stopEndsARunAndDropsTheQueue() async throws {
         defer { cleanup() }
-        try fake(#"if [ $n = 1 ]; then sleep 20; fi"#)
+        try fake("if [ $n = 1 ]; then \(gate); fi")
         let chat = ClaudeChat(session: session)
         chat.send("Find posts", title: "T", onStage: nil)
         chat.send("Later", title: "T", onStage: nil)
@@ -927,26 +980,14 @@ struct ChatRunTests {
         await until { !chat.running }
         #expect(!chat.running)
         #expect(chat.messages.last?.text == "Stopped.")
-        try? await Task.sleep(for: .milliseconds(300))
-        #expect(runs == 1)
-    }
-
-    @Test func messagesThatWaitedAtAQuitGoOutOnLoad() async throws {
-        defer { cleanup() }
-        try fake("")
-        var log = ChatLog(conversation: "c1", started: true, messages: [ChatMessage(role: .user, text: "Find posts")])
-        log.pending = ["Still on it?!"]
-        try JSONEncoder().encode(log).write(to: ClaudeChat.file(session))
-        let chat = ClaudeChat(session: session)
-        await until { runs == 1 && !chat.running }
-        #expect(ask(1)?.hasSuffix("Still on it?!") == true)
+        // Nothing waits, so nothing can run later: no fixed wait to prove it.
         #expect(chat.queued.isEmpty)
-        #expect(!chat.running)
+        #expect(runs == 1)
     }
 
     @Test func resetWhileRunningKeepsTheNewAsk() async throws {
         defer { cleanup() }
-        try fake(#"if [ $n = 1 ]; then sleep 20; fi"#)
+        try fake("if [ $n = 1 ]; then \(gate); fi")
         let chat = ClaudeChat(session: session)
         chat.send("Old run", title: "T", onStage: nil)
         await until { runs == 1 }

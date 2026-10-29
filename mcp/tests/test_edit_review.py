@@ -32,10 +32,12 @@ class EditReview(unittest.TestCase):
                     " {'start': 1.0, 'end': 2.0, 'area': 'cut', 'what': 'Long pause.', 'sure': 'medium'},\n"
                     " {'start': 40.0, 'end': 41.0, 'area': 'cut', 'what': 'Past the end.', 'sure': 'high'}]}))\n" % self.calls)
         os.environ["TAKES_REVIEW_CMD"] = json.dumps([sys.executable, fake])
-        self.key = t.gemini_key
+        self.key, self.builtin = t.gemini_key, t.run_builtin
+        # These tests are about the review: the built-in checks would only start ffmpeg (2026-10-27).
+        t.run_builtin = lambda s, rel, path, given=None, as_rel=None: ([], {"src": {"path": None}, "known": False})
 
     def tearDown(self):
-        t.gemini_key = self.key
+        t.gemini_key, t.run_builtin = self.key, self.builtin
         shutil.rmtree(self.root)
         for k, v in self.env.items():
             os.environ.pop(k, None)

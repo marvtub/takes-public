@@ -5,35 +5,35 @@ import Testing
 // 2026-10-02: each session opens on the tab and the file it showed last.
 
 @Suite(.serialized) struct SessionViewTests {
-    @Test func keepsTabFileAndTimePerSession() {
-        // Real folders: past 200 saved sessions, a write drops one whose folder is gone, and saved
-        // views pile up in the test process's defaults over many runs.
+    @Test func keepsTabFileAndTimePerSession() throws {
+        // Its own defaults: other tests write the shared "sessionViews" at the same time, and a
+        // write from one of them dropped this test's entry (3 runs).
+        let name = "session-view-\(UUID().uuidString)"
+        let d = try #require(UserDefaults(suiteName: name))
         let base = FileManager.default.temporaryDirectory.appending(path: "takes-view-\(UUID().uuidString)")
         let a = base.appending(path: "p/a"), b = base.appending(path: "p/b")
-        try? FileManager.default.createDirectory(at: a, withIntermediateDirectories: true)
-        try? FileManager.default.createDirectory(at: b, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: a, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: b, withIntermediateDirectories: true)
         defer {
             try? FileManager.default.removeItem(at: base)
-            var all = UserDefaults.standard.dictionary(forKey: SessionView.key) ?? [:]
-            all[a.path] = nil; all[b.path] = nil
-            UserDefaults.standard.set(all, forKey: SessionView.key)
+            d.removePersistentDomain(forName: name)
         }
-        SessionView.write(a, mode: .assets, file: a.appending(path: "edits/cut-v2.mp4"), time: 12.5)
-        SessionView.write(b, mode: .post, file: nil, time: nil)
+        SessionView.write(a, mode: .assets, file: a.appending(path: "edits/cut-v2.mp4"), time: 12.5, defaults: d)
+        SessionView.write(b, mode: .post, file: nil, time: nil, defaults: d)
 
-        let va = SessionView.read(a)
+        let va = SessionView.read(a, defaults: d)
         #expect(va.mode == .assets)
         #expect(va.file?.path == a.appending(path: "edits/cut-v2.mp4").path)
         #expect(va.time == 12.5)
-        let vb = SessionView.read(b)
+        let vb = SessionView.read(b, defaults: d)
         #expect(vb.mode == .post)
         #expect(vb.file == nil)
 
         // The file is kept relative to the session folder.
-        let raw = (UserDefaults.standard.dictionary(forKey: SessionView.key)?[a.path] as? [String: Any])?["file"] as? String
+        let raw = (d.dictionary(forKey: SessionView.key)?[a.path] as? [String: Any])?["file"] as? String
         #expect(raw == "edits/cut-v2.mp4")
         // A session never seen opens on Record.
-        #expect(SessionView.read(URL(fileURLWithPath: "/tmp/nowhere")).mode == .record)
+        #expect(SessionView.read(URL(fileURLWithPath: "/tmp/nowhere"), defaults: d).mode == .record)
     }
 
     // 2026-10-08: a session never seen opens where its session.json says (the demo session).

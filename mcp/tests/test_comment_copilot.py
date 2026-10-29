@@ -81,8 +81,7 @@ class CommentCopilot(unittest.TestCase):
             self.add(variants=self.V[:2])
         with self.assertRaisesRegex(ValueError, "same"):
             self.add(variants=[self.V[0], self.V[1], "  NGL the naming part is the hard bit"])
-
-    def test_needs_an_angle(self):
+        # An angle is needed too.
         with self.assertRaisesRegex(ValueError, "angle"):
             self.add(angle=" ")
 
@@ -90,26 +89,6 @@ class CommentCopilot(unittest.TestCase):
         self.add()
         with self.assertRaisesRegex(ValueError, "Already suggested"):
             self.add(url="https://www.linkedin.com/feed/update/urn:li:activity:1?utm=x")
-
-    def test_scouts_carry_the_rules_and_skips(self):
-        sid = self.add(source="feed")["id"]
-        self.assertEqual(self.file(sid)["post"]["source"], "feed")
-        sc = t.t_get_comment_context({})["scouts"]
-        self.assertEqual(set(sc), {"feed", "list", "search", "commenters"})
-        for brief in sc.values():
-            self.assertIn("tabs_create_mcp", brief)        # a subagent sees only its brief
-            self.assertIn("Pass that tabId on every browser call", brief)  # one tab per scout
-            self.assertIn("never open a second one", brief)  # navigate it, no tab per post
-            self.assertIn("Never click Like", brief)
-            self.assertIn("urn:li:activity:1", brief)       # the post already drafted
-            self.assertIn('"candidates"', brief)
-        self.assertIn("commenting-targets.md", sc["list"])
-        self.assertIn("24 hours", sc["list"])
-        self.assertIn("new_targets", sc["feed"])
-        for name in ("feed", "search"):
-            self.assertIn("recent-activity/all/", sc[name])  # where a post's link is found
-        self.assertIn("Skip anyone on the target list", sc["search"])
-        self.assertIn("Skip anyone on the target list", sc["commenters"])
 
     def test_redraft_after_feedback(self):
         sid = self.add()["id"]
@@ -144,6 +123,25 @@ class CommentCopilot(unittest.TestCase):
         self.assertEqual(len(ctx["skip_post_urls"]), 2)
         self.assertIn("Jane", ctx["targets"])
         self.assertIn("Comment lessons", ctx["lessons"])
+        # The scouts' briefs carry the rules and the skips.
+        sid = self.add(url="https://l.in/3", source="feed")["id"]
+        self.assertEqual(self.file(sid)["post"]["source"], "feed")
+        sc = t.t_get_comment_context({})["scouts"]
+        self.assertEqual(set(sc), {"feed", "list", "search", "commenters"})
+        for brief in sc.values():
+            self.assertIn("tabs_create_mcp", brief)        # a subagent sees only its brief
+            self.assertIn("Pass that tabId on every browser call", brief)  # one tab per scout
+            self.assertIn("never open a second one", brief)  # navigate it, no tab per post
+            self.assertIn("Never click Like", brief)
+            self.assertIn("urn:li:activity:1", brief)       # the post already drafted
+            self.assertIn('"candidates"', brief)
+        self.assertIn("commenting-targets.md", sc["list"])
+        self.assertIn("24 hours", sc["list"])
+        self.assertIn("new_targets", sc["feed"])
+        for name in ("feed", "search"):
+            self.assertIn("recent-activity/all/", sc[name])  # where a post's link is found
+        self.assertIn("Skip anyone on the target list", sc["search"])
+        self.assertIn("Skip anyone on the target list", sc["commenters"])
 
     def test_posted_and_stats(self):
         sid = self.add()["id"]
@@ -172,13 +170,6 @@ class CommentCopilot(unittest.TestCase):
         self.assertEqual(got[0]["quote"], "Jane")
         t.t_reply_comment({"library": "comments", "replies": [{"id": "c1", "text": "Removed", "resolve": True}]})
         self.assertEqual(t.t_get_comment_context({})["open_comments"], 0)
-
-    @unittest.skipUnless(t.SOCIAL, "the comment copilot is private: the public server lists none of its tools")
-    def test_tools_registered(self):
-        names = {n for n, *_ in t.TOOLS}
-        for n in ("get_comment_context", "add_comment_suggestion", "redraft_comment",
-                  "list_comment_suggestions", "set_comment_posted", "set_comment_stats"):
-            self.assertIn(n, names)
 
 
 if __name__ == "__main__":

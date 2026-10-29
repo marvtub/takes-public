@@ -367,6 +367,11 @@ struct StylesBoard: View {
     @State private var projects: [URL] = []
     @State private var asking = false
     @State private var example = ""
+    /// Styles or Effects (2026-10-28): the board's two pages, switched under its title.
+    @AppStorage("stylesPage") private var page = "styles"
+    @State private var askingEffect = false
+    @State private var effectCount = 0
+    @Namespace private var pageNS
     /// Videos and images for the next style, dropped on the board or in the sheet.
     @State private var dropped: [URL] = []
     /// When "Make it" was clicked (seconds since 1970), 0 when no style is being made. Kept so the
@@ -389,15 +394,22 @@ struct StylesBoard: View {
             }
             ScrollView {
                 VStack(alignment: .leading, spacing: 36) {
-                    header
-                    gallery
-                    if let dir = openDir, let openName {
-                        LibrarySection(number: "01", title: openName,
-                                       subtitle: dir.lastPathComponent == StyleLib.folder ? "Wins over the style" : "Guide, colours, type and parts",
-                                       dir: dir, store: store, comments: comments,
-                                       copyTargets: copyTargets(from: dir), onShow: { app.styleFile = $0 })
+                    VStack(alignment: .leading, spacing: 18) {
+                        header
+                        pageSwitch
                     }
-                    if !projects.isEmpty { projectList }
+                    if page == "effects" {
+                        EffectsSection(root: root, asking: $askingEffect)
+                    } else {
+                        gallery
+                        if let dir = openDir, let openName {
+                            LibrarySection(number: "01", title: openName,
+                                           subtitle: dir.lastPathComponent == StyleLib.folder ? "Wins over the style" : "Guide, colours, type and parts",
+                                           dir: dir, store: store, comments: comments,
+                                           copyTargets: copyTargets(from: dir), onShow: { app.styleFile = $0 })
+                        }
+                        if !projects.isEmpty { projectList }
+                    }
                 }
                 .padding(.horizontal, app.styleFile == nil ? 32 : 20).padding(.vertical, app.styleFile == nil ? 28 : 20)
                 .frame(maxWidth: app.styleFile == nil ? 1100 : .infinity, alignment: .leading)
@@ -408,7 +420,7 @@ struct StylesBoard: View {
         }
         .background(Theme.paper)
         .onAppear { focus(); scan() }
-        .onChange(of: app.styleFile) { focus() }
+        .onChange(of: app.styleFile) { focus(showPage: true) }
         .onChange(of: opened) { scan() }
         .onFilesChanged(in: StyleLib.user(root: root)) { if !app.isRecording { scan() } }
         .onExitCommand { app.styleFile = nil }
@@ -416,6 +428,7 @@ struct StylesBoard: View {
             NewStyleSheet.urls(from: providers) { url in
                 if dropped.count < NewStyleSheet.most, !dropped.contains(url) { dropped.append(url) }
             }
+            page = "styles"
             asking = true
             return true
         }
@@ -430,9 +443,13 @@ struct StylesBoard: View {
         }
     }
 
-    /// A file opened from elsewhere (a link, get_library): open its library too.
-    private func focus() {
-        if let f = app.styleFile, let lib = StyleLib.root(containing: f), lib != opened { opened = lib }
+    /// A file opened from elsewhere (a link, get_library): open its library too, on the Styles page.
+    /// An effect's own files (_library/effects) leave the open style as it is.
+    private func focus(showPage: Bool = false) {
+        guard let f = app.styleFile, !f.path.contains("/\(StyleLib.folder)/effects/"),
+              let lib = StyleLib.root(containing: f) else { return }
+        if lib != opened { opened = lib }
+        if showPage { page = "styles" }
     }
 
     @ViewBuilder private func stage(_ url: URL) -> some View {
@@ -457,18 +474,60 @@ struct StylesBoard: View {
         HStack(alignment: .firstTextBaseline) {
             VStack(alignment: .leading, spacing: 4) {
                 Text("Styles").font(Theme.display(28)).foregroundStyle(Theme.ink)
-                Text("Each video picks its style on its Assets tab.")
+                Text(page == "effects" ? "Ready-made moments you can ask Takes to add to a video."
+                                       : "Each video picks its style on its Assets tab.")
                     .font(Theme.sans(12.5)).foregroundStyle(Theme.muted)
             }
             Spacer()
-            Button { asking = true } label: { Label("New style", systemImage: "plus") }
-                .buttonStyle(AccentButtonStyle(kind: .quiet))
-                .help("Takes makes a new style from your example: a link, a video, an image, or words")
-                .sheet(isPresented: $asking) {
-                    NewStyleSheet(example: $example, files: $dropped, busy: makingSince > 0, steps: Self.steps,
-                                  make: make, cancel: { asking = false })
-                }
+            if page == "effects" {
+                Button { askingEffect = true } label: { Label("New effect", systemImage: "plus") }
+                    .buttonStyle(AccentButtonStyle(kind: .quiet))
+                    .help("Takes makes a new effect from your example: a reel link or words")
+            } else {
+                Button { asking = true } label: { Label("New style", systemImage: "plus") }
+                    .buttonStyle(AccentButtonStyle(kind: .quiet))
+                    .help("Takes makes a new style from your example: a link, a video, an image, or words")
+            }
         }
+        .sheet(isPresented: $asking) {
+            NewStyleSheet(example: $example, files: $dropped, busy: makingSince > 0, steps: Self.steps,
+                          make: make, cancel: { asking = false })
+        }
+    }
+
+    /// Styles · Effects, like the switch at the top of a video's Assets.
+    private var pageSwitch: some View {
+        HStack(spacing: 2) {
+            pageItem("Styles", "styles", count: cards.count)
+            pageItem("Effects", "effects", count: effectCount)
+        }
+        .padding(2)
+        .background(Theme.hover, in: RoundedRectangle(cornerRadius: 8))
+        .fixedSize()
+        .animation(Theme.spring, value: page)
+        .task(id: root) { effectCount = EffectLib.cards(root: root).count }
+        .onFilesChanged(in: StyleLib.user(root: root)) { effectCount = EffectLib.cards(root: root).count }
+    }
+
+    private func pageItem(_ title: String, _ id: String, count: Int) -> some View {
+        let on = page == id
+        return Button { page = id } label: {
+            HStack(spacing: 6) {
+                Text(title).font(Theme.sans(12.5, .medium)).foregroundStyle(on ? Theme.ink : Theme.muted)
+                if count > 0 { Text("\(count)").font(Theme.mono(11)).foregroundStyle(Theme.faint) }
+            }
+            .padding(.horizontal, 12).frame(height: 26)
+            .background {
+                if on {
+                    RoundedRectangle(cornerRadius: 6).fill(Theme.paper)
+                        .shadow(color: Theme.shadow, radius: 2, y: 1)
+                        .matchedGeometryEffect(id: "page", in: pageNS)
+                }
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(id == "effects" ? "Ready-made moments for a video. Takes uses one only when you ask for it." : "Your styles, their guides and parts")
     }
 
     // MARK: Gallery
@@ -1179,10 +1238,12 @@ struct DocReview: View {
 /// A style's preview in the gallery: preview.png (the best frame), with a play mark and the length.
 /// Without a png, a frame from the middle of the clip: the first one is usually a blank title card.
 /// Hover plays the clip in place, muted; a click turns the sound on or off. No player opens.
-private struct StylePoster: View {
+struct StylePoster: View {
     let video: URL?
     let poster: URL?
     let selected: Bool
+    /// Width over height: 4:5 for a style, 9:16 for an effect.
+    var aspect: CGFloat = 4.0 / 5.0
     var onSelect: () -> Void = {}
     /// Opens the preview big, to comment on it (2026-10-09): the hover button or a double-click.
     var onOpen: (() -> Void)?
@@ -1195,7 +1256,7 @@ private struct StylePoster: View {
 
     var body: some View {
         Color.clear
-            .aspectRatio(4.0 / 5.0, contentMode: .fit)
+            .aspectRatio(aspect, contentMode: .fit)
             .frame(maxWidth: .infinity)
             .background(Theme.stage)
             .overlay {
@@ -1307,7 +1368,7 @@ private struct StylePoster: View {
     }
 }
 
-private struct StylePlayerLayer: NSViewRepresentable {
+struct StylePlayerLayer: NSViewRepresentable {
     let player: AVPlayer
     func makeNSView(context: Context) -> NSView {
         let v = NSView()

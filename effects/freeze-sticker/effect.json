@@ -1,0 +1,16 @@
+{
+  "name": "Freeze sticker",
+  "description": "The picture freezes, the speaker lifts off as a sticker with a thick white outline over a blurred, darker background, a name tag pops on, then the live footage goes on.",
+  "when": "The first time you introduce yourself or a guest, or a beat where you want to stop and point at the person.",
+  "needs": [
+    "the name",
+    "a short role line",
+    "the cut time where it starts",
+    "a sharp frame to freeze on",
+    "a cutout of that frame (made in step 3)"
+  ],
+  "kind": "Cut-out",
+  "length_s": 6,
+  "shape": "any",
+  "shipped": true
+}

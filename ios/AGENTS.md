@@ -28,7 +28,7 @@ Mac over HTTPS on Tailscale (`API.swift`). The Mac side is `Sources/Takes/Phone.
 
 | Command | What it does |
 |---|---|
-| `ios/check.sh` | Builds the app and walks its screens in a hidden simulator. Screenshots go to `build.noindex/shots`. Never opens Simulator.app. |
+| `ios/check.sh` | Builds the app and runs the whole UI suite in a hidden simulator, against `standin.py` on 8797 (started when none runs). Each test resets the stand-in. Screenshots go to `build.noindex/shots`. Never opens Simulator.app. |
 | `ios/check.sh offline` | Starts `standin.py` (a fake Mac) and tests that changes wait, then go out. |
 | `ios/check.sh chat` | Streaming, keyboard and reading position in the chat. |
 | `ios/check.sh parity` | Walks the screens that copy the Mac (`ParityTests`). |

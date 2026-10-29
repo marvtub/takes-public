@@ -114,13 +114,6 @@ class MakeImage(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "quota.*no credits"):
             t.draw_sketch("one man", out + "3", "16:9")
 
-    def test_a_draft_says_how_to_make_its_final(self):
-        r = t.t_make_image({"session": self.s, "prompt": "A desk at night", "name": "desk", "format": "16:9"})
-        self.assertIn("from=generated/desk-v1.png", r["note"])
-        self.assertNotIn("final", r)
-        self.assertEqual(json.load(open(os.path.join(self.s, "generated", ".prompts.json")))["desk-v1.png"],
-                         {"prompt": "A desk at night", "images": [], "format": "16:9"})
-
     def test_the_final_of_a_draft_is_nano_banana_at_4k_with_the_draft_first(self):
         # The user likes the GPT draft: from= redraws it sharp with the same prompt, references and shape.
         got = []
@@ -142,6 +135,12 @@ class MakeImage(unittest.TestCase):
         self.assertTrue(g["prompt"].startswith(t.FINAL_ASK))
         self.assertIn("He waves through the window", g["prompt"])
         self.assertEqual(self.models("generated")["window-v2.png"], "Nano Banana 2.1")
+        # A draft says how to make its final and keeps its prompt.
+        r = t.t_make_image({"session": self.s, "prompt": "A desk at night", "name": "desk", "format": "16:9"})
+        self.assertIn("from=generated/desk-v1.png", r["note"])
+        self.assertNotIn("final", r)
+        self.assertEqual(json.load(open(os.path.join(self.s, "generated", ".prompts.json")))["desk-v1.png"],
+                         {"prompt": "A desk at night", "images": [], "format": "16:9"})
 
     def test_a_final_falls_back_to_sunburst_and_reads_the_shape_of_an_unknown_draft(self):
         def broke(*a, **k):

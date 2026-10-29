@@ -24,16 +24,15 @@ import Testing
     }
 
     @Test func theFirstLayoutIsAlreadyFullHeight() {
+        var heights: [Int: CGFloat] = [:]
         for n in [1, 3, 8, 30] {
             let (first, settled) = firstAndSettled(n)
             #expect(abs(first.height - settled.height) < 1, "\(n) changes: first \(first.height), settled \(settled.height)")
+            heights[n] = settled.height
         }
-    }
-
-    @Test func aLongListStopsAt560AndScrolls() {
-        let (short, _) = firstAndSettled(1)
-        let (long, _) = firstAndSettled(30)
-        #expect(long.height > short.height)
-        #expect(long.height < 560 + 200)
+        // A long list grows, then stops at 560 and scrolls.
+        let short = heights[1] ?? 0, long = heights[30] ?? 0
+        #expect(long > short)
+        #expect(long < 560 + 200)
     }
 }

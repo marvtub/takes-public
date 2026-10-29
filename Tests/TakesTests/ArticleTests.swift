@@ -5,12 +5,6 @@ import Testing
 // 2026-10-04: the blog article (posts/article.md), rendered as your blog renders a post.
 
 struct ArticleTests {
-    @Test func platformFiles() {
-        #expect(PostPlatform.article.rel == "posts/article.md")
-        #expect(PostPlatform.of(rel: "posts/article.md") == .article)
-        #expect(PostPlatform.of(rel: "posts/article/variants/short.md") == .article)
-    }
-
     @Test func markdownBlocks() {
         let h = Article.html("## Why\n\nI **ship** with *care* and `code`.\nSame paragraph.\n\n> A quote\n\n- one\n- two\n\n1. first\n2. second\n\n```bash\necho <hi>\n```\n\n---")
         #expect(h.contains("<h2>Why</h2>"))
@@ -20,6 +14,12 @@ struct ArticleTests {
         #expect(h.contains("<ol><li>first</li><li>second</li></ol>"))
         #expect(h.contains("<pre><code class=\"language-bash\">echo &lt;hi&gt;</code></pre>"))
         #expect(h.contains("<hr>"))
+        // Raw HTML stays; a {"..."} expression is its text.
+        do {
+            let h = Article.html("<video src=\"edits/a-v2.mp4\" controls></video>\n\nSay {\"> \"} here.")
+            #expect(h.contains("<video src=\"edits/a-v2.mp4\" controls></video>"))
+            #expect(h.contains("<p>Say &gt;  here.</p>"))
+        }
     }
 
     @Test func nestedListsAndLinks() {
@@ -80,12 +80,6 @@ struct ArticleTests {
         let head = ArticleHead(c)
         #expect(head.slug == "rest-is-an-input")
         #expect(head.json.contains("\"category\":\"life\""))
-    }
-
-    @Test func expressionsAndRawHTML() {
-        let h = Article.html("<video src=\"edits/a-v2.mp4\" controls></video>\n\nSay {\"> \"} here.")
-        #expect(h.contains("<video src=\"edits/a-v2.mp4\" controls></video>"))
-        #expect(h.contains("<p>Say &gt;  here.</p>"))
     }
 
     /// One of everything the blog has, for the snapshot.

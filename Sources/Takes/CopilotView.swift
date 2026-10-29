@@ -1548,7 +1548,7 @@ private struct LinkedInComment<Body_: View>: View {
     let focused: Bool
     @ViewBuilder var content: Body_
     @AppStorage("linkedinName") private var name = "You"
-    @AppStorage("linkedinHeadline") private var headline = ""
+    @AppStorage("linkedinHeadline") private var headline = LinkedIn.defaultHeadline
 
     var body: some View {
         HStack(alignment: .top, spacing: 10) {

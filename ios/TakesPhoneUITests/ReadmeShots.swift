@@ -14,12 +14,12 @@ final class ReadmeShots: XCTestCase {
         if app.buttons["Videos"].waitForExistence(timeout: 15) { app.buttons["Videos"].tap() }
         let row = app.buttons.matching(NSPredicate(format: "label CONTAINS 'I let AI edit'")).firstMatch
         XCTAssertTrue(row.waitForExistence(timeout: 15))
-        sleep(3)
+        app.settle(timeout: 3)
         shot("phone-videos")
         row.tap()
         for (tab, name) in [("Files", "phone-files"), ("Board", "phone-board"), ("Post", "phone-post")] {
             app.buttons[tab].tap()
-            sleep(4)
+            app.settle(timeout: 4)
             shot(name)
         }
     }

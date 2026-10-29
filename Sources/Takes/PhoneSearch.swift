@@ -15,6 +15,12 @@ struct PhoneHit: Codable, Hashable {
     var session: String?
     /// A board the phone has: styles, performance, comments.
     var board: String?
+    /// The date group a date sort puts it in ("This week"); nil under Best match (2026-10-28).
+    var section: String?
+    /// A clip's or a still's size as it plays, and a clip's length, so the phone shows its shape.
+    var w: Int?
+    var h: Int?
+    var seconds: Double?
 }
 
 struct PhoneSearch: Codable, Hashable {
@@ -34,8 +40,32 @@ extension PhoneServer {
         var found: [MediaSearch.Hit] = appModel == nil ? [] : await MediaSearch.shared.search(q, limit: 400)
         if found.isEmpty { found = await MediaSearch.byName(q, root: root, limit: 400) }
         let kept = found.filter { MediaSearch.keeps($0, filter, project: folder) }
-        let hits = (places + MediaSearch.relevant(kept).prefix(40)).compactMap { phoneHit($0, root: root) }
-        return .encode(PhoneSearch(hits: hits, status: status))
+        // The results page asks for more (limit=200) and a sort; the list keeps 40 by best match.
+        let limit = min(200, max(1, req.query["limit"].flatMap(Int.init) ?? 40))
+        let sort = req.query["sort"].flatMap(MediaSearch.Sort.init(rawValue:)) ?? .best
+        let sections = MediaSearch.sections(places + MediaSearch.relevant(kept).prefix(limit), sort: sort)
+        var hits: [PhoneHit] = []
+        for section in sections {
+            for h in section.hits { if var p = phoneHit(h, root: root) { p.section = section.title; hits.append(p) } }
+        }
+        return .encode(PhoneSearch(hits: await Self.shaped(hits), status: status))
+    }
+
+    /// Adds each file's shape, a few at a time: reading a clip's header takes a few ms.
+    nonisolated static func shaped(_ hits: [PhoneHit]) async -> [PhoneHit] {
+        await withTaskGroup(of: (Int, SearchMedia.Shape?).self) { group in
+            for (i, h) in hits.enumerated() where h.title == nil {
+                let url = URL(fileURLWithPath: h.path)
+                guard SearchMedia.isVideo(url) || SearchMedia.isImage(url) else { continue }
+                group.addTask { (i, await SearchMedia.shape(url)) }
+            }
+            var out = hits
+            for await (i, shape) in group {
+                guard let shape else { continue }
+                out[i].w = Int(shape.size.width); out[i].h = Int(shape.size.height); out[i].seconds = shape.seconds
+            }
+            return out
+        }
     }
 
     @MainActor private func placesAndStatus(_ q: String, filter: MediaSearch.Filter, project: URL?, root: URL) -> ([MediaSearch.Hit], String) {

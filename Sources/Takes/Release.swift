@@ -19,10 +19,19 @@ final class Releaser {
     nonisolated static let repo: String? = Bundle.main.object(forInfoDictionaryKey: "ReleaseRepo") as? String
     nonisolated static var available: Bool { repo.map { FileManager.default.fileExists(atPath: $0 + "/.git") } ?? false }
     /// Fetches, then runs origin/main's release.sh; extra arguments follow it.
-    nonisolated static func command(_ repo: String) -> String {
+    nonisolated static func command(_ repo: String, script: String = "release.sh") -> String {
         let r = "'" + repo.replacingOccurrences(of: "'", with: "'\\''") + "'"
-        return "git -C \(r) fetch -q origin && TAKES_REPO=\(r) bash <(git -C \(r) show origin/main:scripts/public/release.sh)"
+        return "git -C \(r) fetch -q origin && TAKES_REPO=\(r) bash <(git -C \(r) show origin/main:scripts/public/\(script))"
     }
+
+    /// The release notes (2026-10-24): when a release stops at the notes check, the card shows the
+    /// lines of notes/next.md on origin/main. The user changes a line if he wants and approves them
+    /// there: approve-notes.sh sets approved: yes and pushes, then the release runs again.
+    var notes: String?
+    /// The notes' pictures (2026-10-24), read from origin/main into a temp folder for the card.
+    var notesMedia: [URL] = []
+    var approving = false
+    var approveError: String?
 
     /// The release that runs or last ended; nil once dismissed.
     var run: ReleaseRun?
@@ -56,6 +65,88 @@ final class Releaser {
     }
 
     func retry() { start(args: lastArgs, toast: toast) }
+
+    /// The card's Approve and release: The user's yes, with the lines as he left them.
+    func approveNotes() {
+        guard let repo = Self.repo, let text = notes, !approving, !running else { return }
+        approving = true
+        approveError = nil
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/bin/bash")
+        p.arguments = ["-c", Self.command(repo, script: "approve-notes.sh")]
+        var env = ProcessInfo.processInfo.environment
+        env["PATH"] = ClaudeChat.shellPath
+        p.environment = env
+        let input = Pipe(), out = Pipe()
+        p.standardInput = input
+        p.standardOutput = out
+        p.standardError = out
+        p.terminationHandler = { p in
+            let said = String(decoding: (try? out.fileHandleForReading.readToEnd()) ?? Data(), as: UTF8.self)
+            let ok = p.terminationStatus == 0
+            Task { @MainActor in Releaser.shared.approved(ok: ok, said: said) }
+        }
+        do {
+            try p.run()
+            input.fileHandleForWriting.write(Data(text.utf8))
+            try? input.fileHandleForWriting.close()
+        } catch {
+            approved(ok: false, said: error.localizedDescription)
+        }
+    }
+
+    private func approved(ok: Bool, said: String) {
+        approving = false
+        guard ok else {
+            let lines = said.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+            approveError = lines.suffix(4).joined(separator: "\n").nonEmpty ?? "The notes could not be approved."
+            return
+        }
+        notes = nil
+        retry()
+    }
+
+    /// Copies the notes' pictures out of origin/main, so the card can show what the release shows.
+    nonisolated static func fetchMedia(_ names: [String], repo: String) -> [URL] {
+        let dir = FileManager.default.temporaryDirectory.appending(path: "takes-release-notes")
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return names.compactMap { name in
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+            p.arguments = ["-C", repo, "show", "origin/main:scripts/public/notes/media/\(name)"]
+            let out = Pipe()
+            p.standardOutput = out
+            p.standardError = FileHandle.nullDevice
+            guard (try? p.run()) != nil else { return nil }
+            let data = out.fileHandleForReading.readDataToEndOfFile()
+            p.waitUntilExit()
+            let url = dir.appending(path: name)
+            guard p.terminationStatus == 0, (try? data.write(to: url)) != nil else { return nil }
+            return url
+        }
+    }
+
+    /// Reads notes/next.md from origin/main (the release fetched it just now).
+    private func loadNotes() {
+        guard let repo = Self.repo else { return }
+        Task.detached {
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+            p.arguments = ["-C", repo, "show", "origin/main:scripts/public/notes/next.md"]
+            let out = Pipe()
+            p.standardOutput = out
+            p.standardError = FileHandle.nullDevice
+            guard (try? p.run()) != nil else { return }
+            let text = String(decoding: out.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+            p.waitUntilExit()
+            let body = p.terminationStatus == 0 ? ReleaseRun.notesBody(text) : nil
+            let media = Releaser.fetchMedia(ReleaseRun.notesMedia(body ?? ""), repo: repo)
+            await MainActor.run {
+                Releaser.shared.notes = body?.nonEmpty
+                Releaser.shared.notesMedia = media
+            }
+        }
+    }
 
     func dismiss() {
         guard !running else { return }
@@ -102,6 +193,9 @@ final class Releaser {
         }
         partial = ""
         showDetail = false
+        notes = nil
+        notesMedia = []
+        approveError = nil
         run = ReleaseRun(media: args.contains("--media"), started: .now)
         process = p
         do { try p.run() } catch {
@@ -131,6 +225,7 @@ final class Releaser {
             ReleaseEstimates.save(r)
             toast(r.outcome == .nothingNew ? "Released: nothing new since the last release" : "Released to GitHub")
         } else {
+            if r.failedStep?.title == "Checking the release notes" { loadNotes() }
             showDetail = true
         }
     }
@@ -331,6 +426,24 @@ struct ReleaseRun: Equatable {
         return ("It stopped", errors.suffix(3).map { $0 })
     }
 
+    /// The lines of a notes file, without its "---" header.
+    nonisolated static func notesBody(_ file: String) -> String {
+        var text = file
+        if text.hasPrefix("---\n"), let end = text.range(of: "\n---\n", range: text.index(text.startIndex, offsetBy: 3)..<text.endIndex) {
+            text = String(text[end.upperBound...])
+        }
+        return text.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// The files the notes show: "![What it shows](media/<file>)" lines.
+    nonisolated static func notesMedia(_ body: String) -> [String] {
+        body.split(whereSeparator: \.isNewline).compactMap { line in
+            let t = line.trimmingCharacters(in: .whitespaces)
+            guard t.hasPrefix("!["), let r = t.range(of: "](media/"), t.hasSuffix(")") else { return nil }
+            return String(t[r.upperBound..<t.index(before: t.endIndex)])
+        }
+    }
+
     /// "test_a_voice_is_found" and "aVoiceIsFound()" both read "A voice is found".
     static func words(_ name: String) -> String {
         var s = name.hasPrefix("test_") ? String(name.dropFirst(5)) : name
@@ -370,6 +483,10 @@ struct ReleaseEstimates {
 
 private extension Int {
     var nonZero: Int? { self == 0 ? nil : self }
+}
+
+private extension String {
+    var nonEmpty: String? { isEmpty ? nil : self }
 }
 
 // MARK: - Sidebar
@@ -527,6 +644,7 @@ struct ReleaseDetail: View {
                 ForEach(run.steps) { s in row(s, run: run, now: now, e: e) }
             }
             if run.outcome == .failed { failure(run) }
+            if run.outcome == .failed, releaser.notes != nil { notesCard }
             buttons(run)
         }
     }
@@ -572,10 +690,12 @@ struct ReleaseDetail: View {
 
     private func failure(_ run: ReleaseRun) -> some View {
         let why = run.failure
+        // With the notes on the card, "show them to the user" is what the card does already.
+        let items = releaser.notes == nil ? why.items : why.items.filter { !$0.hasPrefix("The user has not approved") }
         return VStack(alignment: .leading, spacing: 8) {
             Text(why.title).font(Theme.sans(13, .semibold)).foregroundStyle(Theme.danger)
             VStack(alignment: .leading, spacing: 4) {
-                ForEach(why.items, id: \.self) { item in
+                ForEach(items, id: \.self) { item in
                     HStack(alignment: .firstTextBaseline, spacing: 6) {
                         Text("•").foregroundStyle(Theme.faint)
                         Text(item).font(Theme.sans(12)).foregroundStyle(Theme.ink).fixedSize(horizontal: false, vertical: true)
@@ -598,6 +718,45 @@ struct ReleaseDetail: View {
         .clipShape(RoundedRectangle(cornerRadius: 9))
     }
 
+    /// The notes to approve: the lines as the release will say them, editable in place.
+    @ViewBuilder private var notesCard: some View {
+        let r = releaser
+        VStack(alignment: .leading, spacing: 8) {
+            Text("What this release says").font(Theme.sans(13, .semibold)).foregroundStyle(Theme.ink)
+            TextEditor(text: Binding(get: { r.notes ?? "" }, set: { r.notes = $0 }))
+                .font(Theme.sans(12))
+                .foregroundStyle(Theme.ink)
+                .scrollContentBackground(.hidden)
+                .lineSpacing(2)
+                .frame(minHeight: 120, maxHeight: 240)
+                .disabled(r.approving)
+            if !r.notesMedia.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        ForEach(r.notesMedia, id: \.self) { url in
+                            if let image = NSImage(contentsOf: url) {
+                                Image(nsImage: image).resizable().aspectRatio(contentMode: .fit)
+                                    .frame(height: 90)
+                                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                                    .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Theme.border))
+                                    .onTapGesture { NSWorkspace.shared.open(url) }
+                                    .help("\(url.lastPathComponent): click to open it")
+                            }
+                        }
+                    }
+                }
+            }
+            Text("Change a line here if you want. Approve sends these notes with the release.")
+                .font(Theme.sans(11)).foregroundStyle(Theme.muted).fixedSize(horizontal: false, vertical: true)
+            if let e = r.approveError {
+                Text(e).font(Theme.sans(11)).foregroundStyle(Theme.danger).fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(12)
+        .background(Theme.hover)
+        .clipShape(RoundedRectangle(cornerRadius: 9))
+    }
+
     @ViewBuilder private func buttons(_ run: ReleaseRun) -> some View {
         HStack(spacing: 6) {
             switch run.outcome {
@@ -615,7 +774,13 @@ struct ReleaseDetail: View {
                 .help("Copies where it stopped, why, and the log path, ready to paste into Claude Code")
                 logButton(run)
                 Spacer(minLength: 4)
-                Button("Try again") { releaser.retry() }.buttonStyle(AccentButtonStyle(kind: .accent)).fixedSize()
+                if releaser.notes != nil {
+                    Button(releaser.approving ? "Approving…" : "Approve and release") { releaser.approveNotes() }
+                        .buttonStyle(AccentButtonStyle(kind: .accent)).fixedSize().disabled(releaser.approving)
+                        .help("Sets the notes to approved on main, then runs the release again")
+                } else {
+                    Button("Try again") { releaser.retry() }.buttonStyle(AccentButtonStyle(kind: .accent)).fixedSize()
+                }
             case .released, .nothingNew:
                 logButton(run)
                 Spacer()

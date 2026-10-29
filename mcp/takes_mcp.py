@@ -1176,6 +1176,87 @@ def comment_root(a):
     return resolve_session(a["session"])
 
 
+# ---------- effects (2026-10-28) ----------
+#
+# Ready-made effects for talking-head videos (text behind the head, a glass chart, a freeze-frame
+# sticker...). Takes ships them in the app's Resources/effects (effects/ in the repo); a user's own
+# go in <root>/_library/effects/ and win by folder name. Same files as Sources/Takes/Effects.swift.
+#   effect.json   {"name", "description", "when", "needs": [...], "length_s", "shape"}
+#   README.md     how to make it for a video
+#   src/          the HyperFrames composition: copy it into _edit/<name>/ and change the copy
+#   preview.mp4, preview.png
+# They are opt-in (2026-10-28, the user: "make sure the agent doesn't default to these"): no other
+# tool returns them, so they never shape a design the user did not ask for.
+
+EFFECT_FILES = ("effect.json", "README.md", "preview.mp4", "preview.png")
+
+
+def shipped_effects_dir():
+    """The app bundle's Resources/effects next to this file, else the repo's effects/ (tests, dev)."""
+    if os.environ.get("TAKES_EFFECTS"):
+        return os.environ["TAKES_EFFECTS"]
+    here = os.path.dirname(os.path.abspath(__file__))
+    for d in (os.path.join(here, "effects"), os.path.join(here, "..", "effects")):
+        if os.path.isdir(d):
+            return os.path.normpath(d)
+    return None
+
+
+def effect_dirs():
+    """{slug: folder}: the shipped effects, then the user's own (same name wins)."""
+    out = {}
+    for d in (shipped_effects_dir(), os.path.join(root(), LIB, "effects")):
+        if not d or not os.path.isdir(d):
+            continue
+        for n in sorted(os.listdir(d)):
+            if not n.startswith((".", "_")) and os.path.isfile(os.path.join(d, n, "effect.json")):
+                out[n] = os.path.join(d, n)
+    return out
+
+
+def effect_card(slug, d):
+    try:
+        with open(os.path.join(d, "effect.json")) as f:
+            meta = json.load(f)
+    except (OSError, ValueError):
+        meta = {}
+    card = {"effect": slug, "name": meta.get("name") or slug}
+    for k in ("description", "when", "needs", "kind", "length_s", "shape"):
+        if meta.get(k) not in (None, "", []):
+            card[k] = meta[k]
+    for f in ("preview.mp4", "preview.png"):
+        if os.path.exists(os.path.join(d, f)):
+            card[f.replace(".", "_")] = os.path.join(d, f)
+    return card
+
+
+EFFECT_RULE = ("Use an effect only when the user names it or asks for one. Never add one by yourself, and never "
+               "let one change a design the user did not ask for. When the user asks for ideas, you may name one "
+               "that fits and ask.")
+
+
+def t_list_effects(a):
+    dirs = effect_dirs()
+    slug = (a.get("effect") or "").strip()
+    if not slug:
+        return {"effects": [effect_card(n, d) for n, d in dirs.items()], "rule": EFFECT_RULE,
+                "note": "Pass effect=<slug> for its README and source."}
+    if slug not in dirs:
+        # The user may say the name ("Text behind"), not the slug.
+        slug = next((n for n, d in dirs.items() if effect_card(n, d)["name"].lower() == slug.lower()), slug)
+    if slug not in dirs:
+        raise ValueError("No effect '%s'. Effects: %s." % (slug, ", ".join(dirs) or "none"))
+    d = dirs[slug]
+    readme = os.path.join(d, "README.md")
+    src = os.path.join(d, "src")
+    return dict(effect_card(slug, d), path=d, readme=read_text(readme) if os.path.exists(readme) else None,
+                src=src if os.path.isdir(src) else None,
+                files=[f for f in library_files(d) if f not in EFFECT_FILES],
+                rule=EFFECT_RULE,
+                note="Copy src/ into the edit's _edit/<name>/ and change the copy, never the effect itself. "
+                     "Use the video's style (get_library) for type and colour where the README allows.")
+
+
 # ---------- transcripts ----------
 #
 # A video's transcript sits next to it as <video stem>.words.json: Whisper output with word times
@@ -6312,7 +6393,7 @@ def t_higgsfield_status(a):
         out["account" if ok else "problem"] = text.splitlines()[0] if ok and text else hf_problem(text)
     if a.get("session"):
         s = resolve_session(a["session"])
-        out["jobs"] = [{k: j.get(k) for k in ("id", "file", "status", "shot", "error", "started", "ended")}
+        out["jobs"] = [{k: j.get(k) for k in ("id", "file", "status", "shot", "error", "started", "ended", "hf_id", "draft")}
                        for j in hf_jobs(s)][-10:]
     return out
 
@@ -6331,6 +6412,8 @@ def t_higgsfield(a):
     if (a.get("kind") or "video").strip().lower() != "video":
         raise ValueError("Higgsfield is for video only. Make or change an image with make_image (GPT Image, much cheaper).")
     kind = "video"
+    if a.get("finalise"):
+        return hf_finalise(s, a)
     workflow = (a.get("workflow") or "").strip() or None
     if workflow and workflow not in HF_WORKFLOWS:
         raise ValueError("workflow is reframe or draw_to_video.")
@@ -6370,6 +6453,9 @@ def t_higgsfield(a):
     for flag, path in (("--image", image), ("--start-image", start), ("--end-image", end), ("--video", video)):
         if path:
             args += [flag, path]
+    # 2026-10-25 (alter): several references, e.g. a target frame then the product alone, in @image order.
+    for ref in a.get("images") or []:
+        args += ["--image", media(ref)]
     ratio = (a.get("aspect_ratio") or "").strip()
     if not ratio and shot:
         ratio = board.get("format") or DEFAULT_FORMAT
@@ -6380,8 +6466,15 @@ def t_higgsfield(a):
         duration = max(4, min(15, round(shot_seconds(shot))))
     if duration and workflow != "reframe":
         args += ["--duration", str(int(round(float(duration))))]
-    for k, v in (a.get("params") or {}).items():
-        args += ["--" + str(k).lstrip("-"), str(v)]
+    params = dict(a.get("params") or {})
+    # 2026-10-25 (alter): an edit keeps the take's own sound. Seedance's made-up track has murmured voices in it,
+    # and the motion is the take's, so the take's sound fits (put back with the alter skill's finish script).
+    if params.get("mode") == "video_edit" and "generate_audio" not in params:
+        params["generate_audio"] = False
+    for k, v in params.items():
+        args += ["--" + str(k).lstrip("-"), hf_value(v)]
+    if a.get("cost"):
+        return hf_cost(args)
     args += ["--wait", "--wait-timeout", "30m", "--json"]
 
     name = slug(a.get("name") or (shot and "shot-%s" % shot["id"]) or " ".join(prompt.split()[:5]) or "clip") or "clip"
@@ -6392,6 +6485,8 @@ def t_higgsfield(a):
     rel = os.path.join(GENERATED_DIR, "%s-v%d%s" % (name, n, ".mp4" if kind == "video" else ".png"))
     job = {"id": "%s-v%d" % (name, n), "file": rel, "kind": kind, "args": args, "shot": shot and shot["id"],
            "status": "running", "started": now_iso(), "from_chat": from_chat()}
+    if params.get("draft") in (True, "true"):
+        job["draft"] = True
     job["label"] = clip_label(hf_label(job), shot)
     path = hf_save_job(s, job)
     if shot:
@@ -6404,6 +6499,69 @@ def t_higgsfield(a):
             "note": "Higgsfield works in the background (a video takes 1-5 min). The file "
                     "lands at %s and shows on the Assets tab%s. higgsfield_status shows how it went. Credits come "
                     "from the user's Higgsfield plan." % (rel, "; the shot plays it then" if shot else "")}
+
+
+def hf_value(v):
+    """A param for the CLI: true/false in lower case (str(True) is "True")."""
+    return ("true" if v else "false") if isinstance(v, bool) else str(v)
+
+
+def hf_cost(args):
+    """What the job would cost, from `generate cost` (free): nothing starts."""
+    ok, text = hf_call(["generate", "cost"] + args[2:], timeout=120)
+    if not ok:
+        raise ValueError(hf_problem(text))
+    return {"cost": text.strip(), "started": False,
+            "note": "Nothing started. Tell the user the price, then send the same call without cost to run it."}
+
+
+def hf_id(out, url):
+    """The Higgsfield job id: from the CLI's JSON, else the uuid that ends the result URL."""
+    try:
+        d = json.loads(out)
+        d = d[0] if isinstance(d, list) and d else d
+        if isinstance(d, dict) and d.get("id"):
+            return str(d["id"])
+    except ValueError:
+        pass
+    m = re.search(r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.\w+(?:\?|$)", url or "")
+    return m.group(1) if m else None
+
+
+def hf_finalise(s, a):
+    """A 480p draft that passed its check, finished at full size from the same job (Seedance draft_job_id): the
+    same motion and framing, so it costs the gap, not a new take (2026-10-25, alter)."""
+    ref = a["finalise"].strip()
+    name = os.path.splitext(os.path.basename(ref))[0]
+    draft = next((j for j in hf_jobs(s) if j.get("id") == name), None)
+    if not draft:
+        raise ValueError("No Higgsfield job %s in this session. higgsfield_status session=... lists them." % name)
+    if not draft.get("draft") or draft.get("status") != "done" or not draft.get("hf_id"):
+        raise ValueError("%s is not a finished draft (it needs draft true, status done and its Higgsfield id)." % name)
+    args, skip = [], {"--draft", "--resolution", "--wait", "--wait-timeout", "--json"}
+    i, old = 0, draft["args"]
+    while i < len(old):
+        if old[i] in skip:
+            i += 1 if old[i] == "--json" else 2
+            continue
+        args.append(old[i])
+        i += 1
+    args += ["--draft_job_id", draft["hf_id"], "--resolution", (a.get("params") or {}).get("resolution", "1080p")]
+    if a.get("cost"):
+        return hf_cost(args)
+    args += ["--wait", "--wait-timeout", "30m", "--json"]
+    base = re.sub(r"-v\d+$", "", name) + "-final"
+    d = os.path.join(s, GENERATED_DIR)
+    have = versions_in(d, base)
+    n = (have[-1] if have else 0) + 1
+    rel = os.path.join(GENERATED_DIR, "%s-v%d.mp4" % (base, n))
+    job = {"id": "%s-v%d" % (base, n), "file": rel, "kind": "video", "args": args, "shot": None, "status": "running",
+           "started": now_iso(), "from_chat": from_chat(), "from_draft": name}
+    job["label"] = (hf_label(job) + " final of " + name)[:60]
+    start_higgsfield(s, hf_save_job(s, job))
+    return {"file": rel, "job": job["id"], "from_draft": name,
+            "note": "Finishing %s at full size in the background; it lands at %s. Check it again: finishing can "
+                    "sharpen a soft look back toward the photo." % (name, rel)}
 
 
 def start_higgsfield(s, job_path):
@@ -6479,7 +6637,7 @@ def higgsfield_run(s, job_path):
         with urllib.request.urlopen(url, timeout=600) as res, open(dest + ".part", "wb") as f:
             shutil.copyfileobj(res, f)
         os.replace(dest + ".part", dest)
-        job.update(status="done", url=url, ended=now_iso(), model=hf_label(job))
+        job.update(status="done", url=url, ended=now_iso(), model=hf_label(job), hf_id=hf_id(r.stdout, url))
         note_model(s, job["file"], job["model"])
         if job.get("shot"):
             def done(x):
@@ -7476,6 +7634,15 @@ def read_post(s, p="linkedin"):
         out.update(article_view(fm, body))
     else:
         out.update(video_view(fm, body, p))
+    if p in CAROUSEL_POSTS:
+        try:
+            c = read_carousel(s)
+        except ValueError:
+            c = None
+        if c and (c.get("on") or {}).get(p) and c.get("slides"):
+            # The slides stand in for the video: upload these (Export on the Post tab writes them).
+            out["carousel"] = {"slides": len(c["slides"]), "upload": "posts/carousel/linkedin.pdf" if p == "linkedin"
+                               else "posts/carousel/tiktok/ and posts/carousel/instagram/ (a video slide is an .mp4 there)"}
     return out
 
 
@@ -7719,6 +7886,153 @@ def t_create_post_variants(a):
     return {"platform": PLATFORMS[p]["name"], "created_variants": made,
             "note": "They show as tabs above the post in the app's post tab. Only the main post is scheduled: "
                     "The user picks one with 'Use as main' (or you call use_post_variant when the user asks)."}
+
+
+# Carousel: same format as Sources/Takes/Carousel.swift (posts/carousel.json).
+CAROUSEL = "posts/carousel.json"
+CAROUSEL_POSTS = ("linkedin", "vertical")
+# Same names as SlideLayout and CarouselLook in Carousel.swift (2026-10-29).
+SLIDE_LAYOUTS = ("text", "word", "cover", "photo", "frames", "compare", "annotate", "magazine", "list", "video")
+SLIDE_MEDIA_LAYOUTS = ("cover", "photo", "annotate", "magazine", "video")
+CAROUSEL_LOOKS = ("takes", "bold", "magazine", "note", "cinema")
+VIDEO_EXT = (".mov", ".mp4", ".m4v")
+
+
+def read_carousel(s):
+    path = os.path.join(s, CAROUSEL)
+    if not os.path.exists(path):
+        return None
+    with open(path) as f:
+        return json.load(f)  # a file that does not parse stops the tool: never write over it
+
+
+def slide_media(s, m, n, what="media"):
+    """A slide's file: a path in the session or a full path, and it must be there."""
+    m = (m or "").strip()
+    if not m:
+        return ""
+    full = os.path.expanduser(m) if m.startswith(("/", "~")) else os.path.join(s, m)
+    if not os.path.isfile(full):
+        raise ValueError("Slide %d: no file at %s (%s). Give a path in the session, like stills/a.jpg, or a full path."
+                         % (n, m, what))
+    if m.startswith("~"):
+        return full
+    return m
+
+
+def slide_seconds(v, n, what):
+    if v is None:
+        return None
+    try:
+        v = float(v)
+    except (TypeError, ValueError):
+        raise ValueError("Slide %d: %s is a number of seconds." % (n, what))
+    if v < 0:
+        raise ValueError("Slide %d: %s is not below 0." % (n, what))
+    return v
+
+
+def clean_slide(s, x, n):
+    layout = (x.get("layout") or "text").strip()
+    if layout not in SLIDE_LAYOUTS:
+        raise ValueError("Slide %d: layout is one of %s; not %s." % (n, ", ".join(SLIDE_LAYOUTS), layout))
+    out = {"kicker": (x.get("kicker") or "").strip(), "title": (x.get("title") or "").strip(),
+           "body": (x.get("body") or "").strip()}
+    if layout != "text":
+        out["layout"] = layout
+    media = slide_media(s, x.get("media"), n)
+    if media:
+        out["media"] = media
+    for k in ("at", "start", "end"):
+        v = slide_seconds(x.get(k), n, k)
+        if v is not None:
+            out[k] = v
+    if "start" in out and "end" in out and out["end"] <= out["start"]:
+        raise ValueError("Slide %d: end comes after start." % n)
+    items = []
+    for it in x.get("items") or []:
+        i = {"media": slide_media(s, it.get("media"), n, "an item"), "label": (it.get("label") or "").strip(),
+             "text": (it.get("text") or "").strip()}
+        at = slide_seconds(it.get("at"), n, "an item's at")
+        if at is not None:
+            i["at"] = at
+        items.append(i)
+    if items:
+        out["items"] = items[:4]
+    marks = []
+    for m in x.get("marks") or []:
+        try:
+            mx, my = float(m.get("x")), float(m.get("y"))
+        except (TypeError, ValueError):
+            raise ValueError("Slide %d: each mark has x and y, 0 to 1 from the top left of the picture." % n)
+        if not (0 <= mx <= 1 and 0 <= my <= 1):
+            raise ValueError("Slide %d: a mark's x and y are 0 to 1 from the top left of the picture." % n)
+        marks.append({"x": mx, "y": my, "text": (m.get("text") or "").strip()})
+    if marks:
+        out["marks"] = marks
+    # What each layout needs.
+    if layout in ("text", "word", "list") and not out["title"]:
+        raise ValueError("Slide %d: a %s slide needs a title (the big text)." % (n, layout))
+    if layout == "list" and not out["body"]:
+        raise ValueError("Slide %d: a list slide has its points in body, one a line." % n)
+    if layout in ("frames", "compare") and not items:
+        raise ValueError("Slide %d: a %s slide shows items: %s, each {media, label, text}."
+                         % (n, layout, "two to four" if layout == "frames" else "two, before and after"))
+    if layout == "video" and media and not media.lower().endswith(VIDEO_EXT):
+        raise ValueError("Slide %d: a video slide's media is a video (.mov, .mp4)." % n)
+    if layout == "annotate" and not marks:
+        raise ValueError("Slide %d: an annotate slide has marks on its picture." % n)
+    if media and layout not in SLIDE_MEDIA_LAYOUTS:
+        raise ValueError("Slide %d: a %s slide shows no media. Use cover, photo, annotate, magazine or video." % (n, layout))
+    return out
+
+
+def t_set_carousel(a):
+    """Write the session's slides, their look, and which posts show them in place of the video."""
+    s = resolve_session(a["session"])
+    need_rules(*post_rules("linkedin"))
+    c = read_carousel(s) or {"slides": [], "on": {}, "docTitle": ""}
+    c.pop("captions", None)
+    if a.get("slides") is not None:
+        slides = [clean_slide(s, x, n + 1) for n, x in enumerate(a["slides"])]
+        if not slides:
+            raise ValueError("Give at least one slide.")
+        c["slides"] = slides
+    for p, v in (a.get("on") or {}).items():
+        if p not in CAROUSEL_POSTS:
+            raise ValueError("on takes linkedin and vertical; not %s." % p)
+        c.setdefault("on", {})[p] = bool(v)
+    if a.get("docTitle") is not None:
+        c["docTitle"] = a["docTitle"].strip()
+    if a.get("look") is not None:
+        if a["look"] not in CAROUSEL_LOOKS:
+            raise ValueError("look is one of %s; not %s." % (", ".join(CAROUSEL_LOOKS), a["look"]))
+        if a["look"] == "takes":
+            c.pop("look", None)
+        else:
+            c["look"] = a["look"]
+    if a.get("accent") is not None:
+        acc = a["accent"].strip()
+        if acc and not re.fullmatch(r"#?[0-9A-Fa-f]{6}", acc):
+            raise ValueError("accent is a colour like #FFD21F.")
+        if acc:
+            c["accent"] = acc if acc.startswith("#") else "#" + acc
+        else:
+            c.pop("accent", None)
+    if not c.get("slides"):
+        raise ValueError("Give slides: this session has no carousel yet.")
+    os.makedirs(os.path.join(s, "posts"), exist_ok=True)
+    path = os.path.join(s, CAROUSEL)
+    with open(path + ".tmp", "w") as f:
+        json.dump(c, f, indent=2, ensure_ascii=False, sort_keys=True)
+    os.replace(path + ".tmp", path)
+    out = dict(c, file=CAROUSEL, slide_count=len(c["slides"]))
+    out["note"] = ("The slides show in the Post tab where the video would be, on the posts turned on: LinkedIn as a "
+                   "document (PDF), Vertical as a TikTok photo post and an Instagram carousel (3:4). The text is still "
+                   "the post itself: write it with set_post (platform linkedin or vertical). Slide 1 is the hook, the only "
+                   "slide people see before they swipe; one idea per slide; the last slide asks for one thing. 6-10 "
+                   "slides work best; TikTok wants a sound. Export on the Post tab writes the files.")
+    return out
 
 
 def t_use_post_variant(a):
@@ -14128,6 +14442,47 @@ TOOLS = [
          "name": S, "text": {"type": "string", "description": "The whole post."}, "tweets": TWEETS,
          "note": {"type": "string", "description": "Short why, e.g. 'leads with the number'"}},
          "required": ["name"]}}}, ["session", "variants"], t_create_post_variants),
+    ("set_carousel", "Write the session's slides (posts/carousel.json), one set for both posts: the LinkedIn post "
+     "can show them as a document (PDF) and the vertical post as photos (TikTok, Instagram) in place of the video. "
+     "Slides replace the old ones. The post text stays in set_post. A carousel is not only text: pick a layout per "
+     "slide and use the session's own pictures (stills/, storyboard/ sketches, thumbnails/, a frame of a take or an "
+     "edit with at). Mix them: a cover photo, one big word, frames with tags, before and after, a photo with notes, a "
+     "magazine page, a short video. For 'how I filmed this': a cover, frames of the storyboard sketches, then a compare "
+     "per shot (the sketch, then the take at its best cut).",
+     {"session": SESSION,
+      "slides": {"type": "array", "description": "The slides in order. Slide 1 is the hook.", "items": {"type": "object", "properties": {
+          "layout": {"type": "string", "enum": list(SLIDE_LAYOUTS), "description":
+                     "text (default): kicker, title, body. word: one word or a few, as big as it fits. cover: media under "
+                     "the whole slide, the title over it. photo: media alone, title as a short caption. frames: 2-4 items "
+                     "in a grid, each with a tag (WS, MS, CU). compare: two items, before and after. annotate: media with "
+                     "marks on it. magazine: media across the top, a headline and a paragraph. list: title, then body "
+                     "lines as numbered points. video: a clip (media, start, end) that plays on Instagram; LinkedIn and "
+                     "TikTok show its first frame."},
+          "kicker": {"type": "string", "description": "Small text on top, e.g. 'Tip 1' or 'Swipe →'"},
+          "title": {"type": "string", "description": "The big text: one idea, a few words"},
+          "body": {"type": "string", "description": "One short line under it; a list's points, one a line"},
+          "media": {"type": "string", "description": "A picture or video: a path in the session (stills/a.jpg, "
+                    "take-02-camera.mov) or a full path"},
+          "at": {"type": "number", "description": "For a video in media: the second to show"},
+          "start": {"type": "number", "description": "video layout: where the clip starts, in seconds"},
+          "end": {"type": "number", "description": "video layout: where it ends (Instagram plays up to 60 s)"},
+          "items": {"type": "array", "description": "frames and compare: the pictures", "items": {"type": "object", "properties": {
+              "media": {"type": "string", "description": "A picture or video, as the slide's media"},
+              "at": {"type": "number", "description": "For a video: the second to show"},
+              "label": {"type": "string", "description": "The tag: 'WS', 'Before'"},
+              "text": {"type": "string", "description": "A line under the picture"}}}},
+          "marks": {"type": "array", "description": "annotate: notes on the picture", "items": {"type": "object", "properties": {
+              "x": {"type": "number", "description": "0 to 1 from the left"}, "y": {"type": "number", "description": "0 to 1 from the top"},
+              "text": S}, "required": ["x", "y"]}}}}},
+      "look": {"type": "string", "enum": list(CAROUSEL_LOOKS), "description":
+               "One look for every slide. takes: navy and white. bold: tall black capitals, one yellow, grid paper. "
+               "magazine: serif on cream. note: like a note on a phone, handwritten notes. cinema: black, white serif."},
+      "accent": {"type": "string", "description": "A colour in place of the look's own, '#FFD21F'; '' for the look's"},
+      "on": {"type": "object", "description": "Which posts show the slides in place of the video.",
+             "properties": {"linkedin": {"type": "boolean", "description": "LinkedIn: a document (PDF) post"},
+                            "vertical": {"type": "boolean", "description": "Vertical: a photo post"}}},
+      "docTitle": {"type": "string", "description": "The LinkedIn document's name; LinkedIn shows it on the post."}},
+     ["session"], t_set_carousel),
     ("use_post_variant", "Make a post variant the main post (the one that is scheduled). The old main goes to "
      "post history and the variant tab closes. Only when the user asks; the user usually does it in the app.",
      {"session": SESSION, "platform": PLATFORM, "variant": S}, ["session", "variant"], t_use_post_variant),
@@ -14338,7 +14693,8 @@ TOOLS = [
      "length = the shot's length, 4-15 s). For a shot, write a real-footage prompt from the shot's do and say "
      "(subject, setting, light, camera move); pass image='sketch' to use the sketch only as a composition "
      "reference with params {mode: omni_reference}, and say in the prompt that the result is real footage, not a "
-     "drawing. Change a video: video=<session file> with params {mode: video_edit} (Seedance), or "
+     "drawing. Change a video: video=<session file> with params {mode: video_edit} (Seedance; the takes-alter skill "
+     "has the method: target frame, 480p draft, check, finalise), or "
      "workflow=reframe with aspect_ratio for a new shape. Default model: the one the user picked on Plugins › Higgsfield (higgsfield_status default_model); other models by id (`higgsfield model list` in Bash; `higgsfield model get <id>` for params). "
      "Each job costs the user's Higgsfield credits: one job per ask, never a batch nobody asked for. "
      "Not installed or not signed in: tell the user to open Plugins › Higgsfield.",
@@ -14346,6 +14702,11 @@ TOOLS = [
       "prompt": {"type": "string", "description": "What the result shows. Not needed for workflow=reframe."},
       "shot": {"type": "string", "description": "A storyboard shot id: the clip becomes that shot's video."},
       "image": {"type": "string", "description": "A reference image: a session file, or 'sketch' for the shot's sketch."},
+      "images": {"type": "array", "items": {"type": "string"},
+                 "description": "More reference images (session files), after image, in @image order."},
+      "finalise": {"type": "string", "description": "A finished draft job (params draft true) of this session: make "
+                   "its full-size version from the same job. Takes no prompt."},
+      "cost": {"type": "boolean", "description": "Only say what it would cost (free); nothing starts."},
       "start_image": {"type": "string", "description": "First frame (session file or 'sketch')."},
       "end_image": {"type": "string", "description": "Last frame (session file)."},
       "video": {"type": "string", "description": "A session video to change or reframe (take number or path)."},
@@ -14410,6 +14771,12 @@ TOOLS = [
      "list of styles. Read it before you design anything: a thumbnail, captions, a motion graphic, a slide.",
      {"session": SESSION, "project": {"type": "string", "description": "Project name, when there is no session."}},
      [], t_get_library),
+    ("list_effects", "Ready-made effects for talking-head videos (text behind the head, a glass chart, a "
+     "freeze-frame sticker, a tier list...), each with a preview, a README and a HyperFrames source. Opt-in: "
+     "call it only when the user names an effect or asks which effects there are, never to pick one yourself. "
+     "With effect: its README and source.",
+     {"effect": {"type": "string", "description": "An effect's slug or name. Empty = the list."}},
+     [], t_list_effects),
     ("set_style", "Set the style of one video (session) or of a whole project. The user usually picks it on the "
      "app's Assets tab. Only when asked.",
      {"session": SESSION, "project": {"type": "string"},
@@ -14951,6 +15318,7 @@ def handle(msg):
                                     "it gives the style the user picked for that project and its template. Reusable "
                                     "style (README style guide, tokens.json, logos, icons, motion graphics, fonts) "
                                     "lives in a style or a project library, never in a session. "
+                                    "Effects (list_effects) are opt-in: use one only when the user names it or asks for one. "
                                     "The user leaves review comments on edits (time range + frame area), images "
                                     "(area) and text (quoted selection), in sessions and libraries: when "
                                     "get_session or get_library shows open_comments, call get_comments, read each "

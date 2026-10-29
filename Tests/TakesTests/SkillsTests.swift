@@ -113,13 +113,6 @@ struct SkillsTests {
         #expect(FileManager.default.fileExists(atPath: home.appending(path: "hyperframes/SKILL.md").path))
     }
 
-    /// The pack downloads from its repo's skills folder, which add(gitHub:) reads as a link.
-    @Test func thePackLinkReads() throws {
-        let g = try #require(SkillShelf.gitHub(SkillPack.hyperframes.link))
-        #expect(g.repo.absoluteString == "https://github.com/heygen-com/hyperframes.git")
-        #expect(g.branch == "main" && g.path == "skills")
-    }
-
     @Test func readsGitHubLinks() throws {
         let a = try #require(SkillShelf.gitHub("github.com/anthropics/skills"))
         #expect(a.repo.absoluteString == "https://github.com/anthropics/skills.git" && a.branch == nil && a.path.isEmpty)
@@ -130,6 +123,12 @@ struct SkillsTests {
         #expect(SkillShelf.gitHub("owner/repo.git")?.repo.absoluteString == "https://github.com/owner/repo.git")
         #expect(SkillShelf.gitHub("example.com") == nil)
         #expect(SkillShelf.gitHub("hello") == nil)
+        // The HyperFrames pack's link reads too.
+        do {
+            let g = try #require(SkillShelf.gitHub(SkillPack.hyperframes.link))
+            #expect(g.repo.absoluteString == "https://github.com/heygen-com/hyperframes.git")
+            #expect(g.branch == "main" && g.path == "skills")
+        }
     }
 
     /// The skills build.sh puts in the app, each with a name and a description, and the image

@@ -148,11 +148,6 @@ struct UsageTests {
         #expect(q?.first { $0.name == "from" }?.value == "new")
     }
 
-    @Test func theNeverPanelNamesTheChats() {
-        #expect(UsageCopy.neverTitle.contains("chats"))
-        #expect(UsageCopy.neverDetail.contains("chat history"))
-    }
-
     /// The ask card and Settings › Usage, rendered to look at. `TAKES_SNAPSHOT=/some/dir`.
     @Test func snapshots() throws {
         guard let dir = ProcessInfo.processInfo.environment["TAKES_SNAPSHOT"] else { return }

@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=1080, height=1920" />
+    <!-- Proof card: a screenshot (shot.png next to this file) flies up into the lower middle as a card with a soft
+         shadow and a slight 3D tilt, then settles flat. A highlighter swipe marks one area of it. A small chip
+         ("Real numbers") sits on the card's top edge. Then the card leaves.
+         Transparent background: render as mov (ProRes 4444 with alpha) and lay it over the footage.
+         shot.png can be any size: it is fit inside the box for the shape of the edit (SHOT.fit). The highlight rect is in shot.png pixels.
+         The size of the edit is data-width / data-height on #root (1080x1920, 1080x1350, 1080x1080, 1920x1080 all work).
+         9:16, 4:5 and 1:1: the card is centred near the bottom. 16:9: it sits on one side of the speaker.
+         Edit SHOT, HL, CHIP, TILT and AT below. The length is data-duration on #root (seconds). -->
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+    <style>
+      @font-face { font-family: "Inter"; src: url("fonts/Inter-Medium.ttf"); font-weight: 500; }
+      @font-face { font-family: "Inter"; src: url("fonts/Inter-SemiBold.ttf"); font-weight: 600; }
+      :root { --ink: #f6f4f0; --panel: rgba(14, 14, 18, 0.86); --edge: rgba(255, 255, 255, 0.16); --dot: #7ad48a;
+              --sans: "Inter", sans-serif; }
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      html, body { width: 100%; height: 100%; overflow: hidden; background: transparent; }
+      #root { position: relative; width: 100%; height: 100%; overflow: hidden; font-family: var(--sans); color: var(--ink); }
+      #stage { position: absolute; left: 0; top: 0; perspective: 1600px; }
+      #card { position: relative; border-radius: 30px; overflow: visible; transform-style: preserve-3d;
+        box-shadow: 0 50px 110px rgba(0, 0, 0, 0.42), 0 14px 34px rgba(0, 0, 0, 0.28); }
+      #clip { position: relative; border-radius: 30px; overflow: hidden; background: #fff;
+        outline: 2px solid rgba(255, 255, 255, 0.5); outline-offset: -2px; }
+      #shot { display: block; width: 100%; height: 100%; }
+      #hl { position: absolute; border-radius: 10px 16px 12px 18px; transform-origin: 0 50%; }
+      #shine { position: absolute; inset: 0; pointer-events: none;
+        background: linear-gradient(115deg, rgba(255, 255, 255, 0) 30%, rgba(255, 255, 255, 0.35) 45%, rgba(255, 255, 255, 0) 60%); }
+      #chip { position: absolute; left: 34px; top: -34px; display: flex; align-items: center; gap: 12px; height: 62px;
+        padding: 0 28px 0 22px; border-radius: 31px; background: var(--panel); border: 2px solid var(--edge);
+        font-weight: 600; font-size: 29px; white-space: nowrap; box-shadow: 0 12px 30px rgba(0, 0, 0, 0.3); }
+      .short #chip { font-size: 32px; }
+      #chip i { width: 16px; height: 16px; border-radius: 50%; background: var(--dot); }
+    </style>
+  </head>
+  <body>
+    <div id="root" data-composition-id="main" data-start="0" data-duration="6" data-width="1080" data-height="1920">
+      <div id="stage">
+        <div id="card">
+          <div id="clip"><img id="shot" src="shot.png" alt="" /><div id="hl"></div><div id="shine"></div></div>
+          <div id="chip"><i></i><span id="chiptext"></span></div>
+        </div>
+      </div>
+    </div>
+    <script>
+      // The screenshot: per shape of the edit, it fits inside maxW x maxH (px); bottom = the space under the card.
+      // side = where the card sits in 16:9: "left" or "right" (away from the speaker's face). Elsewhere it is centred.
+      const SHOT = { radius: 30, side: "left", fit: {
+        tall: { maxW: 860, maxH: 760, bottom: 200 }, "4:5": { maxW: 860, maxH: 460, bottom: 80 },
+        square: { maxW: 860, maxH: 380, bottom: 36 }, wide: { maxW: 700, maxH: 700, bottom: 120 } } };
+      // The highlight, in shot.png pixels: {x, y, w, h}. Set rect to null for no highlight.
+      // blend "multiply" suits a light screenshot; use "screen" and a softer colour on a dark one.
+      const HL = { rect: { x: 40, y: 196, w: 346, h: 114 }, color: "rgba(255, 222, 60, 0.85)", blend: "multiply" };
+      // The chip on the card's top edge. Set text to "" for no chip.
+      const CHIP = { text: "Real numbers" };
+      // The start tilt in degrees (rx = lean back, rz = turn). The card settles flat.
+      const TILT = { rx: 34, ry: -10, rz: -7 };
+      // When things happen (seconds). hl = the highlighter swipe, out = exit.
+      const AT = { in: 0.15, settle: 1.0, chip: 0.95, hl: 1.55, hlFor: 0.5, out: 5.35 };
+
+      const shot = document.getElementById("shot");
+      const ready = shot.decode ? shot.decode().catch(() => {}) : Promise.resolve();
+      Promise.all([ready, document.fonts.ready]).then(() => {
+      // The frame comes from data-width / data-height on #root.
+      const comp = document.getElementById("root"), W = +comp.dataset.width, H = +comp.dataset.height;
+      const SHAPE = W / H < 0.7 ? "tall" : W / H < 0.95 ? "4:5" : W / H < 1.3 ? "square" : "wide";
+      if (SHAPE !== "tall") comp.classList.add("short");
+      const FIT = SHOT.fit[SHAPE];
+      const nw = shot.naturalWidth || FIT.maxW, nh = shot.naturalHeight || FIT.maxH;
+      const k = Math.min(FIT.maxW / nw, FIT.maxH / nh);
+      const w = Math.round(nw * k), h = Math.round(nh * k);
+      const stage = document.getElementById("stage");
+      Object.assign(stage.style, { width: w + "px", height: h + "px", left: (SHAPE !== "wide" ? (W - w) / 2 : SHOT.side === "right" ? W - 84 - w : 84) + "px", top: H - FIT.bottom - h + "px" });
+      const card = document.getElementById("card"), clip = document.getElementById("clip");
+      Object.assign(card.style, { width: w + "px", height: h + "px", borderRadius: SHOT.radius + "px" });
+      Object.assign(clip.style, { width: w + "px", height: h + "px", borderRadius: SHOT.radius + "px" });
+
+      const hl = document.getElementById("hl");
+      if (HL.rect) {
+        const p = 0.06 * HL.rect.h * k; // the pen is a bit wider than the rect
+        Object.assign(hl.style, { left: HL.rect.x * k - p + "px", top: HL.rect.y * k + "px", width: HL.rect.w * k + 2 * p + "px",
+          height: HL.rect.h * k + "px", background: HL.color, mixBlendMode: HL.blend });
+      } else hl.remove();
+      const chip = document.getElementById("chip");
+      if (CHIP.text) document.getElementById("chiptext").textContent = CHIP.text; else chip.remove();
+
+      const tl = gsap.timeline({ paused: true });
+      const fly = AT.settle - AT.in;
+      gsap.set(card, { transformPerspective: 1600, transformOrigin: "50% 100%" });
+      tl.fromTo(card, { y: FIT.bottom + h + 40, rotationX: TILT.rx, rotationY: TILT.ry, rotation: TILT.rz, scale: 0.86 },
+        { y: 0, rotationX: 0, rotationY: 0, rotation: 0, scale: 1, duration: fly + 0.35, ease: "expo.out" }, AT.in);
+      tl.fromTo("#shine", { xPercent: -100, opacity: 1 }, { xPercent: 100, duration: 1.1, ease: "power2.inOut" }, AT.in + 0.35);
+      tl.set("#shine", { opacity: 0 }, AT.in + 1.5);
+      if (CHIP.text) tl.fromTo(chip, { opacity: 0, y: 18, scale: 0.8 }, { opacity: 1, y: 0, scale: 1, duration: 0.4, ease: "back.out(2)" }, AT.chip);
+      if (HL.rect) {
+        tl.fromTo(hl, { scaleX: 0, rotation: -1.2 }, { scaleX: 1, duration: AT.hlFor, ease: "power2.inOut" }, AT.hl);
+        tl.to(card, { scale: 1.015, duration: 0.25, ease: "power2.out", yoyo: true, repeat: 1 }, AT.hl + AT.hlFor - 0.1);
+      }
+      tl.to(card, { y: 260, rotationX: -14, rotation: 4, opacity: 0, duration: 0.45, ease: "power2.in" }, AT.out);
+      window.__timelines["main"] = tl;
+      tl.seek(0);
+      });
+    </script>
+  </body>
+</html>

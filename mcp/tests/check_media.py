@@ -1,16 +1,60 @@
 """Synthetic media for the check_edit tests: a voice-like sound (pink noise shaped by random syllables, so
 it has energy up to 16 kHz and never repeats) over a moving test picture, with its word times."""
+import hashlib
 import json
 import os
 import random
 import shutil
 import struct
 import subprocess
+import time
 import wave
 
 FF = shutil.which("ffmpeg") or "/opt/homebrew/bin/ffmpeg"
 WORDS = ("so the next thing we build is a small tool that reads every take and finds the parts that "
          "matter most for people who make videos alone at home with one camera and a laptop").split()
+
+
+# Made media is kept between runs (2026-10-27): the same take and the same cut were encoded again in
+# every 4-test chunk and every run, most of check_edit's test time. A file is found by its ffmpeg
+# arguments, with each input file read as its content hash, so a changed input makes a new file.
+CACHE = os.environ.get("TAKES_TEST_MEDIA") or os.path.expanduser("~/Library/Caches/takes-test-media")
+KEEP_DAYS = 14
+
+
+def digest(path):
+    h = hashlib.sha1()
+    with open(path, "rb") as f:
+        for b in iter(lambda: f.read(1 << 20), b""):
+            h.update(b)
+    return h.hexdigest()
+
+
+def cache_key(args):
+    """The cache name of one ffmpeg call, or None when it cannot be cached (an input file that is
+    missing, or a path that is not the output or an input)."""
+    out = args[-1]
+    parts, prev = [FF, str(os.path.getmtime(FF)) if os.path.exists(FF) else ""], None
+    for a in args[:-1]:
+        if os.sep in a and os.path.isfile(a) and prev in ("-i", "-filter_complex_script"):
+            parts.append(digest(a))
+        elif os.path.isabs(a) and prev in ("-i",):
+            return None
+        else:
+            parts.append(a)
+        prev = a
+    return hashlib.sha1("\0".join(parts).encode()).hexdigest() + os.path.splitext(out)[1]
+
+
+def prune_cache():
+    try:
+        old = time.time() - KEEP_DAYS * 86400
+        for f in os.listdir(CACHE):
+            p = os.path.join(CACHE, f)
+            if os.path.getmtime(p) < old:
+                os.remove(p)
+    except OSError:
+        pass
 
 
 def ff(*args):
@@ -20,7 +64,24 @@ def ff(*args):
     if "libx264" in args and "-preset" not in args:
         i = args.index("libx264") + 1
         args[i:i] = ["-preset", "veryfast"]
+    key = cache_key(args)
+    hit = key and os.path.join(CACHE, key)
+    if hit and os.path.isfile(hit):
+        shutil.copyfile(hit, args[-1])
+        os.utime(hit)
+        return
     subprocess.run([FF, "-v", "error", "-y"] + args, check=True)
+    if hit:
+        try:
+            os.makedirs(CACHE, exist_ok=True)
+            tmp = "%s.%d.tmp" % (hit, os.getpid())
+            shutil.copyfile(args[-1], tmp)
+            os.replace(tmp, hit)  # parallel workers: the last one wins, every copy is the same
+        except OSError:
+            pass
+
+
+prune_cache()
 
 
 def voice_gate(path, seconds=20.0, seed=7, rate=1000):

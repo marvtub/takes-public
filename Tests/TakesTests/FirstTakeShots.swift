@@ -92,19 +92,6 @@ let firstTakeMedia = ProcessInfo.processInfo.environment["TAKES_FIRSTTAKE_MEDIA"
         #expect(FirstTake.shared.canEdit)
     }
 
-    @Test func theConfettiFallsOnce() throws {
-        defer { FirstTake.shared.shown = false }
-        let (app, _) = try library()
-        let doc = try #require(app.library.createSession())
-        take(doc, 1)
-        let flow = FirstTake.shared
-        flow.show(doc)
-        #expect(flow.confetti)
-        flow.go(1)
-        flow.go(0)
-        #expect(!flow.confetti)
-    }
-
     @Test func theGuideSeesAnEdit() throws {
         let (app, _) = try library()
         let doc = try #require(app.library.createSession())

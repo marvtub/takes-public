@@ -105,8 +105,7 @@ class Replicate(unittest.TestCase):
         self.run_job()
         self.assertEqual(self.posted()["input"]["reference_images"], ["https://api.replicate.com/v1/files/sketch.png"])
         self.assertEqual(t.read_storyboard(self.s)["shots"][0]["video"], r["file"])
-
-    def test_a_board_shape_the_model_lacks_becomes_adaptive(self):
+        # A board shape the model lacks becomes adaptive.
         t.t_set_storyboard({"session": self.s, "format": "4:5",
                             "shots": [{"kind": "B-ROLL", "say": "Hi there.", "sketch": "A desk.", "do": "Wide."}]})
         sid = t.read_storyboard(self.s)["shots"][0]["id"]

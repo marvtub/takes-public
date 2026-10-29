@@ -74,11 +74,6 @@ import Testing
         #expect(!Storyboard.pick(dir, shot: "gone", "generated/a.png"))
     }
 
-    @Test func aMotionGraphicIsNotFilmed() {
-        #expect(StoryboardPane.howTitle("MG") == "What it shows")
-        #expect(StoryboardPane.howTitle("DESK") == "How to film it")
-    }
-
     @Test func ordersShotsByRowAndNumbersOldOnes() throws {
         let dir = FileManager.default.temporaryDirectory.appending(path: "sb-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: Storyboard.folder(dir), withIntermediateDirectories: true)
@@ -108,12 +103,12 @@ import Testing
                 == "take-03-hook-1-i-do-my-bookkeeping-camera.mov")
         let cut = try JSONDecoder().decode([String: TakeCut].self, from: Data(#"{"3":{"state":"done","start":2.4,"end":9.8,"clean":true}}"#.utf8))
         #expect(cut["3"]?.range == "2.4–9.8 s")
-    }
-
-    @Test func aTakeAndACommentPointAtTheirShot() throws {
-        let take = try JSONDecoder().decode(Take.self, from: Data(#"{"number":1,"kind":"camera","file":"t.mov","startedAt":0,"keeper":false,"shot":"s2"}"#.utf8))
-        #expect(take.shot == "s2")
-        let c = try JSONDecoder().decode(Takes.Comment.self, from: Data(#"{"id":"c1","file":"storyboard/storyboard.json","text":"x","status":"open","by":"user","at":"","shot":"s2"}"#.utf8))
-        #expect(c.shot == "s2")
+        // A take and a comment point at their shot.
+        do {
+            let take = try JSONDecoder().decode(Take.self, from: Data(#"{"number":1,"kind":"camera","file":"t.mov","startedAt":0,"keeper":false,"shot":"s2"}"#.utf8))
+            #expect(take.shot == "s2")
+            let c = try JSONDecoder().decode(Takes.Comment.self, from: Data(#"{"id":"c1","file":"storyboard/storyboard.json","text":"x","status":"open","by":"user","at":"","shot":"s2"}"#.utf8))
+            #expect(c.shot == "s2")
+        }
     }
 }

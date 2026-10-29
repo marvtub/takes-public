@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <!-- Colour grade wipe: the flat clip on the left, the graded clip on the right, and a divider
+         with a handle that sweeps across. Small BEFORE / AFTER labels at the top. At the end the
+         divider leaves to the left, so the last frames are all graded.
+         Needs before.mp4 and after.mp4 next to this file (grade.sh makes them), at the frame size, from 0 s.
+         The frame size is data-width / data-height on #root: the handle sits at mid height, the labels near the top.
+         Render as mp4: a full-frame layer. Edit TEXT and MOVES below.
+         The length is data-duration on #root and on both videos (seconds). -->
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+    <style>
+      @font-face { font-family: "Inter"; src: url("fonts/Inter-SemiBold.ttf"); font-weight: 600; }
+      :root { --ink: #f6f4f0; --chip: rgba(12, 12, 16, 0.62); --sans: "Inter", sans-serif; }
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
+      #root { position: relative; width: 100%; height: 100%; overflow: hidden; font-family: var(--sans); }
+      video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+      #after { clip-path: inset(0 0 0 82%); }
+      #line { position: absolute; top: 0; bottom: 0; left: 82%; width: 0; }
+      #rule { position: absolute; top: 0; bottom: 0; left: -2px; width: 4px; background: rgba(255, 255, 255, 0.92);
+        box-shadow: 0 0 18px rgba(0, 0, 0, 0.35); }
+      #handle { position: absolute; top: calc(50% - 46px); left: -46px; width: 92px; height: 92px; border-radius: 50%;
+        background: #f6f4f0; box-shadow: 0 12px 30px rgba(0, 0, 0, 0.35); display: grid; place-items: center; }
+      #handle svg { width: 52px; height: 52px; fill: none; stroke: #15130f; stroke-width: 2.6; stroke-linecap: round; stroke-linejoin: round; }
+      .lab { position: absolute; top: 150px; height: 56px; padding: 0 22px; border-radius: 28px; background: var(--chip);
+        border: 2px solid rgba(255, 255, 255, 0.16); color: var(--ink); font-weight: 600; font-size: 28px;
+        letter-spacing: 0.16em; text-transform: uppercase; line-height: 52px; }
+      #lb { left: 84px; }
+      #la { right: 84px; }
+    </style>
+  </head>
+  <body>
+    <div id="root" data-composition-id="main" data-start="0" data-duration="6" data-width="1080" data-height="1920">
+      <video id="before" src="before.mp4" data-start="0" data-duration="6" muted playsinline></video>
+      <video id="after" src="after.mp4" data-start="0" data-duration="6" muted playsinline></video>
+      <div id="line"><div id="rule"></div>
+        <div id="handle"><svg viewBox="0 0 24 24"><path d="M9 7 4 12l5 5M15 7l5 5-5 5" /></svg></div></div>
+      <div class="lab" id="lb"></div><div class="lab" id="la"></div>
+    </div>
+    <script>
+      const TEXT = { before: "Before", after: "After" };
+      // Where the divider stands (percent of the width from the left: 100 = all before, 0 = all after),
+      // and its moves: [time it starts, seconds, to]. out = when the divider and labels leave.
+      const START = 82;
+      const MOVES = [[0.5, 1.7, 18], [2.8, 1.1, 55], [4.7, 0.9, 0]];
+      const AT = { labels: 0.1, out: 5.3 };
+
+      const root = document.getElementById("root");
+      const FRAME = { w: Number(root.dataset.width), h: Number(root.dataset.height) };
+      // The labels sit 150 px from the top in a 1080x1920 frame, closer to it in shorter frames.
+      document.querySelectorAll(".lab").forEach((l) => { l.style.top = Math.round(150 * Math.min(1, FRAME.h / 1920)) + "px"; });
+      document.getElementById("lb").textContent = TEXT.before;
+      document.getElementById("la").textContent = TEXT.after;
+      const after = document.getElementById("after"), line = document.getElementById("line");
+      const pos = { x: START };
+      const draw = () => { after.style.clipPath = "inset(0 0 0 " + pos.x + "%)"; line.style.left = pos.x + "%"; };
+
+      const tl = gsap.timeline({ paused: true });
+      tl.fromTo(".lab", { opacity: 0, y: -16 }, { opacity: 1, y: 0, duration: 0.45, ease: "power3.out", stagger: 0.08 }, AT.labels);
+      MOVES.forEach(([t, d, to]) => tl.to(pos, { x: to, duration: d, ease: "power2.inOut", onUpdate: draw }, t));
+      tl.to(["#line", "#lb"], { opacity: 0, duration: 0.25, ease: "power2.in" }, AT.out);
+      tl.to("#la", { opacity: 0, duration: 0.25, ease: "power2.in" }, AT.out + 0.4);
+      window.__timelines["main"] = tl;
+      tl.seek(0); draw();
+    </script>
+  </body>
+</html>

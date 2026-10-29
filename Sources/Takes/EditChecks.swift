@@ -95,10 +95,6 @@ enum EditChecks {
         }
     }
 
-    static func badgeHelp(_ n: Int) -> String {
-        n == 1 ? "1 problem in this edit. Open it to see what." : "\(n) problems in this edit. Open it to see what."
-    }
-
     /// A file the line shows for: a video or a sound in the session's edits/ folder.
     nonisolated static func isEdit(_ url: URL, in session: URL) -> Bool {
         let base = session.standardizedFileURL.pathComponents

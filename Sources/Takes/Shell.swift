@@ -75,8 +75,8 @@ extension EnvironmentValues {
 enum SessionView {
     static let key = "sessionViews"
 
-    static func read(_ session: URL) -> (mode: SessionMode, file: URL?, time: Double?) {
-        let all = UserDefaults.standard.dictionary(forKey: key) ?? [:]
+    static func read(_ session: URL, defaults: UserDefaults = .standard) -> (mode: SessionMode, file: URL?, time: Double?) {
+        let all = defaults.dictionary(forKey: key) ?? [:]
         // A session never shown here opens where its session.json says ("opens": {"tab", "file"}),
         // so the demo session starts on its finished edit, not on a dark camera (2026-10-08).
         guard let v = all[session.standardizedFileURL.path] as? [String: Any] ?? opens(session)
@@ -92,8 +92,9 @@ enum SessionView {
         return doc["opens"] as? [String: Any]
     }
 
-    static func write(_ session: URL, mode: SessionMode, file: URL?, time: Double?) {
-        var all = UserDefaults.standard.dictionary(forKey: key) ?? [:]
+    /// `defaults`: tests pass their own, since other tests write the shared one at the same time.
+    static func write(_ session: URL, mode: SessionMode, file: URL?, time: Double?, defaults: UserDefaults = .standard) {
+        var all = defaults.dictionary(forKey: key) ?? [:]
         var v: [String: Any] = ["tab": mode.rawValue]
         if let file {
             // Inside the session: kept relative, so it still works when the folder moves.
@@ -105,7 +106,7 @@ enum SessionView {
         all[here] = v
         // Past 200 sessions, drop one whose folder is gone, never the one just written.
         if all.count > 200, let old = all.keys.first(where: { $0 != here && !FileManager.default.fileExists(atPath: $0) }) { all[old] = nil }
-        UserDefaults.standard.set(all, forKey: key)
+        defaults.set(all, forKey: key)
     }
 }
 

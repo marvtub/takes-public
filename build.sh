@@ -109,6 +109,11 @@ if [[ -d styles ]]; then
   mkdir -p "$APP/Contents/Resources/styles"
   rsync -a --exclude 'snapshots/' --exclude 'renders/' --exclude 'footage.mp4' --exclude 'node_modules/' styles/ "$APP/Contents/Resources/styles/"
 fi
+# Effects (2026-10-28): read in place from Resources/effects by the app and the MCP server beside it.
+if [[ -d effects ]]; then
+  mkdir -p "$APP/Contents/Resources/effects"
+  rsync -a --delete --exclude 'renders/' --exclude 'node_modules/' effects/ "$APP/Contents/Resources/effects/"
+fi
 # The skills the Skills plugin lists: Takes' own (scripts/public/skills, or skills/ in the public copy).
 mkdir -p "$APP/Contents/Resources/plugin-skills"
 for d in skills/*/ scripts/public/skills/*/ admin/skills/*/; do

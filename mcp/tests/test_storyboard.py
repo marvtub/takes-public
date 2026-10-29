@@ -12,7 +12,9 @@ import takes_mcp as t  # noqa: E402
 FAKE = "import sys\nopen(sys.argv[-1], 'wb').write(b'\\x89PNG fake')\n"
 
 
-class Storyboard(unittest.TestCase):
+class Base(unittest.TestCase):
+    """A session and a stand-in sketch command. No tests here, so each suite below runs its own once."""
+
     def setUp(self):
         self.root = tempfile.mkdtemp()
         os.environ["TAKES_ROOT"] = self.root
@@ -28,6 +30,8 @@ class Storyboard(unittest.TestCase):
         for k in ("TAKES_ROOT", "TAKES_SKETCH_CMD"):
             os.environ.pop(k, None)
 
+
+class Storyboard(Base):
     def test_write_draw_keep_and_redraw(self):
         shots = [{"kind": "desk", "say": "Hello.", "do": "To lens.", "sketch": "A man at a desk."},
                  {"kind": "MG", "say": "Then this.", "sketch": "Cards fly in.", "seconds": 4}]
@@ -47,6 +51,9 @@ class Storyboard(unittest.TestCase):
         self.assertIn("image", t.read_storyboard(self.s)["shots"][0])
         # The storyboard folder is not an asset.
         self.assertFalse(any("storyboard" in a.get("path", "") for a in t.t_get_session({"session": self.s})["assets"]))
+        # A shot needs a sketch.
+        with self.assertRaises(ValueError):
+            t.t_set_storyboard({"session": self.s, "shots": [{"say": "Hi."}]})
 
     def test_the_format_is_kept_and_a_new_one_draws_again(self):
         shots = [{"say": "Hi.", "sketch": "A man at a desk."}]
@@ -137,10 +144,6 @@ class Storyboard(unittest.TestCase):
         self.assertEqual(calls[0][1], "/models/google/nano-banana/predictions")
         self.assertEqual(calls[0][2]["input"]["aspect_ratio"], "9:16")
 
-    def test_a_shot_needs_a_sketch(self):
-        with self.assertRaises(ValueError):
-            t.t_set_storyboard({"session": self.s, "shots": [{"say": "Hi."}]})
-
     def test_a_video_shot_shows_the_clip_and_is_not_drawn(self):
         lib = os.path.join(self.root, "_library", "broll", "1 Desk")
         os.makedirs(lib)
@@ -199,11 +202,7 @@ class Storyboard(unittest.TestCase):
         self.assertEqual(y, {"video": "generated/a.mp4"})
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
-class StoryboardIds(Storyboard):
+class StoryboardIds(Base):
     def test_ids_stay_and_sections_order_the_shots(self):
         shots = [{"say": "Main one.", "sketch": "A desk."},
                  {"kind": "end", "say": "Bye.", "sketch": "A wave."},
@@ -237,3 +236,7 @@ class StoryboardIds(Storyboard):
         r = t.t_set_storyboard({"session": self.s, "shots": [{"say": "Other.", "sketch": "A cat."}]})
         self.assertEqual(r["ids"], ["s2"])
         self.assertIn("s1", r["warning"])
+
+
+if __name__ == "__main__":
+    unittest.main()

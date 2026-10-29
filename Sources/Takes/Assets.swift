@@ -835,13 +835,6 @@ struct AssetTile: View, Equatable {
             }
             .overlay(alignment: .topTrailing) {
                 HStack(spacing: 4) {
-                    // check_edit's problems: amber, apart from the comments and posts.
-                    if asset.problems > 0 {
-                        Label("\(asset.problems)", systemImage: "exclamationmark.triangle.fill")
-                            .padding(.horizontal, 7).padding(.vertical, 2)
-                            .background(Theme.warn, in: Capsule())
-                            .help(EditChecks.badgeHelp(asset.problems))
-                    }
                     if openComments > 0 || !inPost.isEmpty || isCover {
                         HStack(spacing: 4) {
                             if openComments > 0 {

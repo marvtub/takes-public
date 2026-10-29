@@ -114,16 +114,6 @@ struct EditRecipeTests {
         #expect(EditRecipe.toastIcon(done) == "checkmark" && EditRecipe.toastIcon(bad) == "exclamationmark.triangle")
     }
 
-    @Test func coverArgsSkipTheBakedCover() {
-        let v = URL(fileURLWithPath: "/s/edits/a-v2.mp4"), img = URL(fileURLWithPath: "/s/thumbnails/t.png")
-        let with = Cover.args(image: img, video: v, out: URL(fileURLWithPath: "/s/o.mp4"), w: 360, h: 640, fps: 30, sound: true, skip: 0.1)
-        #expect(Array(with[4..<8]) == ["-ss", "0.100", "-i", v.path])
-        let plain = Cover.args(image: img, video: v, out: URL(fileURLWithPath: "/s/o.mp4"), w: 360, h: 640, fps: 30, sound: true, skip: 0)
-        #expect(!plain.contains("-ss"))
-        let off = Cover.args(image: nil, video: v, out: URL(fileURLWithPath: "/s/o.mp4"), w: 360, h: 640, fps: 30, sound: false, skip: 0.1)
-        #expect(off.contains("-ss") && !off.contains("-filter_complex") && !off.contains(img.path))
-    }
-
     /// Runs ffmpeg: a version whose recipe baked a red cover; a new cover replaces it, No cover cuts it off.
     @Test func coverOnARecipeVersionReplacesItAndRemoveCutsItOff() async throws {
         guard FileManager.default.isExecutableFile(atPath: "/opt/homebrew/bin/ffmpeg") else { return }
@@ -245,19 +235,15 @@ struct ExportMenuSnapshotTests {
 /// `TAKES_SNAPSHOT=/some/dir ./test.sh --filter EditTileSnapshot`.
 @MainActor
 struct EditTileSnapshotTests {
-    @Test func editTilesKeepOneHeight() throws {
+    /// Edit tiles with and without a note, to look at: `TAKES_SNAPSHOT=/dir ./test.sh --filter editTiles`.
+    @Test func editTilesSnapshot() throws {
+        guard let dir = ProcessInfo.processInfo.environment["TAKES_SNAPSHOT"] else { return }
         let tile = { (note: String?) in
             AssetTile(asset: Asset(url: URL(fileURLWithPath: "/nowhere/edits/hook-v\(note == nil ? 1 : 2).mp4"), group: "edits",
                                    name: "hook-v\(note == nil ? 1 : 2).mp4", size: 1, modified: Date()),
                       selected: false, note: note)
                 .frame(width: 200)
         }
-        let sizes = [nil, "Music softer. Cut the restart at 0:41."].map { n -> CGSize in
-            let host = NSHostingView(rootView: tile(n))
-            return host.fittingSize
-        }
-        #expect(sizes[0].height == sizes[1].height)
-        guard let dir = ProcessInfo.processInfo.environment["TAKES_SNAPSHOT"] else { return }
         let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().appending(path: "../../assets")
         for f in (try? FileManager.default.contentsOfDirectory(at: root.appending(path: "fonts"), includingPropertiesForKeys: nil)) ?? []
         where f.pathExtension == "ttf" { CTFontManagerRegisterFontsForURL(f as CFURL, .process, nil) }

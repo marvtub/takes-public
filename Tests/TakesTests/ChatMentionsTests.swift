@@ -6,6 +6,7 @@ import Testing
 @Suite struct ChatMentionsTests {
     let green = Mention(kind: .style, name: "Green Room", path: URL(fileURLWithPath: "/lib/styles/Green Room"))
     let argon = Mention(kind: .style, name: "Green Room Argon", path: URL(fileURLWithPath: "/lib/styles/Green Room Argon"))
+    let behind = Mention(kind: .effect, name: "Text behind", detail: "Cut-out", path: URL(fileURLWithPath: "/app/effects/text-behind"))
     let hyper = Mention(kind: .skill, name: "Hyperframes", path: URL(fileURLWithPath: "/home/.claude/skills/hyperframes"))
     let edit = Mention(kind: .asset, name: "launch-v3.mp4", detail: "Edit", path: URL(fileURLWithPath: "/s/edits/launch-v3.mp4"))
 
@@ -48,6 +49,29 @@ import Testing
         // The chat shows the message alone, and tints the names it read back from the note.
         #expect(CopilotAsk.shown(text + note) == text)
         #expect(Mentions.tokens(in: text + note) == ["@Green Room", "@Hyperframes"])
+    }
+
+    @Test func anEffectIsAskedForByItsFolder() {
+        let text = "Put @Text behind on the hook"
+        let note = Mentions.note(Mentions.used([behind, green], in: text), session: nil)
+        #expect(note.contains("the effect \"Text behind\""))
+        #expect(note.contains("list_effects text-behind"))
+        #expect(!note.contains("Green Room"))
+        #expect(Mentions.tokens(in: text + note) == ["@Text behind"])
+        #expect(Mentions.filter([green, hyper, behind], "eff") == [behind])
+    }
+
+    @Test func theListHasEveryEffect() throws {
+        let fm = FileManager.default
+        let tmp = fm.temporaryDirectory.appending(path: "mention-fx-\(UUID().uuidString)")
+        defer { try? fm.removeItem(at: tmp) }
+        let shipped = tmp.appending(path: "effects/tier-list")
+        try fm.createDirectory(at: shipped, withIntermediateDirectories: true)
+        try #"{"name": "Tier list", "kind": "Overlay"}"#.write(to: shipped.appending(path: "effect.json"), atomically: true, encoding: .utf8)
+        let fx = Mentions.all(session: nil, root: tmp, effects: tmp.appending(path: "effects")).filter { $0.kind == .effect }
+        #expect(fx.map(\.name) == ["Tier list"])
+        #expect(fx.first?.detail == "Overlay")
+        #expect(Mentions.note(fx, session: nil).contains("list_effects tier-list"))
     }
 
     @Test func aLongerNameWinsOverItsStart() {

@@ -41,6 +41,9 @@ final class FileWatch {
         }
     }
 
+    /// Runs `done` once the stream has started (or failed to). Tests: a write before that is not seen.
+    func started(_ done: @escaping @Sendable () -> Void) { queue.async(execute: done) }
+
     func stop() {
         root = nil
         queue.async { [self] in Self.end(stream); stream = nil }

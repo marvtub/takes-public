@@ -1,0 +1,15 @@
+{
+  "name": "Checklist",
+  "description": "A dark card with a title and 3 to 5 lines. Each line comes in as you say it, its box ticks with a drawn check, and the text dims with a thin strike. A count by the title goes 0/3 to 3/3.",
+  "when": "When you list steps, rules or reasons: '3 things before you post'.",
+  "needs": [
+    "the title",
+    "the lines, each with the time you say it (seconds from the start of the effect)",
+    "the position: lower third or top",
+    "the cut time where it starts"
+  ],
+  "kind": "Overlay",
+  "length_s": 6,
+  "shape": "any",
+  "shipped": true
+}

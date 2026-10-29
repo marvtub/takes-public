@@ -27,6 +27,8 @@ struct TakesApp: App {
                 .overlay { SearchPalette().environment(app) }
                 .overlay { OnboardingLayer().environment(app) }
                 .overlay { FirstTakeLayer().environment(app) }
+                .overlay { Plugins.autopost.map { $0.layer(app) } }
+                .onAppear { NotchPanel.shared.menuBarItem(app) }
                 .overlay { UsageAskLayer().environment(app) }
                 .sheet(isPresented: Bindable(Releaser.shared).asking) { ReleaseAsk() }
                 .task {
@@ -3189,6 +3191,13 @@ struct Prompter: NSViewRepresentable {
     var inset = NSSize(width: 40, height: 36)
     /// The page from the countdown on. Nil: the stage's navy. The notch is black.
     var darkPage: NSColor? = nil
+    /// Another typeface than `Theme.prompter` (the notch: mono or Inter).
+    var font: NSFont? = nil
+    /// Lines in the middle (the notch, 2026-10-29).
+    var centered = false
+    /// With voice follow: lines read go dim, the words said on this line go bright, and the
+    /// rest waits a little dim (the notch, 2026-10-29). Off: only the words said go dim.
+    var focusLine = false
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
@@ -3241,8 +3250,9 @@ struct Prompter: NSViewRepresentable {
     }
 
     private func apply(to tv: NSTextView, context: Context) {
-        let font = Theme.prompter(fontSize)
+        let font = self.font ?? Theme.prompter(fontSize)
         let ink = dark ? NSColor.white : Theme.inkNS
+        let style = "\(font.fontName)|\(centered)|\(focusLine)"
         if context.coordinator.darkApplied != dark {
             context.coordinator.darkApplied = dark
             context.coordinator.fontApplied = 0
@@ -3251,11 +3261,14 @@ struct Prompter: NSViewRepresentable {
             tv.enclosingScrollView?.backgroundColor = page
             tv.selectedTextAttributes = [.backgroundColor: NSColor(Theme.accent).withAlphaComponent(dark ? 0.45 : 0.22)]
         }
-        if context.coordinator.fontApplied != fontSize {
+        if context.coordinator.fontApplied != fontSize || context.coordinator.styleApplied != style {
             context.coordinator.fontApplied = fontSize
+            context.coordinator.styleApplied = style
+            context.coordinator.dimmed = nil
             tv.font = font
             let para = NSMutableParagraphStyle()
             para.lineSpacing = fontSize * 0.35
+            para.alignment = centered ? .center : .natural
             tv.defaultParagraphStyle = para
             tv.textStorage?.addAttributes([.font: font, .paragraphStyle: para, .foregroundColor: ink],
                                           range: NSRange(location: 0, length: tv.string.utf16.count))
@@ -3287,6 +3300,7 @@ struct Prompter: NSViewRepresentable {
         var lastReset: Int
         var lastKey: String
         var fontApplied: Double = 0
+        var styleApplied = ""
         var darkApplied: Bool?
         var isEditing = false
         var lastReveal = 0
@@ -3299,8 +3313,9 @@ struct Prompter: NSViewRepresentable {
         private var followObservers: [NSObjectProtocol] = []
         /// The script cut into words, for voice follow. Rebuilt when the text changes.
         private var words = ScriptFollower("")
-        /// What is dimmed now: the text and the word count said.
-        private var dimmed: (String, Int)?
+        /// What is dimmed now: the text, the word count said and the width it wrapped at (the
+        /// line in focus changes with it). Nil: draw it again.
+        var dimmed: (String, Int, CGFloat)?
 
         init(_ p: Prompter) {
             parent = p; lastReset = p.resetToken; lastKey = p.contentKey
@@ -3329,6 +3344,18 @@ struct Prompter: NSViewRepresentable {
         /// A new size rewraps the text: put the line to read back on the reading line. Also the
         /// first layout, when the view had no height yet.
         func watchSize() {
+            // The line in focus follows the wrap: at once, in the same layout pass, so a line
+            // read never shows bright for a moment.
+            if let tv = textView {
+                tv.postsFrameChangedNotifications = true
+                followObservers.append(NotificationCenter.default.addObserver(forName: NSView.frameDidChangeNotification, object: tv, queue: nil) {
+                    [weak self] _ in MainActor.assumeIsolated {
+                        guard let self, self.parent.focusLine, let tv = self.textView, let d = self.dimmed,
+                              d.2 != tv.textContainer?.size.width ?? 0 else { return }
+                        self.follow(tv)
+                    }
+                })
+            }
             guard let clip = scroll?.contentView else { return }
             clip.postsFrameChangedNotifications = true
             followObservers.append(NotificationCenter.default.addObserver(forName: NSView.frameDidChangeNotification, object: clip, queue: .main) {
@@ -3340,6 +3367,8 @@ struct Prompter: NSViewRepresentable {
                         self.placePending = false
                         guard let voice = self.parent.voice, let tv = self.textView else { return }
                         self.place(tv, word: voice.next, animated: false)
+                        // The lines wrap again: the line in focus may hold other words now.
+                        if self.parent.focusLine { self.dimmed = nil; self.follow(tv) }
                     }
                 }
             })
@@ -3352,19 +3381,51 @@ struct Prompter: NSViewRepresentable {
         func follow(_ tv: NSTextView) {
             guard let lm = tv.layoutManager else { return }
             let said = parent.voice?.next ?? 0
-            guard dimmed == nil || dimmed!.0 != tv.string || dimmed!.1 != said else { return }
+            let width = parent.focusLine ? tv.textContainer?.size.width ?? 0 : 0
+            guard dimmed == nil || dimmed!.0 != tv.string || dimmed!.1 != said || dimmed!.2 != width else { return }
             // The first time, the view jumps to its place; after that it glides.
             let first = dimmed == nil
-            dimmed = (tv.string, said)
+            dimmed = (tv.string, said, width)
             if parent.voice != nil { DispatchQueue.main.async { self.place(tv, word: said, animated: !first) } }
             let all = NSRange(location: 0, length: (tv.string as NSString).length)
             lm.removeTemporaryAttribute(.foregroundColor, forCharacterRange: all)
-            guard parent.voice != nil, said > 0 else { return }
+            guard parent.voice != nil else { return }
             if words.text != tv.string { words = ScriptFollower(tv.string) }
-            guard said <= words.ranges.count else { return }
+            if parent.focusLine { return focus(tv, lm, said: said) }
+            guard said > 0, said <= words.ranges.count else { return }
             let last = words.ranges[said - 1]
             let ink = (parent.dark ? NSColor.white : Theme.inkNS).withAlphaComponent(0.38)
             lm.addTemporaryAttributes([.foregroundColor: ink], forCharacterRange: NSRange(location: 0, length: last.location + last.length))
+        }
+
+        /// The line with the next word: lines above it at a third, the words said on it in full
+        /// white, the rest at two thirds.
+        @MainActor
+        private func focus(_ tv: NSTextView, _ lm: NSLayoutManager, said: Int) {
+            let ink = parent.dark ? NSColor.white : Theme.inkNS
+            let length = (tv.string as NSString).length
+            // Lines whose colour changes after a rewrap are not always drawn again by themselves.
+            defer { tv.needsDisplay = true }
+            lm.addTemporaryAttributes([.foregroundColor: ink.withAlphaComponent(0.62)], forCharacterRange: NSRange(location: 0, length: length))
+            guard !words.ranges.isEmpty else { return }
+            let nextWord = words.ranges[min(said, words.ranges.count - 1)]
+            let at = said < words.ranges.count ? nextWord.location : length
+            lm.ensureLayout(forCharacterRange: NSRange(location: 0, length: min(length, at + 1)))
+            var lineStart = at
+            if at < length {
+                var line = NSRange()
+                _ = lm.lineFragmentRect(forGlyphAt: lm.glyphIndexForCharacter(at: at), effectiveRange: &line)
+                lineStart = lm.characterRange(forGlyphRange: line, actualGlyphRange: nil).location
+            }
+            if lineStart > 0 {
+                lm.addTemporaryAttributes([.foregroundColor: ink.withAlphaComponent(0.32)], forCharacterRange: NSRange(location: 0, length: lineStart))
+            }
+            guard said > 0 else { return }
+            let last = words.ranges[min(said, words.ranges.count) - 1]
+            let end = last.location + last.length
+            if end > lineStart {
+                lm.addTemporaryAttributes([.foregroundColor: ink], forCharacterRange: NSRange(location: lineStart, length: end - lineStart))
+            }
         }
 
         /// Voice follow found a new place: dim up to it and bring its line to the reading line.
@@ -3390,6 +3451,8 @@ struct Prompter: NSViewRepresentable {
             let maxY = max(0, (scroll.documentView?.frame.height ?? 0) - clip.bounds.height)
             let y = min(maxY, max(0, rect.minY + tv.textContainerOrigin.y - clip.bounds.height * parent.readingLine))
             offset = y
+            // The text has its real width by now: the line in focus may be another one.
+            if parent.focusLine, let d = dimmed, d.2 != tc.size.width { follow(tv) }
             guard abs(clip.bounds.origin.y - y) > 1 else { return }
             if animated {
                 NSAnimationContext.runAnimationGroup { ctx in

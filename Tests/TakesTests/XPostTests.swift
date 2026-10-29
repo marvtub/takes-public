@@ -35,14 +35,16 @@ struct XPostTests {
         PostFile.write(.init(text: "X\n"), to: session, .x)
         #expect(PostFile.read(session)?.text == "LinkedIn\n")
         #expect(PostFile.read(session, .x)?.text == "X\n")
-    }
-
-    @Test func xUsesTheLinkedInMediaPick() throws {
-        try Data().write(to: session.appending(path: "edits/a.mp4"))
-        try Data().write(to: session.appending(path: "edits/b.mp4"))
-        PostFile.write(.init(text: "LinkedIn\n", media: "edits/a.mp4"), to: session)
-        PostFile.write(.init(text: "X\n"), to: session, .x)
-        #expect(PostFile.media(PostFile.read(session, .x), in: session, .x)?.lastPathComponent == "a.mp4")
+        // The other platforms' paths: LinkedIn, article, YouTube and vertical.
+        #expect(PostFile.rel(of: "main") == "posts/linkedin.md")
+        #expect(PostFile.rel(of: "story") == "posts/variants/story.md")
+        #expect(PostPlatform.article.rel == "posts/article.md")
+        #expect(PostPlatform.of(rel: "posts/article.md") == .article)
+        #expect(PostPlatform.of(rel: "posts/article/variants/short.md") == .article)
+        #expect(PostPlatform.youtube.rel == "posts/youtube.md")
+        #expect(PostFile.rel(of: "short", .vertical) == "posts/vertical/variants/short.md")
+        #expect(PostPlatform.of(rel: "posts/vertical.md") == .vertical)
+        #expect(PostPlatform.of(rel: "posts/youtube/variants/a.md") == .youtube)
     }
 
     @Test func storeEditsTheXPostAndKeepsItsHistory() async throws {

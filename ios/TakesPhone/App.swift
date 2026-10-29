@@ -8,6 +8,11 @@ struct TakesPhoneApp: App {
     @Environment(\.scenePhase) private var scene
 
     init() {
+        // UI tests (TAKES_SERVER, see Model.init): start from no saved choices, so a fold, a tab or
+        // a draft one test left never reaches the next (2026-10-28). Launch arguments still apply.
+        if ProcessInfo.processInfo.environment["TAKES_SERVER"] != nil, let id = Bundle.main.bundleIdentifier {
+            UserDefaults.standard.removePersistentDomain(forName: id)
+        }
         Brand.registerFonts()
         // The UI tests pick a Home Screen quick action this way.
         if let q = ProcessInfo.processInfo.environment["TAKES_QUICK"] { QuickAction.shared.asked = q }
@@ -148,8 +153,12 @@ struct Tabs: View {
             NavigationStack { StylesView() }.toolbar(.hidden, for: .tabBar).tag("styles")
             Group {
                 if tab.hasPrefix("plugin:") {
-                    // The Mac plugins with a phone screen (2026-10-09): admin only, none in the public copy.
-                    NavigationStack { PrivatePhone.screen(String(tab.dropFirst("plugin:".count))) }.id(tab)
+                    // The Mac plugins with a phone screen (2026-10-09): Plan, and the admin ones (none in the public copy).
+                    // Plan is public (2026-10-25): its screen ships in the public copy too.
+                    NavigationStack {
+                        if tab == "plugin:consistency" { PlanScreen() } else { PrivatePhone.screen(String(tab.dropFirst("plugin:".count))) }
+                    }
+                    .id(tab)
                 } else {
                     SearchView()
                 }

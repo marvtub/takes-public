@@ -478,7 +478,7 @@ final class Model: ObservableObject {
     /// Every project on the Mac, empty ones too: where a session can move.
     @Published var projects: [String] = []
 
-    /// The Mac's plugin screens for this phone (GET /api/plugins). Empty from the public copy.
+    /// The Mac's plugin screens for this phone (GET /api/plugins). Only Plan from the public copy.
     @Published var plugins: [PluginInfo] = []
     /// The Mac's Public view (2026-10-22): the phone hides the admin screens as the Mac does.
     @Published var publicView = Features.publicView
