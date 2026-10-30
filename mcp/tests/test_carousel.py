@@ -82,6 +82,23 @@ class CarouselTests(unittest.TestCase):
         self.assertNotIn("look", self.read())
         self.assertNotIn("accent", self.read())
 
+    def test_desk_look_with_screen_takes(self):
+        open(os.path.join(self.s, "take-02-screen.mov"), "wb").close()
+        os.makedirs(os.path.join(self.s, "stills"))
+        open(os.path.join(self.s, "stills", "desk.jpg"), "wb").close()
+        t.t_set_carousel({"session": self.s, "look": "desk", "backdrop": "stills/desk.jpg", "slides": [
+            {"title": "how I built *this*", "body": "swipe"},
+            {"layout": "screen", "title": "1) *find what works*", "body": "(the viral ones)",
+             "media": "take-02-screen.mov", "start": 1, "end": 5}]})
+        c = self.read()
+        self.assertEqual((c["look"], c["backdrop"]), ("desk", "stills/desk.jpg"))
+        self.assertEqual(c["slides"][1]["layout"], "screen")
+        self.assertEqual((c["slides"][1]["start"], c["slides"][1]["end"]), (1.0, 5.0))
+        with self.assertRaises(ValueError):
+            t.t_set_carousel({"session": self.s, "backdrop": "stills/missing.jpg"})
+        t.t_set_carousel({"session": self.s, "backdrop": ""})
+        self.assertNotIn("backdrop", self.read())
+
     def test_refuses_slides_it_cannot_draw(self):
         os.makedirs(os.path.join(self.s, "stills"))
         open(os.path.join(self.s, "stills", "a.jpg"), "wb").close()

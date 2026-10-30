@@ -134,6 +134,68 @@ let carouselDir = ProcessInfo.processInfo.environment["TAKES_CAROUSEL"]
         return s
     }
 
+    /// A session with three screen takes (pictures here, a video when `clip`) and a best cut on take 2.
+    static func screenSession(clip: Bool = false) async throws -> URL {
+        let s = try session()
+        let fm = FileManager.default
+        let screen = s.deletingLastPathComponent().appending(path: "screen-wide.jpg")
+        try demoPicture("screen-wide.jpg", to: screen, size: CGSize(width: 1920, height: 1080))
+        var takes: [[String: Any]] = []
+        for (i, name) in ["find what works", "talk it out", "build every slide"].enumerated() {
+            let file = String(format: "take-%02d-screen.%@", i + 1, clip ? "mp4" : "jpg")
+            if clip {
+                try await Cover.ffmpeg(["-y", "-loop", "1", "-i", screen.path, "-t", "2", "-r", "10",
+                                        "-vf", "scale=640:360", "-pix_fmt", "yuv420p", s.appending(path: file).path])
+            } else {
+                try fm.copyItem(at: screen, to: s.appending(path: file))
+            }
+            takes.append(["number": i + 1, "kind": "screen", "file": file, "startedAt": "2026-10-29T10:0\(i):00Z", "name": name, "keeper": false])
+        }
+        takes.append(["number": 4, "kind": "camera", "file": "take-04-camera.mov", "startedAt": "2026-10-29T10:05:00Z", "keeper": false])
+        try JSONSerialization.data(withJSONObject: ["title": "Viral carousels", "createdAt": "2026-10-29T10:00:00Z", "named": true, "takes": takes])
+            .write(to: s.appending(path: "session.json"))
+        try Data(#"{"2": {"state": "done", "start": 0.5, "end": 1.5}}"#.utf8).write(to: s.appending(path: "cuts.json"))
+        return s
+    }
+
+    @Test func builtTemplateUsesTheScreenTakes() async throws {
+        let s = try await Self.screenSession()
+        defer { Self.clean(s) }
+        #expect(CarouselTemplate.auto(s) == .built)
+        let slides = CarouselTemplate.built.slides(s, title: "viral carousels")
+        #expect(slides.map(\.layout) == [.text, .list, .screen, .screen, .screen, .text])
+        #expect(slides[0].title == "how I built *viral carousels*")
+        #expect(slides[1].body == "find what works\ntalk it out\nbuild every slide")
+        #expect(slides[2].media == "take-01-screen.jpg" && slides[2].title.hasPrefix("1) *find what works*"))
+        // The best cut is the part that plays.
+        #expect(slides[3].start == 0.5 && slides[3].end == 1.5 && slides[2].start == nil)
+        #expect(CarouselTemplate.built.look == .desk)
+        // A video on a screen card keeps the card; a picture does not play.
+        #expect(!slides[2].plays && CarouselSlide(layout: .screen, media: "a.mov").plays)
+        let store = CarouselStore()
+        CarouselFile.write(CarouselFile(slides: slides, look: .desk), to: s)
+        store.load(s)
+        try Data().write(to: s.appending(path: "take-09-screen.mov"))
+        store.put([s.appending(path: "take-09-screen.mov")], on: 2)
+        #expect(store.file?.slides[2].layout == .screen && store.file?.slides[2].plays == true)
+        // The desk photo goes with the file, and every slide loads it.
+        var c = CarouselFile(slides: slides, look: .desk, backdrop: "take-01-screen.jpg")
+        let enc = JSONEncoder()
+        #expect(try JSONDecoder().decode(CarouselFile.self, from: enc.encode(c)).backdrop == "take-01-screen.jpg")
+        #expect(c.loads(0, in: s).map(\.0.lastPathComponent) == ["take-01-screen.jpg"])
+        #expect(c.loads(2, in: s).count == 2)
+        c.look = .bold
+        #expect(c.loads(0, in: s).isEmpty)
+    }
+
+    @Test func starredWordsTakeTheAccent() {
+        let a = CarouselSlideView.marked("how I built *viral carousels* fast", hi: .yellow)
+        #expect(String(a.characters) == "how I built viral carousels fast")
+        #expect(a.runs.count == 3)
+        #expect(String(CarouselSlideView.marked("5 * 3 = 15", hi: .yellow).characters) == "5 * 3 = 15")
+        #expect(String(CarouselSlideView.marked("a *b* c *d", hi: nil).characters) == "a b c *d")
+    }
+
     @Test func slidesKeepOnlyWhatIsSet() throws {
         let enc = JSONEncoder()
         enc.outputFormatting = .sortedKeys
@@ -228,6 +290,41 @@ let carouselDir = ProcessInfo.processInfo.environment["TAKES_CAROUSEL"]
                                             size: CarouselPlace.instagram.size, to: URL(fileURLWithPath: "/out.mp4"))
         #expect(long.contains("60.000"))
         #expect(CarouselPlace.instagram.plays && !CarouselPlace.tiktok.plays && !CarouselPlace.linkedin.plays)
+        // On a screen card the clip fits the card's picture, white round it, at the card's place.
+        let card = CarouselSlideView.screenPicture(width: 1080, place: .instagram)
+        let c = CarouselExport.videoArgs(URL(fileURLWithPath: "/c.mov"), start: 0, end: 4, overlay: URL(fileURLWithPath: "/o.png"),
+                                         size: CarouselPlace.instagram.size, card: card, to: URL(fileURLWithPath: "/out.mp4")).joined(separator: " ")
+        #expect(c.contains("force_original_aspect_ratio=decrease") && c.contains("color=white"))
+        #expect(c.contains("overlay=\(Int(card.minX.rounded())):\(Int(card.minY.rounded()))"))
+        #expect(card.minY > 300 && card.maxY < 1440 && card.minX > 0)
+    }
+
+    @Test func screenTakePlaysInTheCard() async throws {
+        guard Setup.tool("ffmpeg") != nil else { return }
+        let s = try await Self.screenSession(clip: true)
+        defer { Self.clean(s) }
+        let c = CarouselFile(slides: CarouselTemplate.built.slides(s, title: "T"), look: .desk)
+        let rel = try await CarouselExport.run(c, place: .instagram, session: s, name: "Test Name")
+        let dir = s.appending(path: rel)
+        let names = try FileManager.default.contentsOfDirectory(atPath: dir.path).sorted()
+        #expect(names == ["slide-01.png", "slide-02.png", "slide-03.mp4", "slide-04.mp4", "slide-05.mp4", "slide-06.png"])
+        // A frame of the video: the screen take in the card, the desk round it.
+        let frame = s.appending(path: "frame.png")
+        try await Cover.ffmpeg(["-y", "-ss", "0.5", "-i", dir.appending(path: "slide-03.mp4").path, "-frames:v", "1", frame.path])
+        let rep = try #require(NSBitmapImageRep(data: Data(contentsOf: frame)))
+        #expect(rep.pixelsWide == 1080 && rep.pixelsHigh == 1440)
+        if let carouselDir { try? FileManager.default.copyItem(at: frame, to: URL(fileURLWithPath: carouselDir).appending(path: "desk-video-frame.png")) }
+        // The card takes the clip's shape (16:9): a white edge round it, the clip in it, the green mat round the card.
+        let card = CarouselSlideView.screenCard(width: 1080, place: .instagram, aspect: 16.0 / 9)
+        #expect(card.height < card.width * 0.7)
+        let px = { (x: CGFloat, y: CGFloat) in rep.colorAt(x: Int(x), y: Int(y))?.usingColorSpace(.sRGB) }
+        let edge = try #require(px(card.minX + 6, card.midY)), inside = try #require(px(card.midX, card.midY))
+        let mat = try #require(px(card.midX, card.maxY + 60))
+        #expect(edge.brightnessComponent > 0.9)
+        // The clip shows through: not the card's white, not the mat's green (the demo laptop, or the public copy's stand-in).
+        #expect(mat.greenComponent > mat.redComponent + 0.1)
+        let off = abs(inside.redComponent - mat.redComponent) + abs(inside.greenComponent - mat.greenComponent) + abs(inside.blueComponent - mat.blueComponent)
+        #expect(inside.brightnessComponent < 0.9 && off > 0.2)
     }
 
     @Test func exportDrawsPicturesAndTheVideoSlide() async throws {
@@ -331,6 +428,8 @@ let carouselDir = ProcessInfo.processInfo.environment["TAKES_CAROUSEL"]
             CarouselSlide(layout: .list, kicker: "Before you film", title: "The checklist", body: "Face the window\nLock the exposure\nClip the mic on\nLook at the lens"),
             CarouselSlide(layout: .photo, kicker: "Behind the scenes", title: "Day 12", media: "stills/still-03.jpg"),
             CarouselSlide(layout: .video, title: "Watch the take", media: "stills/still-01.jpg"),
+            CarouselSlide(layout: .screen, title: "2) *talk it out*\nI send a voice note, it writes every slide.", body: "(and I change anything)",
+                          media: "stills/still-02.jpg"),
             CarouselSlide(kicker: "That's it", title: "Save this.", body: "Follow for more."),
         ]
         let dir = URL(fileURLWithPath: carouselDir!)
@@ -344,6 +443,27 @@ let carouselDir = ProcessInfo.processInfo.environment["TAKES_CAROUSEL"]
                 try CarouselExport.png(v, to: dir.appending(path: String(format: "look-%@-%02d-%@.png", look.rawValue, i + 1, sl.layout.rawValue)))
             }
         }
+        // The desk carousel from screen takes, at every size, on the mat and on a desk photo.
+        let screens = try await CarouselTests.screenSession()
+        defer { CarouselTests.clean(screens) }
+        var built = CarouselTemplate.built.slides(screens, title: "viral carousels with claude")
+        built[2].title = "1) *find out what already works*\nclaude checks my best posts and the viral ones in my niche."
+        built[2].body = "(sandcastles finds the viral ones)"
+        built.insert(CarouselSlide(layout: .cover, title: "the *result*", body: "(straight from my insights)", media: "take-02-screen.jpg"), at: 2)
+        let photo = screens.appending(path: "stills/desk.jpg").path
+        try FileManager.default.createDirectory(at: screens.appending(path: "stills"), withIntermediateDirectories: true)
+        try CarouselTests.demoPicture("walt/creator-wide.jpg", to: URL(fileURLWithPath: photo), size: CGSize(width: 1920, height: 1080))
+        await SlidePictures.shared.preload(built.flatMap { $0.loads(screens) } + [(URL(fileURLWithPath: photo), nil)])
+        for place in CarouselPlace.allCases {
+            for (i, sl) in built.enumerated() {
+                let v = CarouselSlideView(slide: sl, index: i, total: built.count, place: place, name: "Maya Chen", width: 540,
+                                          style: SlideStyle(.desk), session: screens, exporting: true)
+                try CarouselExport.png(v, to: dir.appending(path: String(format: "desk-%@-%02d.png", place.rawValue, i + 1)))
+            }
+        }
+        let v = CarouselSlideView(slide: built[3], index: 3, total: built.count, place: .instagram, name: "Maya Chen", width: 540,
+                                  style: SlideStyle(.desk, backdrop: photo), session: screens, exporting: true)
+        try CarouselExport.png(v, to: dir.appending(path: "desk-photo.png"))
         // TikTok's safe zones, and the Post tab's empty picture.
         for (i, sl) in [filmed[0], slides[5], CarouselSlide(layout: .cover, title: "No picture yet")].enumerated() {
             let v = CarouselSlideView(slide: sl, index: i, total: 3, place: .tiktok, name: "Maya Chen", width: 540, style: SlideStyle(.bold), session: s)

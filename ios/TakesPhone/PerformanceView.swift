@@ -1,4 +1,3 @@
-import Charts
 import SwiftUI
 
 // The performance board from the Mac, for the phone: the Signal dashboard numbers
@@ -18,6 +17,9 @@ struct PerformanceView: View {
     @State private var audienceGroup = 0
     /// The activity grid shows one network at a time: X has replies most days, LinkedIn a post a few times a week.
     @AppStorage("activityPlatform") private var activityX = false
+    @State private var activityPicked: Date?
+    /// The daily charts' window, as on the Mac: "30" or "90" days.
+    @AppStorage("momentumWindow") private var momentumWindow = "30"
 
     static let chatID = "board:performance"
     static let updateAsk = "Update the numbers: refresh the social data as the runbook says, until no source is OLD and no post is NEED. I'm on my phone."
@@ -146,7 +148,7 @@ struct PerformanceView: View {
         freshness(s)
         hero(h)
         thisWeek(s)
-        if let m = s.momentum, !m.dates.isEmpty { momentum(m) }
+        if let m = s.momentum, !m.dates.isEmpty { momentum(m, s.heat) }
         if let f = s.followers, f.filter({ $0.value != nil }).count > 1 { followers(f) }
         if let h = s.heat, !h.dates.isEmpty { activity(h, s.momentum) }
         if let ml = s.monthly_linkedin, !ml.isEmpty { monthly(ml, x: s.monthly_x ?? []) }
@@ -190,62 +192,62 @@ struct PerformanceView: View {
         return Dates.plain.date(from: s.generated)
     }
 
-    private func momentum(_ m: Performance.Social.Momentum) -> some View {
-        let n = min(60, m.dates.count)
-        let start = m.dates.count - n
-        // X reaches 10x the LinkedIn numbers, so each gets its own axis: LinkedIn on the left,
-        // X drawn at `k` times its value and labelled in its own numbers on the right.
-        let li = (start..<min(m.dates.count, m.linkedin.count)).map { m.linkedin[$0] }
-        let xs = (start..<min(m.dates.count, m.x.count)).compactMap { m.x[$0] }
-        let liTop = Self.nice(Double(li.max() ?? 0))
-        // One viral X day (19.8k on Sep 2) would flatten every other day: the axis follows the
-        // second-highest day when the highest is more than twice it, and the spike stops at the top.
-        let xsSorted = xs.sorted(by: >)
-        let xPeak = xsSorted.count > 1 && xsSorted[0] > 2 * xsSorted[1] ? xsSorted[1] : xsSorted.first ?? 0
-        let xTop = Self.nice(Double(xPeak))
-        let k = xTop > 0 ? liTop / xTop : 1
-        // Round steps: 0-5k in 1k, 0-2k in 500.
-        let parts = liTop / pow(10, floor(log10(liTop))) == 2 ? 4 : 5
-        let ticks = (0...parts).map { liTop * Double($0) / Double(parts) }
+    /// Daily reach as one card per platform, as on the Mac: the last 30 or 90 days, the days before
+    /// dashed, a tick on each day with a post. LinkedIn and X never share an axis.
+    @ViewBuilder private func momentum(_ m: Performance.Social.Momentum, _ h: Performance.Social.Heat?) -> some View {
+        momentumCard("LinkedIn", "Impressions", "impressions", Array(m.linkedin.prefix(m.dates.count)), Self.liBlue, m.dates, h?.li_posts, h)
+        // The X line stops on the last day the X data covers.
+        let xs = Array(m.x.prefix { $0 != nil }.compactMap { $0 })
+        if xs.contains(where: { $0 > 0 }) { momentumCard("X", "Views", "views", xs, Palette.ink, m.dates, h?.x_posts, h) }
+    }
+
+    private func momentumCard(_ platform: String, _ title: String, _ unit: String, _ v: [Int], _ c: Color,
+                              _ dates: [String], _ posts: [Int?]?, _ h: Performance.Social.Heat?) -> some View {
+        let days = min(Int(momentumWindow) ?? 30, dates.count)
+        let end = dates.count, start = end - days
+        let cur = Array(v[min(start, v.count)..<v.count])
+        let prior = start >= days && v.count >= start ? Array(v[(start - days)..<start]) : nil
+        let total = cur.reduce(0, +), before = prior?.reduce(0, +)
+        let at = Dictionary(dates.indices.map { (dates[$0], $0) }, uniquingKeysWith: { a, _ in a })
+        let marks = Set((h?.dates.indices ?? 0..<0).compactMap { i -> Int? in
+            guard let posts, i < posts.count, (posts[i] ?? 0) > 0, let j = at[h!.dates[i]], j >= start else { return nil }
+            return j - start
+        })
         return card {
-            VStack(alignment: .leading, spacing: 8) {
-                HStack {
-                    HStack(spacing: 4) { PlatformLogo(kind: .linkedin, size: 13); Text("LinkedIn").foregroundStyle(Self.liBlue) }
-                    Spacer()
-                    Text("Impressions a day, last \(n) days").foregroundStyle(Palette.muted)
-                    Spacer()
-                    HStack(spacing: 4) { Text("X").foregroundStyle(Palette.ink); PlatformLogo(kind: .x, size: 13) }
+            VStack(alignment: .leading, spacing: 12) {
+                ChartHeader(icon: "chart.xyaxis.line", title: title, subtitle: "\(platform), every day") {
+                    windowToggle(["30", "90"], $momentumWindow) { "\($0)d" }
                 }
-                .font(.inter(.caption))
-                Chart {
-                    ForEach(start..<m.dates.count, id: \.self) { i in
-                        if let d = Self.day(m.dates[i]) {
-                            if i < m.linkedin.count {
-                                AreaMark(x: .value("Day", d), y: .value("Impressions", Double(m.linkedin[i])), series: .value("Source", "LinkedIn"))
-                                    .foregroundStyle(Self.liBlue.opacity(0.35))
-                                LineMark(x: .value("Day", d), y: .value("Impressions", Double(m.linkedin[i])), series: .value("Source", "LinkedIn"))
-                                    .foregroundStyle(Self.liBlue).lineStyle(StrokeStyle(lineWidth: 1.5))
-                            }
-                            if i < m.x.count, let x = m.x[i] {
-                                LineMark(x: .value("Day", d), y: .value("Impressions", min(Double(x), xTop) * k), series: .value("Source", "X"))
-                                    .foregroundStyle(Palette.ink).lineStyle(StrokeStyle(lineWidth: 1.5))
-                            }
-                        }
+                HStack(alignment: .bottom, spacing: 18) {
+                    KitNumber(label: "\(KitDate.day(dates[start])) – \(KitDate.day(dates[end - 1]))", value: Kit.comma(total),
+                              pill: before.flatMap { DeltaPill(now: Double(total), before: Double($0)) })
+                    Spacer(minLength: 0)
+                    if let before {
+                        KitNumber(label: "Before", value: Kit.short(Double(before)), big: 19, tint: Palette.muted)
                     }
+                    KitNumber(label: "Per day", value: Kit.comma(cur.isEmpty ? 0 : total / cur.count), big: 19)
                 }
-                .chartYScale(domain: 0...max(liTop, 1))
-                .chartYAxis {
-                    AxisMarks(position: .leading, values: ticks) { v in
-                        AxisGridLine()
-                        AxisValueLabel { Text(Self.short(v.as(Double.self) ?? 0)).foregroundStyle(Self.liBlue) }
-                    }
-                    AxisMarks(position: .trailing, values: ticks) { v in
-                        AxisValueLabel { Text(Self.short((v.as(Double.self) ?? 0) / k)).foregroundStyle(Palette.ink) }
-                    }
-                }
-                .frame(height: 170)
+                KitArea(dates: Array(dates[start..<end]), values: cur, color: c, unit: unit, height: 150, slots: days,
+                        prior: prior, marks: marks)
+                KitKey(items: [(.line(c), "\(days) days")] + (prior == nil ? [] : [(.dashed, "the \(days) before")]))
             }
         }
+    }
+
+    /// Two or more choices in a small capsule, as the Activity card's LinkedIn / X switch.
+    private func windowToggle(_ items: [String], _ sel: Binding<String>, _ title: @escaping (String) -> String) -> some View {
+        HStack(spacing: 2) {
+            ForEach(items, id: \.self) { d in
+                Button { Brand.select(); withAnimation(Brand.quick) { sel.wrappedValue = d } } label: {
+                    Text(title(d)).font(.caption.weight(.semibold)).monospacedDigit()
+                        .foregroundStyle(sel.wrappedValue == d ? Palette.ink : Palette.muted)
+                        .padding(.horizontal, 9).padding(.vertical, 5)
+                        .background(sel.wrappedValue == d ? Palette.paper : .clear, in: Capsule())
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(2).background(Palette.well, in: Capsule())
     }
 
     static let liBlue = Color(red: 0.04, green: 0.4, blue: 0.76)
@@ -362,38 +364,15 @@ struct PerformanceView: View {
         .frame(width: 46, height: 46)
     }
 
-    /// LinkedIn impressions a day, Monday to Sunday, over last week's in grey.
+    /// LinkedIn impressions a day, Monday to Sunday: last week as dashed outlines behind, today
+    /// striped, the best day in the accent. A tap shows the day against the same day last week.
     private func weekBars(_ h: Performance.Social.Heat) -> some View {
         let at = Dictionary(h.dates.indices.map { (h.dates[$0], $0) }, uniquingKeysWith: { a, _ in a })
         let value = { (d: String) -> Int? in at[d].flatMap { $0 < h.impressions.count ? h.impressions[$0] : nil } }
         let posted = { (d: String) -> Bool in at[d].flatMap { $0 < h.li_posts.count ? h.li_posts[$0] : nil } ?? 0 > 0 }
         let now = Self.weekDays(), prev = Self.weekDays(back: 1)
-        let names = ["M", "T", "W", "T", "F", "S", "S"]
-        return Chart {
-            ForEach(0..<7, id: \.self) { i in
-                if let v = value(prev[i]) {
-                    BarMark(x: .value("Day", "\(i)"), y: .value("Impressions", v), width: .ratio(0.7))
-                        .foregroundStyle(Palette.border).cornerRadius(3)
-                }
-                if let v = value(now[i]) {
-                    BarMark(x: .value("Day", "\(i)"), y: .value("Impressions", v), width: .ratio(0.42))
-                        .foregroundStyle(Self.liBlue).cornerRadius(3)
-                }
-            }
-        }
-        .chartXAxis {
-            AxisMarks(values: (0..<7).map { "\($0)" }) { v in
-                AxisValueLabel {
-                    let i = Int(v.as(String.self) ?? "") ?? 0
-                    VStack(spacing: 2) {
-                        Text(names[i]).font(.inter(.caption2)).foregroundStyle(Palette.faint)
-                        Circle().fill(posted(now[i]) ? Self.liBlue : .clear).frame(width: 4, height: 4)
-                    }
-                }
-            }
-        }
-        .chartYAxis(.hidden)
-        .frame(height: 90)
+        return WeekBars(now: now.map(value), prev: prev.map(value), posted: now.map(posted),
+                        today: now.firstIndex(of: Fmt.day.string(from: Date())), color: Self.liBlue)
     }
 
     /// X this week: posts and impressions, against last week.
@@ -417,28 +396,24 @@ struct PerformanceView: View {
                 Text("\(n) posts").font(.inter(.subheadline, .semibold)).foregroundStyle(Palette.ink)
                 Spacer()
                 Text("\(Self.short(Double(v))) impressions").font(.inter(.subheadline).monospacedDigit()).foregroundStyle(Palette.ink)
-                if let delta {
-                    Text(delta.0).font(.inter(.caption, .semibold).monospacedDigit()).foregroundStyle(delta.1 ? Palette.live : .red)
-                }
+                if let delta { delta }
             }
         })
     }
 
-    private func stat(_ label: String, _ value: String, _ delta: (String, Bool)?) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
+    private func stat(_ label: String, _ value: String, _ delta: DeltaPill?) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
             Text(label).font(.inter(.caption)).foregroundStyle(Palette.muted).lineLimit(1)
-            Text(value).font(.nunito(.title3).monospacedDigit()).foregroundStyle(Palette.ink).lineLimit(1)
-            Text(delta?.0 ?? " ").font(.inter(.caption2, .semibold).monospacedDigit())
-                .foregroundStyle(delta?.1 ?? true ? Palette.live : .red)
+            Text(value).font(.inter(size: 19, .semibold).monospacedDigit()).foregroundStyle(Palette.ink).lineLimit(1)
+                .minimumScaleFactor(0.7)
+            if let delta { delta } else { DeltaPill(" ", size: 10.5).hidden() }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    /// "+24%" against last week, or nil when last week had nothing to compare.
-    static func change(_ now: Double, _ before: Double) -> (String, Bool)? {
-        guard before > 0 else { return nil }
-        let pct = Int(((now - before) / before * 100).rounded())
-        return ("\(pct >= 0 ? "+" : "")\(pct)%", pct >= 0)
+    /// "↑ 24%" against last week in a pill, or nil when last week had nothing to compare.
+    static func change(_ now: Double, _ before: Double) -> DeltaPill? {
+        DeltaPill(now: now, before: before, size: 10.5)
     }
 
     /// "Sep 28 – Oct 4".
@@ -456,43 +431,17 @@ struct PerformanceView: View {
     // MARK: Followers
 
     private func followers(_ pts: [Performance.Social.Point]) -> some View {
-        let days = pts.compactMap { p -> (Date, Int)? in
-            guard let d = Self.day(p.date), let v = p.value else { return nil }
-            return (d, v)
-        }
+        let days = pts.compactMap { p -> (String, Int)? in p.value.map { (p.date, $0) } }
         let first = days.first?.1 ?? 0, last = days.last?.1 ?? 0
-        let lo = Double(days.map(\.1).min() ?? 0), hi = Double(days.map(\.1).max() ?? 0)
-        let pad = max(5, (hi - lo) * 0.15)
         return card {
-            VStack(alignment: .leading, spacing: 10) {
-                HStack(alignment: .firstTextBaseline) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Followers").font(.nunito(.headline))
-                        Text("Last \(days.count > 1 ? Self.span(days.first!.0, days.last!.0) : "days")").font(.inter(.caption)).foregroundStyle(Palette.muted)
-                    }
-                    Spacer()
-                    VStack(alignment: .trailing, spacing: 2) {
-                        Text(last.formatted()).font(.nunito(.title3).monospacedDigit())
-                        Text("\(last - first >= 0 ? "+" : "")\(last - first)").font(.inter(.caption, .semibold).monospacedDigit())
-                            .foregroundStyle(last >= first ? Palette.live : .red)
-                    }
-                }
-                Chart(days, id: \.0) { d, v in
-                    AreaMark(x: .value("Day", d), yStart: .value("Base", lo - pad), yEnd: .value("Followers", Double(v)))
-                        .foregroundStyle(LinearGradient(colors: [Palette.accent.opacity(0.28), Palette.accent.opacity(0.02)],
-                                                        startPoint: .top, endPoint: .bottom))
-                        .interpolationMethod(.monotone)
-                    LineMark(x: .value("Day", d), y: .value("Followers", Double(v)))
-                        .foregroundStyle(Palette.accent).lineStyle(StrokeStyle(lineWidth: 2))
-                        .interpolationMethod(.monotone)
-                }
-                .chartYScale(domain: (lo - pad)...(hi + pad))
-                .chartYAxis { AxisMarks(position: .trailing, values: .automatic(desiredCount: 3)) { v in
-                    AxisGridLine()
-                    AxisValueLabel { Text(Self.short(v.as(Double.self) ?? 0)) }
-                } }
-                .chartXAxis { AxisMarks(values: .stride(by: .month)) { _ in AxisValueLabel(format: .dateTime.month(.abbreviated)) } }
-                .frame(height: 150)
+            VStack(alignment: .leading, spacing: 12) {
+                ChartHeader(icon: "person.2.fill", title: "Followers", subtitle: "LinkedIn, the last \(days.count) days")
+                KitNumber(label: days.last.map { KitDate.day($0.0) } ?? "", value: Kit.comma(last),
+                          pill: DeltaPill("\(last >= first ? "+" : "−")\(Kit.comma(abs(last - first)))",
+                                          tone: last > first ? .up : last < first ? .down : .flat),
+                          note: days.first.map { "since \(KitDate.day($0.0))" })
+                KitArea(dates: days.map(\.0), values: days.map(\.1), color: Palette.accent, unit: "followers",
+                        height: 130, zeroBase: false)
             }
         }
     }
@@ -504,123 +453,174 @@ struct PerformanceView: View {
 
     // MARK: Activity
 
-    /// GitHub-style: one square a day for 13 weeks, darker for more impressions, a dot on days you
-    /// posted. LinkedIn or X, never both added up.
+    /// 13 weeks × 7 days, Monday on top, as on the Mac: darker is more, a dot marks a day with a post,
+    /// a day with no reading yet is a dashed outline. LinkedIn or X, never both added up. A tap on a
+    /// day shows its numbers under the grid.
     private func activity(_ h: Performance.Social.Heat, _ m: Performance.Social.Momentum?) -> some View {
         let cal = Calendar(identifier: .iso8601)
         let xViews = Dictionary((m?.dates.indices ?? 0..<0).map { (m!.dates[$0], $0 < m!.x.count ? m!.x[$0] : nil) },
                                 uniquingKeysWith: { a, _ in a })
-        let days = h.dates.indices.compactMap { i -> (Date, Int, Int)? in
+        let days = h.dates.indices.compactMap { i -> (Date, Int?, Int)? in
             guard let d = Self.day(h.dates[i]) else { return nil }
             let posts = activityX ? (i < h.x_posts.count ? h.x_posts[i] : nil) ?? 0 : (i < h.li_posts.count ? h.li_posts[i] : nil) ?? 0
-            let views = activityX ? (xViews[h.dates[i]] ?? nil) ?? 0 : (i < h.impressions.count ? h.impressions[i] : nil) ?? 0
-            return (d, views, posts)
+            let views: Int? = activityX ? xViews[h.dates[i]] ?? nil : (i < h.impressions.count ? h.impressions[i] : nil)
+            return (cal.startOfDay(for: d), views, posts)
         }
         let tint = activityX ? Palette.ink : Self.liBlue
+        let unit = activityX ? "views" : "impressions"
         // Columns are weeks starting Monday; the first column starts on the first day's Monday.
         let start = days.first.map { cal.date(from: cal.dateComponents([.yearForWeekOfYear, .weekOfYear], from: $0.0)) ?? $0.0 } ?? Date()
-        let byDay = Dictionary(days.map { (cal.startOfDay(for: $0.0), ($0.1, $0.2)) }, uniquingKeysWith: { a, _ in a })
+        let byDay = Dictionary(days.map { ($0.0, ($0.1, $0.2)) }, uniquingKeysWith: { a, _ in a })
         let weeks = days.last.map { (cal.dateComponents([.day], from: start, to: $0.0).day ?? 0) / 7 + 1 } ?? 0
-        let sorted = days.map(\.1).filter { $0 > 0 }.sorted()
+        let sorted = days.compactMap(\.1).filter { $0 > 0 }.sorted()
         let q = { (f: Double) in sorted.isEmpty ? 1 : sorted[min(sorted.count - 1, Int(Double(sorted.count) * f))] }
         let steps = [q(0.25), q(0.5), q(0.75), q(0.92)]
         let level = { (v: Int) -> Int in v <= 0 ? 0 : 1 + steps.filter { v > $0 }.count }
         let posted = days.filter { $0.2 > 0 }.count
-        let total = days.reduce(0) { $0 + $1.1 }
+        let total = days.reduce(0) { $0 + ($1.1 ?? 0) }
+        let picked = activityPicked.flatMap { d in byDay[d].map { (d, $0) } }
         return card {
-            VStack(alignment: .leading, spacing: 10) {
-                HStack {
-                    Text("Activity").font(.nunito(.headline))
-                    Spacer()
+            VStack(alignment: .leading, spacing: 12) {
+                ChartHeader(icon: "square.grid.3x3.fill", title: "13 weeks",
+                            subtitle: "\(posted) posting days · \(Kit.short(Double(total))) \(unit)") {
                     HStack(spacing: 2) {
                         ForEach([false, true], id: \.self) { x in
                             Button { Brand.select(); withAnimation(Brand.quick) { activityX = x } } label: {
-                                HStack(spacing: 5) {
-                                    PlatformLogo(kind: x ? .x : .linkedin, size: 14)
-                                    Text(x ? "X" : "LinkedIn").font(.caption.weight(.semibold))
-                                }
-                                .foregroundStyle(activityX == x ? Palette.ink : Palette.muted)
-                                .padding(.horizontal, 9).padding(.vertical, 5)
-                                .background(activityX == x ? Palette.paper : .clear, in: Capsule())
+                                PlatformLogo(kind: x ? .x : .linkedin, size: 14)
+                                    .opacity(activityX == x ? 1 : 0.45)
+                                    .padding(.horizontal, 9).padding(.vertical, 5)
+                                    .background(activityX == x ? Palette.paper : .clear, in: Capsule())
                             }
                             .buttonStyle(.plain)
+                            .accessibilityLabel(x ? "X" : "LinkedIn")
                         }
                     }
                     .padding(2).background(Palette.well, in: Capsule())
                 }
-                Text("\(posted) posting days · \(Self.short(Double(total))) impressions").font(.inter(.caption)).foregroundStyle(Palette.muted)
                 GeometryReader { g in
                     let gap: CGFloat = 3
                     let side = min(18, (g.size.width - 18 - gap * CGFloat(max(weeks - 1, 0))) / CGFloat(max(weeks, 1)))
-                    HStack(alignment: .top, spacing: gap) {
+                    let step = side + gap
+                    HStack(alignment: .top, spacing: 6) {
                         VStack(alignment: .trailing, spacing: gap) {
                             ForEach(0..<7, id: \.self) { r in
-                                Text(r % 2 == 0 ? ["M", "", "W", "", "F", "", "S"][r] : "").font(.system(size: 8)).foregroundStyle(Palette.faint)
+                                Text(["M", "", "W", "", "F", "", "S"][r]).font(.system(size: 8)).foregroundStyle(Palette.faint)
                                     .frame(width: 12, height: side)
                             }
                         }
-                        ForEach(0..<weeks, id: \.self) { w in
-                            VStack(spacing: gap) {
-                                ForEach(0..<7, id: \.self) { r in
-                                    let d = cal.date(byAdding: .day, value: w * 7 + r, to: start) ?? start
-                                    let cell = byDay[cal.startOfDay(for: d)]
-                                    RoundedRectangle(cornerRadius: 3)
-                                        .fill(cell == nil ? Color.clear : Self.heatColor(level(cell!.0), tint))
-                                        .overlay { if let c = cell, c.1 > 0 { Circle().fill(activityX ? Palette.paper : .white).frame(width: side * 0.3) } }
-                                        .frame(width: side, height: side)
+                        // One drawing, not 91 views (the Mac's HeatGrid, 2026-10-03).
+                        Canvas { ctx, _ in
+                            for w in 0..<weeks {
+                                for r in 0..<7 {
+                                    guard let d = cal.date(byAdding: .day, value: w * 7 + r, to: start), let cell = byDay[cal.startOfDay(for: d)] else { continue }
+                                    let rect = CGRect(x: CGFloat(w) * step, y: CGFloat(r) * step, width: side, height: side)
+                                    if let v = cell.0 {
+                                        ctx.fill(Path(roundedRect: rect, cornerRadius: 3), with: .color(Self.heatColor(level(v), tint)))
+                                    } else {
+                                        ctx.stroke(Path(roundedRect: rect.insetBy(dx: 0.5, dy: 0.5), cornerRadius: 3), with: .color(Kit.grid),
+                                                   style: StrokeStyle(lineWidth: 1, dash: [2, 2]))
+                                    }
+                                    if cell.1 > 0 {
+                                        let dot = side * 0.3
+                                        ctx.fill(Path(ellipseIn: CGRect(x: rect.midX - dot / 2, y: rect.midY - dot / 2, width: dot, height: dot)),
+                                                 with: .color(Palette.paper))
+                                    }
+                                    if picked?.0 == cal.startOfDay(for: d) {
+                                        ctx.stroke(Path(roundedRect: rect.insetBy(dx: -1.5, dy: -1.5), cornerRadius: 4), with: .color(Palette.ink), lineWidth: 1.5)
+                                    }
                                 }
                             }
+                        }
+                        .frame(width: max(0, CGFloat(weeks) * step - gap), height: max(0, 7 * step - gap))
+                        .contentShape(Rectangle())
+                        .onTapGesture { p in
+                            guard let d = cal.date(byAdding: .day, value: Int(p.x / step) * 7 + min(6, Int(p.y / step)), to: start) else { return }
+                            let day = cal.startOfDay(for: d)
+                            withAnimation(Brand.quick) { activityPicked = byDay[day] == nil || activityPicked == day ? nil : day }
                         }
                     }
                 }
                 .frame(height: 7 * 18 + 6 * 3)
-                HStack(spacing: 4) {
-                    Circle().fill(Palette.muted).frame(width: 5)
-                    Text("you posted").font(.inter(.caption2)).foregroundStyle(Palette.muted)
-                    Spacer()
-                    Text("Less").font(.inter(.caption2)).foregroundStyle(Palette.faint)
-                    ForEach(0..<5, id: \.self) { RoundedRectangle(cornerRadius: 2).fill(Self.heatColor($0, tint)).frame(width: 10, height: 10) }
-                    Text("More").font(.inter(.caption2)).foregroundStyle(Palette.faint)
+                HStack(spacing: 10) {
+                    if let (d, cell) = picked {
+                        Text(Fmt.weekdayPOSIX.string(from: d) + ", " + Fmt.monthDayPOSIX.string(from: d))
+                            .font(.inter(size: 11.5, .semibold)).foregroundStyle(Palette.ink)
+                        Text(cell.0.map { "\(Kit.comma($0)) \(unit)" } ?? "no reading yet").font(.inter(size: 11.5).monospacedDigit())
+                            .foregroundStyle(Palette.muted)
+                        if cell.1 > 0 { Text(cell.1 == 1 ? "· 1 post" : "· \(cell.1) posts").font(.inter(size: 11.5)).foregroundStyle(Palette.muted) }
+                        Spacer(minLength: 0)
+                    } else {
+                        HStack(spacing: 3) {
+                            Text("Less").font(.inter(size: 10.5)).foregroundStyle(Palette.faint)
+                            ForEach(1...5, id: \.self) { RoundedRectangle(cornerRadius: 2).fill(Self.heatColor($0, tint)).frame(width: 10, height: 10) }
+                            Text("More").font(.inter(size: 10.5)).foregroundStyle(Palette.faint)
+                        }
+                        Spacer(minLength: 0)
+                        KitKey(items: [(.dashed, "No reading")])
+                        HStack(spacing: 4) {
+                            Circle().fill(Palette.paper).frame(width: 4, height: 4).padding(3)
+                                .background(RoundedRectangle(cornerRadius: 2.5).fill(tint))
+                            Text("Posted").font(.inter(size: 11)).foregroundStyle(Palette.muted)
+                        }
+                    }
+                }
+                .frame(height: 18)
+            }
+        }
+    }
+
+    /// 0: a quiet day in gray. 1 to 5: the tint, lighter to full.
+    static func heatColor(_ level: Int, _ tint: Color) -> Color {
+        level <= 0 ? Kit.rest.opacity(0.6) : tint.opacity([0.16, 0.37, 0.58, 0.79, 1.0][min(level, 5) - 1])
+    }
+
+    // MARK: Monthly
+
+    /// LinkedIn by month (gray, the best month in the accent, this month striped), then LinkedIn
+    /// against X on one scale, as on the Mac.
+    @ViewBuilder private func monthly(_ li: [Performance.Social.MonthValue], x: [Performance.Social.MonthValue]) -> some View {
+        let best = li.max { $0.value < $1.value }
+        card {
+            VStack(alignment: .leading, spacing: 12) {
+                ChartHeader(icon: "chart.bar.fill", title: "Impressions by month", subtitle: "LinkedIn, the last \(li.count) months")
+                HStack(alignment: .bottom, spacing: 18) {
+                    KitNumber(label: "\(KitDate.month(li.first!.month, year: true)) – \(KitDate.month(li.last!.month, year: true))",
+                              value: Kit.comma(li.map(\.value).reduce(0, +)))
+                    Spacer(minLength: 0)
+                    if let best { KitNumber(label: "Best month", value: Kit.short(Double(best.value)), note: KitDate.month(best.month), big: 19) }
+                }
+                KitMonthBars(points: li.map { ($0.month, $0.value) }, color: Palette.accent)
+                KitKey(items: [(.solid(Palette.accent), "Best month"), (.solid(Kit.rest), "Other"), (.stripes, "So far")])
+            }
+        }
+        let xs = Dictionary(x.map { ($0.month, $0.value) }, uniquingKeysWith: { a, _ in a })
+        let both = li.filter { xs[$0.month] != nil }
+        if !both.isEmpty {
+            let a = both.map(\.value), b = both.map { xs[$0.month] ?? 0 }
+            let ta = a.reduce(0, +), tb = b.reduce(0, +)
+            card {
+                VStack(alignment: .leading, spacing: 12) {
+                    ChartHeader(icon: "arrow.left.arrow.right", title: "LinkedIn vs X", subtitle: "Reach per month, on one scale")
+                    HStack(spacing: 14) {
+                        total("LinkedIn", ta, Self.liBlue)
+                        total("X", tb, Palette.ink)
+                        Spacer(minLength: 0)
+                        if ta > 0, tb > 0 {
+                            DeltaPill(ta >= tb ? String(format: "LinkedIn %.1f×", Double(ta) / Double(tb))
+                                               : String(format: "X %.1f×", Double(tb) / Double(ta)))
+                        }
+                    }
+                    KitDualBars(months: both.map(\.month), a: a, b: b, colors: (Self.liBlue, Palette.ink), names: ("LinkedIn", "X"))
                 }
             }
         }
     }
 
-    static func heatColor(_ level: Int, _ tint: Color) -> Color {
-        level == 0 ? Palette.border.opacity(0.7) : tint.opacity([0, 0.25, 0.45, 0.7, 1][min(level, 4)])
-    }
-
-    // MARK: Monthly
-
-    private func monthly(_ li: [Performance.Social.MonthValue], x: [Performance.Social.MonthValue]) -> some View {
-        let xs = Dictionary(x.map { ($0.month, $0.value) }, uniquingKeysWith: { a, _ in a })
-        return card {
-            VStack(alignment: .leading, spacing: 10) {
-                HStack {
-                    Text("Impressions by month").font(.nunito(.headline))
-                    Spacer()
-                    HStack(spacing: 10) {
-                        HStack(spacing: 4) { PlatformLogo(kind: .linkedin, size: 13); Text("LinkedIn").foregroundStyle(Self.liBlue) }
-                        HStack(spacing: 4) { PlatformLogo(kind: .x, size: 13); Text("X").foregroundStyle(Palette.ink) }
-                    }
-                    .font(.inter(.caption2))
-                }
-                Chart {
-                    ForEach(li, id: \.month) { m in
-                        BarMark(x: .value("Month", Self.month(m.month)), y: .value("Impressions", m.value))
-                            .foregroundStyle(Self.liBlue).position(by: .value("Source", "LinkedIn"))
-                        if let v = xs[m.month] {
-                            BarMark(x: .value("Month", Self.month(m.month)), y: .value("Impressions", v))
-                                .foregroundStyle(Palette.ink.opacity(0.75)).position(by: .value("Source", "X"))
-                        }
-                    }
-                }
-                .chartYAxis { AxisMarks(position: .trailing, values: .automatic(desiredCount: 3)) { v in
-                    AxisGridLine()
-                    AxisValueLabel { Text(Self.short(v.as(Double.self) ?? 0)) }
-                } }
-                .frame(height: 160)
-            }
+    private func total(_ label: String, _ n: Int, _ c: Color) -> some View {
+        HStack(spacing: 6) {
+            RoundedRectangle(cornerRadius: 2).fill(c).frame(width: 9, height: 9)
+            Text(label).font(.inter(size: 11.5)).foregroundStyle(Palette.muted)
+            Text(Kit.short(Double(n))).font(.inter(size: 12.5, .semibold)).foregroundStyle(Palette.ink).monospacedDigit()
         }
     }
 
@@ -630,7 +630,7 @@ struct PerformanceView: View {
         let g = groups[min(audienceGroup, groups.count - 1)]
         return card {
             VStack(alignment: .leading, spacing: 12) {
-                Text("Audience").font(.nunito(.headline))
+                ChartHeader(icon: "person.3.fill", title: "Audience", subtitle: "Who shows up for the content")
                 // The groups as chips (2026-10-09: no system menu).
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 6) {
@@ -638,7 +638,7 @@ struct PerformanceView: View {
                     }
                 }
                 let top = g.items.map(\.pct).max() ?? 1
-                ForEach(g.items.prefix(6), id: \.label) { it in
+                ForEach(Array(g.items.prefix(6).enumerated()), id: \.element.label) { i, it in
                     VStack(alignment: .leading, spacing: 4) {
                         HStack {
                             Text(it.label).font(.inter(.subheadline)).foregroundStyle(Palette.ink).lineLimit(1)
@@ -646,9 +646,9 @@ struct PerformanceView: View {
                             Text(String(format: "%.0f%%", it.pct)).font(.inter(.subheadline).monospacedDigit()).foregroundStyle(Palette.muted)
                         }
                         GeometryReader { geo in
-                            Capsule().fill(Palette.border.opacity(0.6))
+                            Capsule().fill(Kit.band)
                                 .overlay(alignment: .leading) {
-                                    Capsule().fill(Palette.accent).frame(width: geo.size.width * it.pct / max(top, 1))
+                                    Capsule().fill(i == 0 ? Palette.accent : Kit.restPicked).frame(width: geo.size.width * it.pct / max(top, 1))
                                 }
                         }
                         .frame(height: 6)
@@ -656,13 +656,6 @@ struct PerformanceView: View {
                 }
             }
         }
-    }
-
-    /// The next round number at or over `v`, for the top of an axis: 1, 2, 2.5 or 5 times a power of ten.
-    static func nice(_ v: Double) -> Double {
-        guard v > 0 else { return 1 }
-        let p = pow(10, floor(log10(v)))
-        return ([1, 2, 2.5, 5, 10].first { $0 * p >= v } ?? 10) * p
     }
 
     /// 1500 → "1.5k", 20000 → "20k".
@@ -729,48 +722,42 @@ struct PerformanceView: View {
         return VStack(spacing: 0) {
             HStack(spacing: 0) {
                 tile("Followers", h.followers.formatted(),
-                     chip: h.followers_gain_8d == 0 ? nil : ("+\(h.followers_gain_8d.formatted())", true),
-                     note: "in 8 days", spark: h.followers_spark ?? [], color: Palette.live)
+                     chip: h.followers_gain_8d == 0 ? nil : DeltaPill("+\(Kit.comma(h.followers_gain_8d))", tone: .up, size: 10.5),
+                     note: "in 8 days", spark: h.followers_spark ?? [], key: false)
                 Divider()
                 tile("Impressions a day", h.impr_per_day.formatted(),
-                     chip: ("\(h.mom_pct >= 0 ? "+" : "−")\(abs(h.mom_pct))%", h.mom_pct >= 0),
-                     note: "\(month) vs \(Self.month(h.prev_month))", spark: h.impr_spark, color: Palette.accent)
+                     chip: DeltaPill("\(h.mom_pct >= 0 ? "↑" : "↓") \(abs(h.mom_pct))%", tone: h.mom_pct > 0 ? .up : h.mom_pct < 0 ? .down : .flat,
+                                     size: 10.5),
+                     note: "\(month) vs \(Self.month(h.prev_month))", spark: h.impr_spark, key: true)
             }
             Divider()
             HStack(spacing: 0) {
                 tile("Engagement", String(format: "%.1f%%", h.rate), chip: nil,
-                     note: "\(h.engagements.formatted()) engagements", spark: [], color: .clear)
+                     note: "\(h.engagements.formatted()) engagements", spark: [], key: false)
                 Divider()
                 tile("Impressions", Self.short(Double(h.total_impressions)), chip: nil,
-                     note: h.peak_month.map { "12 months · best \($0.prefix(3))" } ?? "12 months", spark: [], color: .clear)
+                     note: h.peak_month.map { "12 months · best \($0.prefix(3))" } ?? "12 months", spark: [], key: false)
             }
         }
         .background(Palette.paper, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 20, style: .continuous).strokeBorder(Palette.border))
     }
 
-    private func tile(_ label: String, _ value: String, chip: (String, Bool)?, note: String,
-                      spark: [Int], color: Color) -> some View {
+    private func tile(_ label: String, _ value: String, chip: DeltaPill?, note: String,
+                      spark: [Int], key: Bool) -> some View {
         VStack(alignment: .leading, spacing: 3) {
             Text(label).font(.inter(.caption, .medium)).foregroundStyle(Palette.muted).lineLimit(1)
             HStack(alignment: .firstTextBaseline, spacing: 6) {
                 Text(value).font(.nunito(.title2).monospacedDigit()).foregroundStyle(Palette.ink)
                     .lineLimit(1).minimumScaleFactor(0.7)
-                if let (text, up) = chip {
-                    Text(text).font(.inter(.caption2, .semibold).monospacedDigit())
-                        .foregroundStyle(up ? Palette.live : Palette.danger)
-                        .padding(.horizontal, 6).padding(.vertical, 2)
-                        .background(up ? Palette.liveSoft : Palette.dangerSoft, in: Capsule())
-                        .fixedSize()
-                }
+                if let chip { chip }
             }
             Text(note).font(.inter(.caption2)).foregroundStyle(Palette.faint).lineLimit(1)
+            // Under the note, never behind it (2026-10-29: the line crossed "Oct so far vs Sep").
+            if spark.count > 1 { KitSpark(values: spark, key: key).frame(height: 22).padding(.top, 6).padding(.trailing, 3) }
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(maxWidth: .infinity, alignment: .topLeading)
         .padding(.horizontal, 14).padding(.vertical, 12)
-        .background(alignment: .bottom) {
-            if spark.count > 1 { Sparkline(values: spark, color: color).frame(height: 26).padding(.bottom, 2).allowsHitTesting(false) }
-        }
     }
 
     private func card<C: View>(@ViewBuilder _ content: () -> C) -> some View {
@@ -813,6 +800,8 @@ enum Fmt {
     static let monthDayPOSIX = make("MMM d")
     static let monthDay = make("MMM d", posix: false)
     static let weekday = make("EEE", posix: false)
+    static let weekdayPOSIX = make("EEE")
+    static let monthYear = make("MMM yyyy")
     /// yyyy-MM-dd → date, parsed once.
     static var days: [String: Date?] = [:]
 }
@@ -945,30 +934,67 @@ struct FeedCard: View {
     }
 }
 
-/// A small line with a soft fill under it, behind a tile's numbers.
-private struct Sparkline: View {
-    let values: [Int]
+/// This week's LinkedIn impressions a day (WeekCard on the Mac): last week as dashed outlines
+/// behind each bar, today striped, a past day with no reading a dashed outline, the best day in the
+/// accent. A tap picks a day: its bar turns to the accent and a tip shows it against last week.
+private struct WeekBars: View {
+    let now: [Int?], prev: [Int?], posted: [Bool]
+    /// Today's place in the week, Monday 0. Later days are empty.
+    let today: Int?
     let color: Color
+    @State private var picked: Int?
+    private let height: CGFloat = 80
+    private static let names = ["M", "T", "W", "T", "F", "S", "S"]
+    private static let full = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
 
     var body: some View {
-        GeometryReader { g in
-            let lo = Double(values.min() ?? 0), hi = Double(values.max() ?? 1)
-            let span = max(hi - lo, 1)
-            let pts = values.enumerated().map { i, v in
-                CGPoint(x: g.size.width * Double(i) / Double(values.count - 1),
-                        y: g.size.height * (1 - (Double(v) - lo) / span))
-            }
-            let line = Path { p in p.addLines(pts) }
-            ZStack {
-                Path { p in
-                    p.addLines(pts)
-                    p.addLine(to: CGPoint(x: g.size.width, y: g.size.height))
-                    p.addLine(to: CGPoint(x: 0, y: g.size.height))
-                    p.closeSubpath()
+        let hi = Double(max((now + prev).compactMap { $0 }.max() ?? 1, 1))
+        let best = (0..<7).filter { $0 != today && (now[$0] ?? 0) > 0 }.max { (now[$0] ?? 0) < (now[$1] ?? 0) }
+        VStack(spacing: 6) {
+            HStack(alignment: .bottom, spacing: 6) {
+                ForEach(0..<7, id: \.self) { i in
+                    ZStack(alignment: .bottom) {
+                        if picked == i { RoundedRectangle(cornerRadius: 6).fill(Kit.band) }
+                        if let p = prev[i] { KitBar(kind: .ghost).frame(height: max(2, height * Double(p) / hi)).padding(.horizontal, 3) }
+                        if let v = now[i] {
+                            KitBar(kind: i == today ? .partial : (picked ?? best) == i ? .key : .rest, color: color, picked: picked == i)
+                                .frame(height: max(2, height * Double(v) / hi)).padding(.horizontal, 9)
+                        } else if today.map({ i < $0 }) == true {
+                            KitBar(kind: .none).frame(height: 18).padding(.horizontal, 9)
+                        }
+                    }
+                    .frame(maxWidth: .infinity).frame(height: height + 4, alignment: .bottom)
+                    .contentShape(Rectangle())
+                    .onTapGesture { withAnimation(Brand.quick) { picked = picked == i || (now[i] == nil && prev[i] == nil) ? nil : i } }
                 }
-                .fill(LinearGradient(colors: [color.opacity(0.16), color.opacity(0)], startPoint: .top, endPoint: .bottom))
-                line.stroke(color.opacity(0.5), style: StrokeStyle(lineWidth: 1.5, lineCap: .round, lineJoin: .round))
+            }
+            .overlay(alignment: .topLeading) {
+                if let i = picked {
+                    GeometryReader { g in
+                        let slot = g.size.width / 7
+                        tip(i).position(x: kitTipX(slot * (Double(i) + 0.5), width: 150, in: g.size.width, gap: slot / 2), y: 24)
+                    }
+                    .allowsHitTesting(false)
+                }
+            }
+            HStack(spacing: 6) {
+                ForEach(0..<7, id: \.self) { i in
+                    VStack(spacing: 2) {
+                        Text(Self.names[i]).font(.inter(size: 10.5, picked == i || today == i ? .semibold : .regular))
+                            .foregroundStyle(picked == i ? Palette.accentInk : Palette.faint)
+                        Circle().fill(posted[i] ? color : .clear).frame(width: 4, height: 4)
+                    }
+                    .frame(maxWidth: .infinity)
+                }
             }
         }
+    }
+
+    private func tip(_ i: Int) -> some View {
+        let p = prev[i]
+        return ChartTip(value: now[i].map { "\(Kit.comma($0)) impressions" } ?? "Nothing yet", date: Self.full[i], color: color,
+                        change: now[i].flatMap { v in p.flatMap { Kit.change(Double(v), Double($0)) } },
+                        changeTone: now[i].flatMap { v in p.map { Kit.tone(Double(v), Double($0)) } } ?? .flat,
+                        note: p.map { "vs \(Kit.comma($0)) last week" } ?? (i == today ? "today so far" : nil))
     }
 }

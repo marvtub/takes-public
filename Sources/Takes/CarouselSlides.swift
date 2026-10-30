@@ -6,7 +6,7 @@ import SwiftUI
 // The carousel's slides as they are exported (2026-10-29): one view draws every layout in every
 // look, at any width. Carousels are not only text: a cover photo, a grid of frames with tags, a
 // sketch next to the frame that was filmed, a photo with handwritten notes, a magazine page, one
-// big word. The data is CarouselSlide in Carousel.swift.
+// big word, a screen recording on a paper card on your desk. The data is CarouselSlide in Carousel.swift.
 
 // MARK: - Looks
 
@@ -28,9 +28,12 @@ struct SlideStyle: Equatable {
     var grid = false
     /// Titles in capitals.
     var upper = false
+    /// The desk look's photo under the slides (CarouselFile.backdrop).
+    var backdrop = ""
 
-    init(_ look: CarouselLook, accent hex: String = "") {
+    init(_ look: CarouselLook, accent hex: String = "", backdrop: String = "") {
         self.look = look
+        self.backdrop = backdrop
         switch look {
         case .takes:
             bg = .white; ink = CarouselSlideView.navy; accent = CarouselSlideView.blue; onAccent = .white
@@ -53,6 +56,10 @@ struct SlideStyle: Equatable {
             bg = Color(hex: 0x0B0B0C); ink = Color(hex: 0xF5F2EA); accent = Color(hex: 0xE8C66A); onAccent = Color(hex: 0x0B0B0C)
             hookBg = bg; hookInk = ink; askBg = bg; askInk = ink
             hookKicker = accent
+        case .desk:
+            bg = Color(hex: 0x1E6E4E); ink = .white; accent = Color(hex: 0xFFD21F); onAccent = Color(hex: 0x141414)
+            hookBg = bg; hookInk = ink; askBg = bg; askInk = ink
+            hookKicker = accent
         }
         if let c = Color(hexString: hex) {
             if askBg == accent { askBg = c }
@@ -68,6 +75,7 @@ struct SlideStyle: Equatable {
         case .bold: (Self.font("Anton-Regular", size) ?? .system(size: size, weight: .black).width(.compressed)).leading(.tight)
         case .magazine, .cinema: Self.font("InstrumentSerif-Regular", size) ?? .system(size: size, weight: .regular, design: .serif)
         case .note: .system(size: size, weight: .bold)
+        case .desk: .system(size: size, weight: .heavy)
         }
     }
 
@@ -76,9 +84,9 @@ struct SlideStyle: Equatable {
         look == .note ? .system(size: size, weight: weight) : CarouselSlideView.text(size, weight)
     }
 
-    /// The words of a note on a picture: handwriting in the note look.
+    /// The words of a note on a picture: handwriting in the note and desk looks.
     func hand(_ size: CGFloat) -> Font {
-        guard look == .note else { return text(size, .bold) }
+        guard look == .note || look == .desk else { return text(size, .bold) }
         return NSFont(name: "Caveat-Regular", size: size) != nil ? .custom("Caveat", size: size * 1.35).weight(.bold) : .system(size: size, weight: .semibold)
     }
 
@@ -91,7 +99,7 @@ struct SlideStyle: Equatable {
     var titleLeading: CGFloat {
         switch look {
         case .bold: -0.12
-        case .takes: -0.06
+        case .takes, .desk: -0.06
         default: 0
         }
     }
@@ -244,13 +252,39 @@ struct CarouselSlideView: View {
     var body: some View {
         content
             .frame(width: w, height: h)
-            .background { if !overlayOnly { page } }
+            .background {
+                if !overlayOnly {
+                    page
+                } else if slide.layout == .screen {
+                    // The video goes under the slide: a hole where the card's picture is.
+                    let pic = Self.screenPicture(width: w, place: place, aspect: Self.screenAspect(slide, session: session))
+                    page.mask {
+                        ZStack {
+                            Rectangle()
+                            Rectangle().frame(width: pic.width, height: pic.height).position(x: pic.midX, y: pic.midY).blendMode(.destinationOut)
+                        }
+                        .compositingGroup()
+                    }
+                }
+            }
+            .overlay { if desk && (!overlayOnly || slide.layout == .screen) { stickers } }
             .clipped()
             .environment(\.colorScheme, .light)
     }
 
+    private var desk: Bool { style.look == .desk }
+
     @ViewBuilder private var content: some View {
+        if desk && [.text, .word, .list].contains(slide.layout) {
+            notebookSlide
+        } else {
+            layoutSlide
+        }
+    }
+
+    @ViewBuilder private var layoutSlide: some View {
         switch slide.layout {
+        case .screen: screenSlide
         case .text: textSlide
         case .word: wordSlide
         case .cover, .video: coverSlide
@@ -263,8 +297,12 @@ struct CarouselSlideView: View {
         }
     }
 
-    /// The paper: its colour, and the grid in the bold look.
-    private var page: some View {
+    /// The paper: its colour, and the grid in the bold look. The desk look's desk.
+    @ViewBuilder private var page: some View {
+        if desk { deskPage } else { paper }
+    }
+
+    private var paper: some View {
         ZStack {
             bg
             if style.grid && bg == style.bg {
@@ -301,30 +339,86 @@ struct CarouselSlideView: View {
                 var s = slide; set(&s, upper ? v.uppercased() : v); edit(s)
             }
         } else if !text.isEmpty {
-            Text(upper ? text.uppercased() : text).font(font).foregroundStyle(color)
+            Text(Self.marked(upper ? text.uppercased() : text, hi: kick == color ? nil : kick)).font(font).foregroundStyle(color)
                 .multilineTextAlignment(align)
                 .fixedSize(horizontal: false, vertical: true)
         }
     }
 
+    /// Words in *stars* in the accent colour (just the words when there is no other colour).
+    static func marked(_ text: String, hi: Color?) -> AttributedString {
+        let parts = text.components(separatedBy: "*")
+        guard parts.count >= 3 else { return AttributedString(text) }
+        var out = AttributedString()
+        for (i, p) in parts.enumerated() {
+            // A star with no partner stays a star.
+            if i == parts.count - 1 && parts.count % 2 == 0 { out += AttributedString("*" + p); continue }
+            var a = AttributedString(p)
+            if i % 2 == 1, let hi { a.foregroundColor = hi }
+            out += a
+        }
+        return out
+    }
+
+    @ViewBuilder
     private func kickerLine(_ color: Color) -> some View {
-        line(slide.kicker, hint: "KICKER", font: style.italic(w * 0.05) ?? style.text(w * 0.036, .bold), color: color,
-             upper: style.italic(1) == nil) { $0.kicker = $1 }
-            .tracking(style.italic(1) == nil ? w * 0.003 : 0)
+        if desk {
+            // A small black tag, the words in the accent.
+            if !slide.kicker.isEmpty || edit != nil {
+                line(slide.kicker, hint: "KICKER", font: style.text(w * 0.03, .heavy), color: style.accent, upper: true) { $0.kicker = $1 }
+                    .tracking(w * 0.002).fixedSize()
+                    .padding(.horizontal, w * 0.016).padding(.vertical, w * 0.006)
+                    .background(Self.tape).rotationEffect(.degrees(-2))
+            }
+        } else {
+            line(slide.kicker, hint: "KICKER", font: style.italic(w * 0.05) ?? style.text(w * 0.036, .bold), color: color,
+                 upper: style.italic(1) == nil) { $0.kicker = $1 }
+                .tracking(style.italic(1) == nil ? w * 0.003 : 0)
+        }
     }
 
-    private func titleLine(_ size: CGFloat, _ color: Color, align: TextAlignment = .leading) -> some View {
-        line(title(slide.title), hint: "Big text", font: style.display(size), color: color, align: align) { $0.title = $1 }
+    /// The big text. In the desk look it sits on a strip of black paper, unless `strip` is off.
+    @ViewBuilder
+    private func titleLine(_ size: CGFloat, _ color: Color, align: TextAlignment = .leading, strip: Bool = true) -> some View {
+        let paper = desk && strip
+        let t = line(title(slide.title), hint: "Big text", font: style.display(size), color: paper ? .white : color, align: align) { $0.title = $1 }
             .lineSpacing(size * style.titleLeading)
+            .tracking(desk ? -size * 0.025 : 0)
+        if paper && (!slide.title.isEmpty || edit != nil) {
+            t.padding(.horizontal, size * 0.36).padding(.vertical, size * 0.2)
+                .background(Self.tape)
+                .compositingGroup()
+                .shadow(color: .black.opacity(0.35), radius: size * 0.12, y: size * 0.06)
+                .rotationEffect(.degrees(-0.6))
+        } else {
+            t
+        }
     }
 
+    /// The small text. In the desk look it is a handwritten aside in a white bubble.
+    @ViewBuilder
     private func bodyLine(_ size: CGFloat, _ color: Color, align: TextAlignment = .leading) -> some View {
-        line(slide.body, hint: "Small text", font: style.text(size), color: color, align: align) { $0.body = $1 }
-            .lineSpacing(size * 0.25)
+        if desk {
+            if !slide.body.isEmpty || edit != nil {
+                line(slide.body, hint: "(a note)", font: style.hand(size * 0.85), color: Self.tape, align: .center) { $0.body = $1 }
+                    .padding(.horizontal, size * 0.55).padding(.vertical, size * 0.18)
+                    .background(Capsule().fill(.white))
+                    .overlay(Capsule().strokeBorder(Self.tape, lineWidth: max(1, size * 0.05)))
+                    .compositingGroup()
+                    .shadow(color: .black.opacity(0.3), radius: size * 0.15, y: size * 0.08)
+                    .rotationEffect(.degrees(1.5))
+            }
+        } else {
+            line(slide.body, hint: "Small text", font: style.text(size), color: color, align: align) { $0.body = $1 }
+                .lineSpacing(size * 0.25)
+        }
     }
 
+    @ViewBuilder
     private func footer(_ color: Color) -> some View {
-        Text("\(name) · \(index + 1)/\(total)").font(style.text(w * 0.03, .regular)).foregroundStyle(color.opacity(0.7))
+        if !desk {
+            Text("\(name) · \(index + 1)/\(total)").font(style.text(w * 0.03, .regular)).foregroundStyle(color.opacity(0.7))
+        }
     }
 
     /// A small tag: "WS", "Before", a kicker on a photo.
@@ -341,19 +435,20 @@ struct CarouselSlideView: View {
 
     private func url(_ media: String) -> URL? { session.flatMap { CarouselFile.resolve(media, in: $0) } }
 
-    /// A picture filling its frame, or a calm place for one.
+    /// A picture filling its frame (or fitting it, on a white card), or a calm place for one.
     @ViewBuilder
-    private func picture(_ media: String, at: Double?, width pw: CGFloat, height ph: CGFloat, hint: String = "Drop a picture") -> some View {
+    private func picture(_ media: String, at: Double?, width pw: CGFloat, height ph: CGFloat, hint: String = "Drop a picture",
+                         fit: Bool = false) -> some View {
         let u = url(media)
         let img = u.flatMap { pictures.image($0, at: at) }
         ZStack {
             if overlayOnly {
                 Color.clear
             } else if let img {
-                Image(nsImage: img).resizable().aspectRatio(contentMode: .fill)
+                Image(nsImage: img).resizable().aspectRatio(contentMode: fit ? .fit : .fill)
                     .frame(width: pw, height: ph).clipped()
             } else {
-                let dark = bg == style.bg ? style.ink : fg
+                let dark = fit ? Color.black : bg == style.bg ? style.ink : fg
                 dark.opacity(0.06)
                 if !exporting && (u == nil || pictures.failed(u!, at: at)) {
                     VStack(spacing: pw * 0.03) {
@@ -372,7 +467,7 @@ struct CarouselSlideView: View {
 
     /// The video's length on the post: a slide that plays.
     @ViewBuilder private var videoBadge: some View {
-        if slide.layout == .video && !exporting {
+        if slide.plays && !exporting {
             let len = url(slide.media).flatMap { pictures.length($0) }
             let secs = slide.end.map { $0 - (slide.start ?? 0) } ?? len.map { $0 - (slide.start ?? 0) }
             HStack(spacing: w * 0.012) {
@@ -681,6 +776,235 @@ struct CarouselSlideView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .padding(inset)
+    }
+}
+
+// MARK: - The desk look
+
+/// The desk carousel (2026-10-29, after Gannon Meyer's "viral carousels with claude"): one photo of a
+/// desk from above under every slide, the words on strips of black paper with the key words in yellow,
+/// a handwritten aside in a white bubble, paper stickers, a white line drawn across, and the
+/// screen recording on a white card. The hook, the steps and the ask sit on a notebook.
+extension CarouselSlideView {
+    static let tape = Color(hex: 0x141414)
+    static let stickerIcons = ["envelope", "folder", "lightbulb", "stopwatch", "bolt", "heart", "paperclip", "pencil",
+                               "sparkles", "doc.text", "camera", "checkmark"]
+
+    /// The screen card's place: under the words, as big as the slide lets it be, in the shape of its
+    /// picture (`aspect`, width over height) so a wide screen take has no white bands. The export puts
+    /// the video in `screenPicture`, so both come from here.
+    static func screenCard(width w: CGFloat, place: CarouselPlace, aspect: CGFloat? = nil) -> CGRect {
+        let h = w / place.ratio
+        let tall = place == .tiktok
+        let top = (tall ? w * 0.25 : w * 0.08) + w * 0.36
+        let bottom = h - (tall ? w * 0.58 : w * 0.1)
+        let right = tall ? w * 0.2 : w * 0.08
+        let full = CGRect(x: w * 0.08, y: top, width: w - w * 0.08 - right, height: bottom - top)
+        guard let a = aspect, a > 0 else { return full }
+        let pad = w * 0.02
+        let ih = min(full.height - pad * 2, (full.width - pad * 2) / a)
+        let iw = min(full.width - pad * 2, ih * a)
+        // Lower by half the room it leaves, so the words and the card sit in the middle together.
+        return CGRect(x: full.midX - iw / 2 - pad, y: top + (full.height - ih - pad * 2) / 2, width: iw + pad * 2, height: ih + pad * 2)
+    }
+
+    static func screenPicture(width w: CGFloat, place: CarouselPlace, aspect: CGFloat? = nil) -> CGRect {
+        screenCard(width: w, place: place, aspect: aspect).insetBy(dx: w * 0.02, dy: w * 0.02)
+    }
+
+    /// A screen card's picture's shape, once it is loaded.
+    static func screenAspect(_ slide: CarouselSlide, session: URL?) -> CGFloat? {
+        guard let u = session.flatMap({ CarouselFile.resolve(slide.media, in: $0) }),
+              let img = SlidePictures.shared.image(u, at: slide.plays ? (slide.start ?? 0) : slide.at),
+              img.size.height > 0 else { return nil }
+        return img.size.width / img.size.height
+    }
+
+    /// The desk: your photo, else a green cutting mat on a dark desk; stickers and the white line on top.
+    var deskPage: some View {
+        let u = style.backdrop.isEmpty ? nil : session.flatMap { CarouselFile.resolve(style.backdrop, in: $0) }
+        let img = u.flatMap { SlidePictures.shared.image($0, at: nil) }
+        return ZStack {
+            if let img {
+                Image(nsImage: img).resizable().aspectRatio(contentMode: .fill).frame(width: width, height: height).clipped()
+            } else {
+                Color(hex: 0x2A241E)
+                cuttingMat.frame(width: width * 1.12, height: height * 1.0).rotationEffect(.degrees(-3)).offset(x: width * 0.07, y: width * 0.02)
+            }
+            RadialGradient(colors: [.clear, .black.opacity(0.4)], center: .center, startRadius: width * 0.3, endRadius: width * 1.0)
+            squiggle
+        }
+        .frame(width: width, height: height)
+        .clipped()
+    }
+
+    private var height: CGFloat { width / place.ratio }
+
+    private var cuttingMat: some View {
+        Canvas { ctx, size in
+            ctx.fill(Path(CGRect(origin: .zero, size: size)), with: .color(Color(hex: 0x1E6E4E)))
+            let step = size.width / 26
+            var thin = Path(), thick = Path()
+            var n = 0
+            var x: CGFloat = 0
+            while x <= size.width { (n % 5 == 0 ? { thick.move(to: CGPoint(x: x, y: 0)); thick.addLine(to: CGPoint(x: x, y: size.height)) } : { thin.move(to: CGPoint(x: x, y: 0)); thin.addLine(to: CGPoint(x: x, y: size.height)) })(); x += step; n += 1 }
+            n = 0
+            var y: CGFloat = 0
+            while y <= size.height { (n % 5 == 0 ? { thick.move(to: CGPoint(x: 0, y: y)); thick.addLine(to: CGPoint(x: size.width, y: y)) } : { thin.move(to: CGPoint(x: 0, y: y)); thin.addLine(to: CGPoint(x: size.width, y: y)) })(); y += step; n += 1 }
+            ctx.stroke(thin, with: .color(.white.opacity(0.13)), lineWidth: max(0.5, size.width / 1400))
+            ctx.stroke(thick, with: .color(.white.opacity(0.3)), lineWidth: max(0.6, size.width / 700))
+            // The ruler down the left edge.
+            var ticks = Path()
+            var t: CGFloat = 0
+            var k = 0
+            while t <= size.height {
+                let len = k % 5 == 0 ? step * 0.7 : step * 0.35
+                ticks.move(to: CGPoint(x: step * 0.6, y: t)); ticks.addLine(to: CGPoint(x: step * 0.6 + len, y: t))
+                t += step / 2; k += 1
+            }
+            ctx.stroke(ticks, with: .color(.white.opacity(0.45)), lineWidth: max(0.5, size.width / 1000))
+        }
+    }
+
+    /// A white line drawn across the foot of the slide, with a loop now and then.
+    private var squiggle: some View {
+        let tall = place == .tiktok
+        return Canvas { ctx, size in
+            let a = size.width * 0.02
+            let y0 = size.height - size.width * (tall ? 0.52 : 0.055)
+            var p = Path()
+            var t: CGFloat = 0
+            var started = false
+            while true {
+                let b = a * (0.55 + 1.5 * max(0, sin(t * 0.33 + CGFloat(index))))
+                let x = -a + a * t - b * sin(t)
+                let y = y0 + b * cos(t) + sin(t * 0.21) * a * 0.6
+                if started { p.addLine(to: CGPoint(x: x, y: y)) } else { p.move(to: CGPoint(x: x, y: y)); started = true }
+                if x > size.width + a * 2 { break }
+                t += 0.08
+            }
+            ctx.stroke(p, with: .color(.white.opacity(0.95)), style: StrokeStyle(lineWidth: max(1, size.width * 0.0055), lineCap: .round, lineJoin: .round))
+        }
+        .allowsHitTesting(false)
+    }
+
+    /// Two paper stickers over the slide: one top left, one bottom right, a different pair on each slide.
+    /// Where a kicker tag sits top left (a photo, frames, a magazine page) only the bottom one.
+    var stickers: some View {
+        let tall = place == .tiktok
+        let icons = Self.stickerIcons
+        let a = icons[(index * 2) % icons.count], b = icons[(index * 2 + 5) % icons.count]
+        let size = width * 0.07
+        let top = [.text, .word, .list, .screen].contains(slide.layout)
+        return ZStack {
+            if top {
+                sticker(a, size: size).rotationEffect(.degrees(-12))
+                    .position(x: width * 0.075, y: tall ? width * 0.2 : width * 0.075)
+            }
+            sticker(b, size: size).rotationEffect(.degrees(10))
+                .position(x: width * (tall ? 0.72 : 0.9), y: height - width * (tall ? 0.6 : 0.13))
+        }
+        .frame(width: width, height: height)
+        .allowsHitTesting(false)
+    }
+
+    /// A symbol cut out of paper: black, a white edge round it, a soft shadow.
+    private func sticker(_ name: String, size: CGFloat) -> some View {
+        let glyph = Image(systemName: name).font(.system(size: size, weight: .semibold))
+        let o = size * 0.09
+        return ZStack {
+            ForEach(0..<12, id: \.self) { k in
+                glyph.foregroundStyle(.white).offset(x: o * cos(Double(k) * .pi / 6), y: o * sin(Double(k) * .pi / 6))
+            }
+            glyph.foregroundStyle(Self.tape)
+        }
+        .compositingGroup()
+        .shadow(color: .black.opacity(0.45), radius: size * 0.08, y: size * 0.05)
+    }
+
+    /// Text, one word and a list on the desk: on a dark notebook, the words white with the key ones yellow.
+    var notebookSlide: some View {
+        let tall = place == .tiktok
+        let free = height - (tall ? width * 0.25 + width * 0.58 : width * 0.16)
+        let nw = width * (tall ? 0.6 : 0.56)
+        let nh = min(free * 0.92, nw * 1.48)
+        let cy = tall ? width * 0.25 + free / 2 : height / 2
+        let ink = Color.white
+        let rows = slide.body.split(separator: "\n").map { String($0).trimmingCharacters(in: .whitespaces) }
+            .map { r in r.replacingOccurrences(of: #"^([-•*]|\d+[.)]|\[ ?\]|\[x\])\s*"#, with: "", options: .regularExpression) }
+            .filter { !$0.isEmpty }
+        let n = slide.title.count
+        let size = slide.layout == .word ? nw * (n > 12 ? 0.18 : 0.26) : nw * (n > 50 ? 0.085 : n > 30 ? 0.1 : 0.12)
+        return ZStack {
+            RoundedRectangle(cornerRadius: nw * 0.05)
+                .fill(LinearGradient(colors: [Color(hex: 0x4A4A3E), Color(hex: 0x33332A)], startPoint: .topLeading, endPoint: .bottomTrailing))
+                .overlay(alignment: .trailing) {
+                    Rectangle().fill(Color(hex: 0x1C1C17)).frame(width: nw * 0.035).padding(.trailing, nw * 0.12)
+                }
+                .overlay(RoundedRectangle(cornerRadius: nw * 0.05).strokeBorder(.black.opacity(0.35), lineWidth: max(1, nw * 0.006)))
+                .shadow(color: .black.opacity(0.5), radius: nw * 0.05, x: nw * 0.02, y: nw * 0.04)
+            VStack(spacing: nw * 0.05) {
+                kickerLine(kick)
+                titleLine(size, ink, align: .center, strip: false)
+                if slide.layout == .list {
+                    if edit != nil {
+                        line(slide.body, hint: "One step a line", font: style.text(nw * 0.07, .bold), color: ink, align: .center) { $0.body = $1 }
+                    } else {
+                        VStack(spacing: nw * 0.015) {
+                            ForEach(Array(rows.enumerated()), id: \.offset) { i, r in
+                                Text("\(i + 1)) " + r).font(style.text(nw * (rows.count > 6 ? 0.055 : 0.07), .heavy)).foregroundStyle(ink)
+                                    .tracking(-nw * 0.002).multilineTextAlignment(.center)
+                            }
+                        }
+                    }
+                } else {
+                    bodyLine(nw * 0.075, ink)
+                }
+            }
+            .padding(.horizontal, nw * 0.1)
+            .frame(width: nw, height: nh)
+        }
+        .frame(width: nw, height: nh)
+        .rotationEffect(.degrees(-2))
+        .position(x: width / 2, y: cy)
+        .frame(width: width, height: height)
+    }
+
+    /// The words on top, a white card with a picture or a screen take under them, an aside on its corner.
+    var screenSlide: some View {
+        let aspect = Self.screenAspect(slide, session: session)
+        let card = Self.screenCard(width: width, place: place, aspect: aspect)
+        let pic = Self.screenPicture(width: width, place: place, aspect: aspect)
+        let pad = pic.minX - card.minX
+        let head = card.minY - (place == .tiktok ? width * 0.25 : width * 0.08) - width * 0.05
+        let side = place == .tiktok ? EdgeInsets(top: 0, leading: width * 0.08, bottom: 0, trailing: width * 0.2)
+            : EdgeInsets(top: 0, leading: width * 0.06, bottom: 0, trailing: width * 0.06)
+        return ZStack(alignment: .topLeading) {
+            Group {
+                if overlayOnly { Rectangle().strokeBorder(.white, lineWidth: pad) } else { Rectangle().fill(.white) }
+            }
+            .frame(width: card.width, height: card.height)
+            .compositingGroup()
+            .shadow(color: .black.opacity(0.4), radius: width * 0.02, y: width * 0.01)
+            .position(x: card.midX, y: card.midY)
+            picture(slide.media, at: slide.plays ? (slide.start ?? 0) : slide.at, width: pic.width, height: pic.height,
+                    hint: "Drop a screen take", fit: true)
+                .overlay(alignment: .topLeading) { videoBadge.padding(width * 0.015) }
+                .position(x: pic.midX, y: pic.midY)
+            VStack(spacing: width * 0.015) {
+                kickerLine(kick)
+                titleLine(width * titleScale(0.068), fg, align: .center)
+                if !desk { bodyLine(width * 0.034, fg.opacity(0.85), align: .center) }
+            }
+            .frame(width: width - side.leading - side.trailing, height: head, alignment: .bottom)
+            .position(x: side.leading + (width - side.leading - side.trailing) / 2, y: card.minY - width * 0.05 - head / 2)
+            if desk {
+                bodyLine(width * 0.036, fg)
+                    .frame(width: card.width * 0.7, alignment: .trailing)
+                    .position(x: card.maxX - card.width * 0.35 + width * 0.02, y: card.minY + width * 0.005)
+            }
+        }
+        .frame(width: width, height: height)
     }
 }
 

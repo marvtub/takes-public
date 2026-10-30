@@ -1468,18 +1468,16 @@ final class PhoneServer: PhoneHandler, @unchecked Sendable {
         let enc = JSONEncoder()
         enc.outputFormatting = .sortedKeys
         let words = (try? enc.encode(slide)).map { String(decoding: $0, as: UTF8.self) } ?? ""
-        let files = slide.files.compactMap { CarouselFile.resolve($0, in: session) }
-        let times = files.map { "\(attributes($0).modified?.timeIntervalSince1970 ?? 0)" }.joined(separator: ",")
-        let key = hash("slide|\(words)|\(c.look.rawValue)|\(c.accent)|\(n)/\(c.slides.count)|\(place.rawValue)|\(width)|\(name)|\(times)")
+        let load = c.loads(n, in: session)
+        let times = load.map { "\(attributes($0.0).modified?.timeIntervalSince1970 ?? 0)" }.joined(separator: ",")
+        let key = hash("slide|\(words)|\(c.look.rawValue)|\(c.accent)|\(c.backdrop)|\(n)/\(c.slides.count)|\(place.rawValue)|\(width)|\(name)|\(times)")
         let out = thumbFolder.appending(path: key + ".png")
         if FileManager.default.fileExists(atPath: out.path) { return out }
         try? FileManager.default.createDirectory(at: thumbFolder, withIntermediateDirectories: true)
-        var load: [(URL, Double?)] = CarouselFile.resolve(slide.media, in: session).map { [($0, slide.layout == .video ? (slide.start ?? 0) : slide.at)] } ?? []
-        for i in slide.items { if let u = CarouselFile.resolve(i.media, in: session) { load.append((u, i.at)) } }
         await SlidePictures.shared.preload(load)
         return await MainActor.run {
             let v = CarouselSlideView(slide: slide, index: n, total: c.slides.count, place: place, name: name, width: CGFloat(width),
-                                      style: SlideStyle(c.look, accent: c.accent), session: session, exporting: true)
+                                      style: c.style, session: session, exporting: true)
             return (try? CarouselExport.png(v, to: out)) != nil ? out : nil
         }
     }

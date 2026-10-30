@@ -13,9 +13,10 @@ import SwiftUI
 ///   posts/carousel/instagram/slide-NN.mp4   a video slide (Instagram only: TikTok photo posts have no video)
 ///
 /// Slides are not only text (2026-10-29): each has a layout (one word, a cover photo, a grid of
-/// frames, before and after, a photo with notes on it, a magazine page, a list, a video) and the
-/// set has one look (CarouselSlides.swift). Pictures come from the session: stills, sketches,
-/// thumbnails, a frame of a take or an edit at a second.
+/// frames, before and after, a photo with notes on it, a magazine page, a list, a video, a screen
+/// recording on a paper card) and the set has one look (CarouselSlides.swift). Pictures come from the
+/// session: stills, sketches, thumbnails, screen takes, a frame of a take or an edit at a second.
+/// Words in *stars* take the accent colour.
 ///
 /// What works (Metricool, Oktopost, PostNitro, 2026): the first slide is the hook and the only one
 /// people see before they swipe; one idea per slide; the last slide asks for one thing.
@@ -75,6 +76,16 @@ struct CarouselSlide: Codable, Equatable, Hashable {
 
     /// Every file the slide shows.
     var files: [String] { ([media] + items.map(\.media)).filter { !$0.isEmpty } }
+
+    /// It plays on Instagram: a video slide, or a screen card with a video on it.
+    var plays: Bool { layout == .video || (layout == .screen && SlidePictures.isVideo(URL(fileURLWithPath: media))) }
+
+    /// The pictures to load before it is drawn: each file and its second.
+    func loads(_ session: URL) -> [(URL, Double?)] {
+        var out: [(URL, Double?)] = CarouselFile.resolve(media, in: session).map { [($0, plays ? (start ?? 0) : at)] } ?? []
+        for i in items { if let u = CarouselFile.resolve(i.media, in: session) { out.append((u, i.at)) } }
+        return out
+    }
 }
 
 /// One picture of a frames or before-and-after slide, with its tag ("WS", "Before") and a line.
@@ -115,7 +126,7 @@ struct SlideMark: Codable, Equatable, Hashable {
 
 /// What a slide is (2026-10-29). Same names as set_carousel's `layout`.
 enum SlideLayout: String, Codable, CaseIterable, Identifiable {
-    case text, word, cover, photo, frames, compare, annotate, magazine, list, video
+    case text, word, cover, photo, frames, compare, annotate, magazine, list, video, screen
     var id: String { rawValue }
 
     var name: String {
@@ -130,6 +141,7 @@ enum SlideLayout: String, Codable, CaseIterable, Identifiable {
         case .magazine: "Magazine page"
         case .list: "List"
         case .video: "Video"
+        case .screen: "Screen card"
         }
     }
 
@@ -145,17 +157,18 @@ enum SlideLayout: String, Codable, CaseIterable, Identifiable {
         case .magazine: "newspaper"
         case .list: "list.number"
         case .video: "play.rectangle"
+        case .screen: "macwindow"
         }
     }
 
     /// The layouts that show `media`.
-    var showsMedia: Bool { [.cover, .photo, .annotate, .magazine, .video].contains(self) }
+    var showsMedia: Bool { [.cover, .photo, .annotate, .magazine, .video, .screen].contains(self) }
     var showsItems: Bool { self == .frames || self == .compare }
 }
 
 /// The set's look (2026-10-29): type, colours, paper. Same names as set_carousel's `look`.
 enum CarouselLook: String, Codable, CaseIterable, Identifiable {
-    case takes, bold, magazine, note, cinema
+    case takes, bold, magazine, note, cinema, desk
     var id: String { rawValue }
 
     var name: String {
@@ -165,6 +178,7 @@ enum CarouselLook: String, Codable, CaseIterable, Identifiable {
         case .magazine: "Magazine"
         case .note: "Note"
         case .cinema: "Cinema"
+        case .desk: "Desk"
         }
     }
 
@@ -175,6 +189,7 @@ enum CarouselLook: String, Codable, CaseIterable, Identifiable {
         case .magazine: "Serif on cream paper, one dark red"
         case .note: "A note on your phone, handwritten notes"
         case .cinema: "Black, white serif, like a film"
+        case .desk: "Your desk under every slide, black paper strips, stickers"
         }
     }
 }
@@ -188,6 +203,8 @@ struct CarouselFile: Codable, Equatable, Hashable {
     var look = CarouselLook.takes
     /// A colour in place of the look's own, "#FFD21F". Empty: the look's.
     var accent = ""
+    /// The desk look's photo under every slide: a path in the session. Empty: a drawn cutting mat.
+    var backdrop = ""
 
     static let rel = "posts/carousel.json"
     static func url(_ session: URL) -> URL { session.appending(path: rel) }
@@ -196,11 +213,12 @@ struct CarouselFile: Codable, Equatable, Hashable {
     /// Pictures dropped on a slide from outside the session are copied here.
     static let mediaFolder = "posts/carousel/media"
 
-    init(slides: [CarouselSlide] = [], on: [String: Bool] = [:], docTitle: String = "", look: CarouselLook = .takes, accent: String = "") {
-        self.slides = slides; self.on = on; self.docTitle = docTitle; self.look = look; self.accent = accent
+    init(slides: [CarouselSlide] = [], on: [String: Bool] = [:], docTitle: String = "", look: CarouselLook = .takes,
+         accent: String = "", backdrop: String = "") {
+        self.slides = slides; self.on = on; self.docTitle = docTitle; self.look = look; self.accent = accent; self.backdrop = backdrop
     }
 
-    enum CodingKeys: String, CodingKey { case slides, on, docTitle, look, accent }
+    enum CodingKeys: String, CodingKey { case slides, on, docTitle, look, accent, backdrop }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -209,6 +227,7 @@ struct CarouselFile: Codable, Equatable, Hashable {
         docTitle = try c.decodeIfPresent(String.self, forKey: .docTitle) ?? ""
         look = (try? c.decodeIfPresent(String.self, forKey: .look)).flatMap { $0.flatMap(CarouselLook.init(rawValue:)) } ?? .takes
         accent = (try? c.decodeIfPresent(String.self, forKey: .accent)).flatMap { $0 } ?? ""
+        backdrop = (try? c.decodeIfPresent(String.self, forKey: .backdrop)).flatMap { $0 } ?? ""
     }
 
     func encode(to encoder: Encoder) throws {
@@ -218,6 +237,14 @@ struct CarouselFile: Codable, Equatable, Hashable {
         try c.encode(docTitle, forKey: .docTitle)
         if look != .takes { try c.encode(look.rawValue, forKey: .look) }
         if !accent.isEmpty { try c.encode(accent, forKey: .accent) }
+        if !backdrop.isEmpty { try c.encode(backdrop, forKey: .backdrop) }
+    }
+
+    var style: SlideStyle { SlideStyle(look, accent: accent, backdrop: backdrop) }
+
+    /// The pictures slide `n` needs: its own and the desk photo.
+    func loads(_ n: Int, in session: URL) -> [(URL, Double?)] {
+        (slides[safe: n]?.loads(session) ?? []) + (look == .desk ? CarouselFile.resolve(backdrop, in: session).map { [($0, nil)] } ?? [] : [])
     }
 
     func isOn(_ p: PostPlatform) -> Bool { on[p.rawValue] == true && !slides.isEmpty }
@@ -381,13 +408,14 @@ enum CarouselPlace: String, CaseIterable, Identifiable {
 /// Ways to start a carousel from what the session has (2026-10-29). Each sets a look and fills the
 /// slides with the session's own pictures: its stills, its storyboard sketches, frames of its takes.
 enum CarouselTemplate: String, CaseIterable, Identifiable {
-    case tips, filmed, photos, story, note
+    case tips, filmed, built, photos, story, note
     var id: String { rawValue }
 
     var name: String {
         switch self {
         case .tips: "Tips"
         case .filmed: "How I filmed this"
+        case .built: "How I built it"
         case .photos: "Photo dump"
         case .story: "Magazine story"
         case .note: "Note"
@@ -398,6 +426,7 @@ enum CarouselTemplate: String, CaseIterable, Identifiable {
         switch self {
         case .tips: "A hook, one tip a slide, the ask"
         case .filmed: "Each storyboard sketch next to the frame you filmed"
+        case .built: "Your screen takes on paper cards, one step a slide"
         case .photos: "Your stills, full bleed"
         case .story: "A cover, then pages with a picture and a paragraph"
         case .note: "Like a note on your phone, with notes on a photo"
@@ -408,16 +437,18 @@ enum CarouselTemplate: String, CaseIterable, Identifiable {
         switch self {
         case .tips: .takes
         case .filmed: .bold
+        case .built: .desk
         case .photos: .cinema
         case .story: .magazine
         case .note: .note
         }
     }
 
-    /// The template a new carousel starts from: the storyboard when shots were filmed, the stills
-    /// when there are a few, else tips.
+    /// The template a new carousel starts from: the storyboard when shots were filmed, the screen
+    /// takes when there are two or more, the stills when there are a few, else tips.
     static func auto(_ session: URL) -> CarouselTemplate {
         if !SessionPictures.filmedShots(session).isEmpty { return .filmed }
+        if SessionPictures.screenTakes(session).count >= 2 { return .built }
         if SessionPictures.stills(session).count >= 3 { return .photos }
         return .tips
     }
@@ -445,6 +476,23 @@ enum CarouselTemplate: String, CaseIterable, Identifiable {
                                                SlideItem(media: shot.frame.media, at: shot.frame.at, label: "Filmed")]))
             }
             s.append(CarouselSlide(layout: .word, kicker: "Your turn", title: "Film it.", body: "Save this. Follow for more."))
+            return s
+        case .built:
+            // The desk carousel (2026-10-29): a notebook for the hook, the steps and the ask; one screen
+            // take a step on a paper card, which plays on Instagram.
+            let takes = SessionPictures.screenTakes(session).prefix(8)
+            let steps: [SessionPicture] = takes.isEmpty ? Array(stills.prefix(3)) + Array(repeating: SessionPicture(media: ""), count: max(0, 3 - stills.count)) : Array(takes)
+            var s = [CarouselSlide(layout: .text, title: "how I built *\(name)*", body: "swipe →")]
+            s.append(CarouselSlide(layout: .list, title: "there's *\(steps.count) steps* to this:",
+                                   body: steps.enumerated().map { i, p in p.text.isEmpty ? "Step \(i + 1)" : p.text }.joined(separator: "\n")))
+            for (i, p) in steps.enumerated() {
+                var slide = CarouselSlide(layout: .screen, title: "\(i + 1)) *\(p.text.isEmpty ? "the step" : p.text.lowercased())*\nwhat happens here, in one line.",
+                                          body: "(a note on the side)", media: p.media)
+                slide.start = p.at
+                slide.end = p.end
+                s.append(slide)
+            }
+            s.append(CarouselSlide(layout: .text, title: "save this for *your next build*", body: "(follow for the next one)"))
             return s
         case .photos:
             var s = [CarouselSlide(layout: .cover, kicker: "Swipe →", title: name, media: first?.media ?? "", at: first?.at)]
@@ -476,6 +524,8 @@ struct SessionPicture: Equatable {
     var media: String
     var at: Double? = nil
     var text = ""
+    /// For a clip: where it ends.
+    var end: Double? = nil
 }
 
 /// A storyboard shot with a take: its sketch, a frame of the take, and its words.
@@ -522,6 +572,16 @@ enum SessionPictures {
         }
     }
 
+    /// The screen takes, oldest first: each its clean part (the best cut when it has one) and its name.
+    static func screenTakes(_ session: URL) -> [SessionPicture] {
+        guard let meta = Store.readMeta(session) else { return [] }
+        let cuts = TakeCut.read(session)
+        return meta.takes.filter { $0.kind == .screen }.sorted { $0.number < $1.number }.map { t in
+            let cut = cuts[String(t.number)]
+            return SessionPicture(media: t.file, at: cut?.start, text: short(t.name ?? "", words: 6), end: cut?.end)
+        }
+    }
+
     /// A frame of the keeper take (or the newest camera take), when there are no stills.
     static func keeperFrame(_ session: URL) -> SessionPicture? {
         guard let meta = Store.readMeta(session) else { return nil }
@@ -546,7 +606,7 @@ final class CarouselStore: ObservableObject {
     private(set) var session: URL?
     private var pending: DispatchWorkItem?
 
-    var style: SlideStyle { SlideStyle(file?.look ?? .takes, accent: file?.accent ?? "") }
+    var style: SlideStyle { file?.style ?? SlideStyle(.takes) }
 
     func load(_ s: URL) {
         if s != session { flush(); session = s }
@@ -593,7 +653,7 @@ final class CarouselStore: ObservableObject {
             } else {
                 s.media = first
                 s.at = nil
-                if SlidePictures.isVideo(urls[0]) { s.layout = .video; s.start = nil; s.end = nil }
+                if SlidePictures.isVideo(urls[0]) { if s.layout != .screen { s.layout = .video }; s.start = nil; s.end = nil }
                 else if !s.layout.showsMedia || s.layout == .video { s.layout = i == 0 || !s.title.isEmpty ? .cover : .photo }
             }
             c.slides[i] = s
@@ -620,13 +680,8 @@ enum CarouselExport {
     static func run(_ c: CarouselFile, place: CarouselPlace, session: URL, name: String) async throws -> String {
         let fm = FileManager.default
         let slides = c.slides
-        let style = SlideStyle(c.look, accent: c.accent)
-        var files: [(URL, Double?)] = []
-        for s in slides {
-            if let u = CarouselFile.resolve(s.media, in: session) { files.append((u, s.layout == .video ? (s.start ?? 0) : s.at)) }
-            for i in s.items { if let u = CarouselFile.resolve(i.media, in: session) { files.append((u, i.at)) } }
-        }
-        await SlidePictures.shared.preload(files)
+        let style = c.style
+        await SlidePictures.shared.preload(slides.indices.flatMap { c.loads($0, in: session) })
         func view(_ i: Int, overlay: Bool = false) -> some View {
             CarouselSlideView(slide: slides[i], index: i, total: slides.count, place: place, name: name,
                               width: place.size.width, style: style, session: session, exporting: true, overlayOnly: overlay)
@@ -654,12 +709,15 @@ enum CarouselExport {
         where f.lastPathComponent.hasPrefix("slide-") && ["png", "mp4"].contains(f.pathExtension) { try? fm.removeItem(at: f) }
         for i in slides.indices {
             let base = String(format: "slide-%02d", i + 1)
-            if place.plays, slides[i].layout == .video, let clip = CarouselFile.resolve(slides[i].media, in: session),
+            if place.plays, slides[i].plays, let clip = CarouselFile.resolve(slides[i].media, in: session),
                fm.fileExists(atPath: clip.path) {
                 let over = fm.temporaryDirectory.appending(path: "takes-slide-\(UUID().uuidString).png")
                 defer { try? fm.removeItem(at: over) }
                 try png(view(i, overlay: true), to: over)
-                try await video(clip, start: slides[i].start, end: slides[i].end, overlay: over, size: place.size,
+                let card = slides[i].layout == .screen
+                    ? CarouselSlideView.screenPicture(width: place.size.width, place: place,
+                                                      aspect: CarouselSlideView.screenAspect(slides[i], session: session)) : nil
+                try await video(clip, start: slides[i].start, end: slides[i].end, overlay: over, size: place.size, card: card,
                                 to: dir.appending(path: base + ".mp4"))
             } else {
                 try png(view(i), to: dir.appending(path: base + ".png"))
@@ -679,19 +737,27 @@ enum CarouselExport {
     }
 
     /// The ffmpeg arguments for a video slide: the clip's part, filled to the slide, the words over it.
-    /// Instagram plays up to 60 s of a carousel video.
-    static func videoArgs(_ clip: URL, start: Double?, end: Double?, overlay: URL, size: CGSize, to out: URL) -> [String] {
+    /// On a screen card the clip fits the card's picture, white around it, and the slide is over it with
+    /// a hole there. Instagram plays up to 60 s of a carousel video.
+    static func videoArgs(_ clip: URL, start: Double?, end: Double?, overlay: URL, size: CGSize, card: CGRect? = nil, to out: URL) -> [String] {
         let s = max(0, start ?? 0)
         let len = min(60, max(0.5, (end ?? (s + 60)) - s))
         let w = Int(size.width), h = Int(size.height)
+        var graph = "[0:v]scale=\(w):\(h):force_original_aspect_ratio=increase,crop=\(w):\(h),setsar=1[b];[b][1:v]overlay=0:0,format=yuv420p[v]"
+        if let card {
+            let even = { (v: CGFloat) in Int(v.rounded()) / 2 * 2 }
+            let cw = even(card.width), ch = even(card.height), x = Int(card.minX.rounded()), y = Int(card.minY.rounded())
+            graph = "[0:v]scale=\(cw):\(ch):force_original_aspect_ratio=decrease:force_divisible_by=2,pad=\(cw):\(ch):(ow-iw)/2:(oh-ih)/2:color=white,setsar=1[c];"
+                + "color=c=black:s=\(w)x\(h):r=30[k];[k][c]overlay=\(x):\(y):shortest=1[b];[b][1:v]overlay=0:0,format=yuv420p[v]"
+        }
         return ["-y", "-ss", String(format: "%.3f", s), "-t", String(format: "%.3f", len), "-i", clip.path, "-i", overlay.path,
-                "-filter_complex", "[0:v]scale=\(w):\(h):force_original_aspect_ratio=increase,crop=\(w):\(h),setsar=1[b];[b][1:v]overlay=0:0,format=yuv420p[v]",
+                "-filter_complex", graph,
                 "-map", "[v]", "-map", "0:a?", "-c:v", "libx264", "-preset", "medium", "-crf", "18",
                 "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", out.path]
     }
 
-    static func video(_ clip: URL, start: Double?, end: Double?, overlay: URL, size: CGSize, to out: URL) async throws {
-        try await Cover.ffmpeg(videoArgs(clip, start: start, end: end, overlay: overlay, size: size, to: out))
+    static func video(_ clip: URL, start: Double?, end: Double?, overlay: URL, size: CGSize, card: CGRect? = nil, to out: URL) async throws {
+        try await Cover.ffmpeg(videoArgs(clip, start: start, end: end, overlay: overlay, size: size, card: card, to: out))
     }
 }
 
@@ -737,6 +803,7 @@ enum CarouselMenu {
 
     static func lookRows(_ store: CarouselStore, say: @escaping (String) -> Void) -> [MenuItem] {
         let look = store.file?.look ?? .takes
+        let photo = store.file?.backdrop ?? ""
         return MenuGroup("Look", icon: "paintpalette", detail: look.name) {
             CarouselLook.allCases.flatMap { l in
                 MenuButton(l.name, detail: l.detail, checked: l == look) {
@@ -745,6 +812,27 @@ enum CarouselMenu {
                 }.items
             }
         }.items
+        + (look != .desk ? [] : MenuButton(photo.isEmpty ? "Choose your desk photo…" : "Change the desk photo…", icon: "photo") {
+            chooseBackdrop(store, say: say)
+        }.items)
+        + (look != .desk || photo.isEmpty ? [] : MenuButton("Use the cutting mat", icon: "square.grid.3x3") {
+            store.change { $0.backdrop = "" }
+            say("The desk slides are on the drawn cutting mat")
+        }.items)
+    }
+
+    /// A photo of your desk, from above, under every desk slide.
+    static func chooseBackdrop(_ store: CarouselStore, say: @escaping (String) -> Void) {
+        guard let session = store.session else { return }
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = false
+        panel.allowedContentTypes = [.image]
+        let stills = session.appending(path: "stills")
+        panel.directoryURL = FileManager.default.fileExists(atPath: stills.path) ? stills : session
+        guard panel.runModal() == .OK, let u = panel.url, let name = CarouselFile.adopt(u, in: session) else { return }
+        SlidePictures.shared.forget(u)
+        store.change { $0.backdrop = name }
+        say("The desk slides are on \(u.lastPathComponent)")
     }
 
     static func templateRows(_ ask: @escaping (CarouselTemplate) -> Void) -> [MenuItem] {
@@ -761,7 +849,8 @@ enum CarouselMenu {
         panel.canChooseDirectories = false
         panel.allowedContentTypes = s.layout == .video ? [.movie] : [.image, .movie]
         let stills = session.appending(path: "stills")
-        panel.directoryURL = FileManager.default.fileExists(atPath: stills.path) ? stills : session
+        // A screen card wants a screen take: they sit in the session folder.
+        panel.directoryURL = s.layout != .screen && FileManager.default.fileExists(atPath: stills.path) ? stills : session
         guard panel.runModal() == .OK, !panel.urls.isEmpty else { return }
         store.put(panel.urls, on: i)
         say("Put \(panel.urls.map(\.lastPathComponent).joined(separator: ", ")) on slide \(i + 1)")

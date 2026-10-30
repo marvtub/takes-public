@@ -82,37 +82,44 @@ let releaseMediaDir = ProcessInfo.processInfo.environment["TAKES_RELEASE_MEDIA"]
     @Test(.enabled(if: releaseMediaDir != nil)) func thisRelease() async throws {
         Self.setUp()
         defer { Look.shared.reset() }
-        let setup = Setup.shared
-        setup.agent = .ok; setup.signedIn = .ok; setup.ffmpeg = .ok; setup.devTools = .ok
-        Onboarding.creator = NSImage(contentsOf: Self.repo.appending(path: "assets/onboarding/creator.jpg"))
-        Onboarding.tiles = Self.repo.appending(path: "assets/onboarding/styles")
         let app = AppModel()
 
-        // Welcome: the four pages, one after the other.
-        let flow = Onboarding.shared
-        flow.show()
-        flow.idea = "How I plan my week"
-        let card = OnboardingCard(flow: flow).environment(app).tint(Theme.accent).font(Theme.body)
-            .padding(40)
-        try await film("welcome", card, size: CGSize(width: 840, height: 636), seconds: 15,
-                       beats: [(3.5, { flow.go(1) }), (7.5, { flow.go(2) }), (11, { flow.go(3) })])
-        flow.shown = false
+        // Search (v2026.10.29): the results page's preview, one kind after another, each file in its own shape.
+        let root = FileManager.default.temporaryDirectory.appending(path: "release-search-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let project = root.appending(path: "Phone filming")
+        let s = project.appending(path: "2026-10-20-how-i-film")
+        try FileManager.default.createDirectory(at: s.appending(path: "stills"), withIntermediateDirectories: true)
+        // The demo people (made up); the public copy has no scripts/public, so release-media.sh names the folder.
+        let demo = ProcessInfo.processInfo.environment["TAKES_DEMO_MEDIA"].map { URL(fileURLWithPath: $0) }
+            ?? Self.repo.appending(path: "scripts/public/demo-media")
+        try FileManager.default.copyItem(at: demo.appending(path: "maya/creator-tall.jpg"), to: s.appending(path: "stills/kitchen-vertical.jpg"))
+        try FileManager.default.copyItem(at: demo.appending(path: "lin/creator-wide.jpg"), to: s.appending(path: "stills/desk-wide.jpg"))
+        try Data("# How I film on my phone\n\nFace the window. The light does most of the work.\n\nLock the exposure on your face, then clip the mic on and look at the lens.\n\nOne take a day, for a month. That is the whole trick.".utf8)
+            .write(to: s.appending(path: "script.md"))
+        try Store.encoder.encode(SessionMeta(title: "How I film on my phone", createdAt: Date())).write(to: s.appending(path: "session.json"))
+        let hits = [MediaSearch.Hit(path: s.appending(path: "stills/kitchen-vertical.jpg"), kind: "image", start: 0),
+                    MediaSearch.Hit(path: s.appending(path: "stills/desk-wide.jpg"), kind: "image", start: 0),
+                    MediaSearch.Hit(path: s.appending(path: "script.md"), kind: "script", start: 0, text: "Lock the exposure"),
+                    MediaSearch.Hit(path: s, kind: "session", start: 0, text: "Phone filming", title: "How I film on my phone")]
+        let pick = SearchPick()
+        let preview = SearchPickView(pick: pick, hits: hits, root: root).environment(app).tint(Theme.accent).font(Theme.body)
+        try await film("search", preview, size: CGSize(width: 900, height: 640), seconds: 10,
+                       beats: [(2.5, { pick.at = 1 }), (5, { pick.at = 2 }), (7.5, { pick.at = 3 })])
+    }
+}
 
-        // Help: the guide, then the shortcuts.
-        let help = HelpCenter.shared
-        help.page = .guide
-        let helpView = HelpView().environment(app).tint(Theme.accent).font(Theme.body)
-            .frame(maxHeight: .infinity, alignment: .top).background(Theme.paper)
-        try await film("help", helpView, size: CGSize(width: 600, height: 600), seconds: 6,
-                       beats: [(3, { withAnimation(Theme.motion) { help.page = .shortcuts } })])
-        help.page = .guide
+/// The search scene's state: which hit the results page shows.
+@MainActor @Observable final class SearchPick {
+    var at = 0
+}
 
-        // Chat: the commands the agent left running come up one by one; Stop ends one.
-        let running = RunningDemo()
-        try await film("chat-commands", RunningDemoView(demo: running), size: CGSize(width: 560, height: 300), seconds: 7,
-                       beats: [(0.8, { withAnimation(Theme.motion) { running.shown = 1 } }),
-                               (2.0, { withAnimation(Theme.motion) { running.shown = 2 } }),
-                               (4.5, { withAnimation(Theme.motion) { running.stopped = true } })])
+struct SearchPickView: View {
+    let pick: SearchPick
+    let hits: [MediaSearch.Hit]
+    let root: URL
+    var body: some View {
+        SearchPreview(hit: hits[pick.at], root: root, moments: [], open: { _ in }).id(pick.at)
     }
 }
 

@@ -65,6 +65,7 @@
 		F2DB08145411A4C6E90E3174 /* RemoteImage.swift in Sources */ = {isa = PBXBuildFile; fileRef = E00B8E50EA993402FDB4D1C1 /* RemoteImage.swift */; };
 		F611B172D49DE498073DC89E /* SessionsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7E169647768E06DCD34239CD /* SessionsView.swift */; };
 		F799D994C516513E4BB67212 /* PrivatePhone.swift in Sources */ = {isa = PBXBuildFile; fileRef = D3449B47CCDA4FD543F7B3E2 /* PrivatePhone.swift */; };
+		F8233B02F4709660E6DA30FD /* ChartKit.swift in Sources */ = {isa = PBXBuildFile; fileRef = A29CCE63DA620CFAA3E9A496 /* ChartKit.swift */; };
 		FA6CA7E6A110A3A7E65AF4CE /* OfflineTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 182B9504357DDA3678BFD993 /* OfflineTests.swift */; };
 		FFED6277783176E3D189CA68 /* SearchPreview.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1904AD7291EB8A8910E6D915 /* SearchPreview.swift */; };
 /* End PBXBuildFile section */
@@ -119,6 +120,7 @@
 		93377135409B2127AAB45C82 /* CopilotView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CopilotView.swift; sourceTree = "<group>"; };
 		98FE851304336A1421BD080B /* Recorder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Recorder.swift; sourceTree = "<group>"; };
 		9D5D3916F4547A4AC6192FB8 /* Look.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Look.swift; sourceTree = "<group>"; };
+		A29CCE63DA620CFAA3E9A496 /* ChartKit.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChartKit.swift; sourceTree = "<group>"; };
 		A561D64C4B29767E52197C5D /* Wait.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Wait.swift; sourceTree = "<group>"; };
 		A81A9144DE4A2F84598F9459 /* App.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = App.swift; sourceTree = "<group>"; };
 		A84D23D582956EF95F4A1C75 /* climb-standin.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "climb-standin.json"; sourceTree = "<group>"; };
@@ -214,6 +216,7 @@
 				809CDB8B05DBC67CDE306985 /* BoardView.swift */,
 				8085C71439A55712D5BCB126 /* Brand.swift */,
 				27BA99BCA34EB9A687E16167 /* CarouselPhone.swift */,
+				A29CCE63DA620CFAA3E9A496 /* ChartKit.swift */,
 				72C262E1FF0CBAD24F51E91D /* ChatScrollState.swift */,
 				0B2AA9233327C058C81C1393 /* CommentsView.swift */,
 				CFD9F3480CB0A9F53F18348D /* ContextRing.swift */,
@@ -381,6 +384,7 @@
 				33E8643EE81395DA1E460D3E /* BoardView.swift in Sources */,
 				3242C1D74B99836B07724449 /* Brand.swift in Sources */,
 				5F0AED6F98C6D9665393F51E /* CarouselPhone.swift in Sources */,
+				F8233B02F4709660E6DA30FD /* ChartKit.swift in Sources */,
 				4BB042A4B59ED90818CD9213 /* ChatScrollState.swift in Sources */,
 				A0C7D318E75A4EE781C065C5 /* ClimbPhone.swift in Sources */,
 				7587EF72D6FBA7C603EE92F2 /* CommentsView.swift in Sources */,

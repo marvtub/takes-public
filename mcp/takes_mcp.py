@@ -7892,9 +7892,9 @@ def t_create_post_variants(a):
 CAROUSEL = "posts/carousel.json"
 CAROUSEL_POSTS = ("linkedin", "vertical")
 # Same names as SlideLayout and CarouselLook in Carousel.swift (2026-10-29).
-SLIDE_LAYOUTS = ("text", "word", "cover", "photo", "frames", "compare", "annotate", "magazine", "list", "video")
-SLIDE_MEDIA_LAYOUTS = ("cover", "photo", "annotate", "magazine", "video")
-CAROUSEL_LOOKS = ("takes", "bold", "magazine", "note", "cinema")
+SLIDE_LAYOUTS = ("text", "word", "cover", "photo", "frames", "compare", "annotate", "magazine", "list", "video", "screen")
+SLIDE_MEDIA_LAYOUTS = ("cover", "photo", "annotate", "magazine", "video", "screen")
+CAROUSEL_LOOKS = ("takes", "bold", "magazine", "note", "cinema", "desk")
 VIDEO_EXT = (".mov", ".mp4", ".m4v")
 
 
@@ -7983,7 +7983,7 @@ def clean_slide(s, x, n):
     if layout == "annotate" and not marks:
         raise ValueError("Slide %d: an annotate slide has marks on its picture." % n)
     if media and layout not in SLIDE_MEDIA_LAYOUTS:
-        raise ValueError("Slide %d: a %s slide shows no media. Use cover, photo, annotate, magazine or video." % (n, layout))
+        raise ValueError("Slide %d: a %s slide shows no media. Use cover, photo, annotate, magazine, video or screen." % (n, layout))
     return out
 
 
@@ -8011,6 +8011,16 @@ def t_set_carousel(a):
             c.pop("look", None)
         else:
             c["look"] = a["look"]
+    if a.get("backdrop") is not None:
+        b = a["backdrop"].strip()
+        full = os.path.expanduser(b) if b.startswith(("/", "~")) else os.path.join(s, b)
+        if b and not os.path.isfile(full):
+            raise ValueError("backdrop: no file at %s. Give a photo in the session, like stills/desk.jpg." % b)
+        b = full if b.startswith("~") else b
+        if b:
+            c["backdrop"] = b
+        else:
+            c.pop("backdrop", None)
     if a.get("accent") is not None:
         acc = a["accent"].strip()
         if acc and not re.fullmatch(r"#?[0-9A-Fa-f]{6}", acc):
@@ -14448,7 +14458,9 @@ TOOLS = [
      "slide and use the session's own pictures (stills/, storyboard/ sketches, thumbnails/, a frame of a take or an "
      "edit with at). Mix them: a cover photo, one big word, frames with tags, before and after, a photo with notes, a "
      "magazine page, a short video. For 'how I filmed this': a cover, frames of the storyboard sketches, then a compare "
-     "per shot (the sketch, then the take at its best cut).",
+     "per shot (the sketch, then the take at its best cut). For 'how I built it' (look desk): a text hook, a list of the "
+     "steps, one screen slide per step with its screen take (take-NN-screen.mov, start/end at its best cut), a text ask. "
+     "Put the key words of a title in *stars*: they take the accent colour.",
      {"session": SESSION,
       "slides": {"type": "array", "description": "The slides in order. Slide 1 is the hook.", "items": {"type": "object", "properties": {
           "layout": {"type": "string", "enum": list(SLIDE_LAYOUTS), "description":
@@ -14457,15 +14469,18 @@ TOOLS = [
                      "in a grid, each with a tag (WS, MS, CU). compare: two items, before and after. annotate: media with "
                      "marks on it. magazine: media across the top, a headline and a paragraph. list: title, then body "
                      "lines as numbered points. video: a clip (media, start, end) that plays on Instagram; LinkedIn and "
-                     "TikTok show its first frame."},
+                     "TikTok show its first frame. screen: the title on top, media on a white card under it (a screen take "
+                     "plays in the card on Instagram, with start and end); in the desk look the body is a handwritten aside "
+                     "on the card's corner."},
           "kicker": {"type": "string", "description": "Small text on top, e.g. 'Tip 1' or 'Swipe →'"},
-          "title": {"type": "string", "description": "The big text: one idea, a few words"},
+          "title": {"type": "string", "description": "The big text: one idea, a few words. *Stars* round a word "
+                    "colour it with the accent."},
           "body": {"type": "string", "description": "One short line under it; a list's points, one a line"},
           "media": {"type": "string", "description": "A picture or video: a path in the session (stills/a.jpg, "
                     "take-02-camera.mov) or a full path"},
           "at": {"type": "number", "description": "For a video in media: the second to show"},
-          "start": {"type": "number", "description": "video layout: where the clip starts, in seconds"},
-          "end": {"type": "number", "description": "video layout: where it ends (Instagram plays up to 60 s)"},
+          "start": {"type": "number", "description": "video and screen layouts: where the clip starts, in seconds"},
+          "end": {"type": "number", "description": "video and screen layouts: where it ends (Instagram plays up to 60 s)"},
           "items": {"type": "array", "description": "frames and compare: the pictures", "items": {"type": "object", "properties": {
               "media": {"type": "string", "description": "A picture or video, as the slide's media"},
               "at": {"type": "number", "description": "For a video: the second to show"},
@@ -14476,7 +14491,11 @@ TOOLS = [
               "text": S}, "required": ["x", "y"]}}}}},
       "look": {"type": "string", "enum": list(CAROUSEL_LOOKS), "description":
                "One look for every slide. takes: navy and white. bold: tall black capitals, one yellow, grid paper. "
-               "magazine: serif on cream. note: like a note on a phone, handwritten notes. cinema: black, white serif."},
+               "magazine: serif on cream. note: like a note on a phone, handwritten notes. cinema: black, white serif. "
+               "desk: a desk from above under every slide (a cutting mat, or backdrop), titles on black paper strips, "
+               "stickers, text/word/list slides on a notebook."},
+      "backdrop": {"type": "string", "description": "desk look: a photo of a desk from above under every slide, a path in "
+                   "the session; '' for the drawn cutting mat"},
       "accent": {"type": "string", "description": "A colour in place of the look's own, '#FFD21F'; '' for the look's"},
       "on": {"type": "object", "description": "Which posts show the slides in place of the video.",
              "properties": {"linkedin": {"type": "boolean", "description": "LinkedIn: a document (PDF) post"},

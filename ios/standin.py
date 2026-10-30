@@ -6,7 +6,7 @@ for N seconds: the port refuses connections, as when the Mac sleeps. GET /test/l
 changes it got (script saves, comments, chat messages, uploads). GET /test/reset puts it back as
 it started: every UI test calls it first (TakesPhoneUITests/Standin.swift).
 """
-import json, sys, threading, time, uuid
+import json, os, sys, threading, time, uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
@@ -419,7 +419,6 @@ class H(BaseHTTPRequestHandler):
             if method == "POST":
                 state["log"].append({p: json.loads(self.body() or b"{}")})
                 return self.send({"ok": True})
-            import os
             with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "TakesPhoneUITests/plan-standin.json")) as f:
                 c = json.load(f)
             if "choices" in q:
@@ -467,6 +466,11 @@ class H(BaseHTTPRequestHandler):
                 "Rail: drop the Connections and Site stats numbers"]})
         if p == "/api/update" and state.get("files"):
             return self.send({"renew": "Xcode lost your Apple ID. On the Mac: Xcode > Settings > Apple Accounts, sign in. The app stops in 30 h."})
+        if p == "/api/performance":
+            # STANDIN_SOCIAL: a social.json to draw the Performance charts from (none in the repo).
+            f = os.environ.get("STANDIN_SOCIAL")
+            social = json.load(open(f)) if f and os.path.exists(f) else None
+            return self.send({"posts": [], "social": social, "profile": None})
         if p == "/api/ping":
             return self.send({"ok": "takes"})
         if p == "/api/pair":

@@ -30,8 +30,10 @@ struct Carousel: Codable, Hashable {
     var docTitle: String
     var look: String = "takes"
     var accent: String = ""
+    /// The desk look's photo under the slides.
+    var backdrop: String = ""
 
-    enum CodingKeys: String, CodingKey { case slides, on, docTitle, look, accent }
+    enum CodingKeys: String, CodingKey { case slides, on, docTitle, look, accent, backdrop }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -40,6 +42,7 @@ struct Carousel: Codable, Hashable {
         docTitle = try c.decodeIfPresent(String.self, forKey: .docTitle) ?? ""
         look = try c.decodeIfPresent(String.self, forKey: .look) ?? "takes"
         accent = try c.decodeIfPresent(String.self, forKey: .accent) ?? ""
+        backdrop = try c.decodeIfPresent(String.self, forKey: .backdrop) ?? ""
     }
 
     func isOn(_ platform: String) -> Bool { on[platform] == true && !slides.isEmpty }
@@ -49,11 +52,12 @@ struct Carousel: Codable, Hashable {
         ("text", "Text", "textformat"), ("word", "One word", "textformat.size.larger"), ("cover", "Cover photo", "photo.artframe"),
         ("photo", "Photo only", "photo"), ("frames", "Frames", "square.grid.2x2"), ("compare", "Before and after", "rectangle.split.2x1"),
         ("annotate", "Photo with notes", "mappin.and.ellipse"), ("magazine", "Magazine page", "newspaper"),
-        ("list", "List", "list.number"), ("video", "Video", "play.rectangle"),
+        ("list", "List", "list.number"), ("video", "Video", "play.rectangle"), ("screen", "Screen card", "macwindow"),
     ]
-    static let looks: [(String, String)] = [("takes", "Takes"), ("bold", "Bold"), ("magazine", "Magazine"), ("note", "Note"), ("cinema", "Cinema")]
-    static let templates: [(String, String)] = [("tips", "Tips"), ("filmed", "How I filmed this"), ("photos", "Photo dump"),
-                                                ("story", "Magazine story"), ("note", "Note")]
+    static let looks: [(String, String)] = [("takes", "Takes"), ("bold", "Bold"), ("magazine", "Magazine"), ("note", "Note"),
+                                            ("cinema", "Cinema"), ("desk", "Desk")]
+    static let templates: [(String, String)] = [("tips", "Tips"), ("filmed", "How I filmed this"), ("built", "How I built it"),
+                                                ("photos", "Photo dump"), ("story", "Magazine story"), ("note", "Note")]
 }
 
 /// Where a slide is shown: its shape, and the place the Mac draws it for.
@@ -73,7 +77,7 @@ extension API {
     /// One slide as the Mac draws it. `v` changes with anything the slide shows, so an edit loads again.
     func slide(_ sessionID: String, _ c: Carousel, _ n: Int, place: SlidePlace, width: Int) -> URL {
         let s = c.slides[n]
-        let v = [s.layout, s.kicker, s.title, s.body, s.media, c.look, c.accent, "\(n)/\(c.slides.count)"].joined(separator: "|")
+        let v = [s.layout, s.kicker, s.title, s.body, s.media, c.look, c.accent, c.backdrop, "\(n)/\(c.slides.count)"].joined(separator: "|")
         return url("/api/carousel/slide", ["id": sessionID, "n": String(n), "place": place.rawValue, "w": String(width),
                                            "v": Self.stable(v), "token": token ?? ""])
     }
