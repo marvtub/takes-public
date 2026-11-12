@@ -350,7 +350,7 @@ class Jobs(unittest.TestCase):
             t.t_get_job({"id": "../../x"})
 
     def test_list_shows_running_and_recent_and_writes_no_told(self):
-        a = self.run_job("sleep 3")["job"]
+        a = self.run_job("sleep 60")["job"]  # stopped below: "sleep 3" ended first on a busy Mac (2026-10-30)
         b = self.run_job("true", label="Quick")["job"]
         end = time.time() + 30  # a running and b done, not a fixed second: slow on a busy Mac
         while time.time() < end:  # the list, not get_job by id: that one writes .told
@@ -499,6 +499,14 @@ class Jobs(unittest.TestCase):
         self.assertTrue(env["PATH"].startswith("/opt/homebrew/bin:/usr/local/bin"))
         self.assertFalse(any(k.startswith(("CLAUDECODE", "CLAUDE_CODE_")) for k in env))
         self.assertEqual((env["TAKES_JOB_ID"], env["TAKES_SESSION"]), ("job-ffffff", self.s))
+        # Takes' own tools (ffmpeg, the Raea engine) are found, also from a PATH without them.
+        self.assertIn(os.path.expanduser("~/.local/bin"), env["PATH"].split(os.pathsep))
+        old = os.environ["PATH"]
+        os.environ["PATH"] = "/usr/bin:/bin"
+        try:
+            self.assertTrue(t.job_env()["PATH"].endswith(os.pathsep + os.path.expanduser("~/.local/bin")))
+        finally:
+            os.environ["PATH"] = old
 
     def test_corrupt_job_file_is_left_alone(self):
         os.makedirs(t.jobs_dir(self.s))

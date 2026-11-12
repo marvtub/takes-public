@@ -132,13 +132,21 @@ struct ChartHeader<Trailing: View>: View {
     let icon: String
     let title: String
     var subtitle: String? = nil
+    /// "LinkedIn", "X", "YouTube": the platform's logo in place of the icon, so each card says whose numbers it shows.
+    var platform: String? = nil
     @ViewBuilder var trailing: () -> Trailing
 
     var body: some View {
         HStack(alignment: .center, spacing: 11) {
-            Image(systemName: icon).font(.system(size: 12.5, weight: .semibold)).foregroundStyle(Theme.accentInk)
-                .frame(width: 30, height: 30)
-                .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Theme.accentSoft))
+            Group {
+                if let platform {
+                    PlatformLogo(platform: platform, size: 20)
+                } else {
+                    Image(systemName: icon).font(.system(size: 12.5, weight: .semibold)).foregroundStyle(Theme.accentInk)
+                }
+            }
+            .frame(width: 30, height: 30)
+            .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Theme.accentSoft))
             VStack(alignment: .leading, spacing: 1) {
                 Text(title).font(Theme.display(19)).foregroundStyle(Theme.ink).lineLimit(1)
                 if let subtitle { Text(subtitle).font(Theme.sans(11.5)).foregroundStyle(Theme.muted).lineLimit(1) }
@@ -150,8 +158,8 @@ struct ChartHeader<Trailing: View>: View {
 }
 
 extension ChartHeader where Trailing == EmptyView {
-    init(icon: String, title: String, subtitle: String? = nil) {
-        self.init(icon: icon, title: title, subtitle: subtitle) { EmptyView() }
+    init(icon: String, title: String, subtitle: String? = nil, platform: String? = nil) {
+        self.init(icon: icon, title: title, subtitle: subtitle, platform: platform) { EmptyView() }
     }
 }
 
@@ -230,7 +238,8 @@ struct KitGrid: View {
                     let y = top + h - h * (t - lo) / (hi - lo)
                     Path { p in p.move(to: CGPoint(x: 0, y: y)); p.addLine(to: CGPoint(x: w, y: y)) }
                         .stroke(Kit.grid, style: StrokeStyle(lineWidth: 1, dash: t == lo ? [] : Kit.dash))
-                    Text(label(t)).font(Theme.mono(10)).foregroundStyle(Theme.faint).lineLimit(1)
+                    // fixedSize: a full number ("2,449") may run into the card's padding, never "2,4…".
+                    Text(label(t)).font(Theme.mono(10)).foregroundStyle(Theme.faint).lineLimit(1).fixedSize()
                         .frame(width: Kit.axis - 6, alignment: .leading)
                         .position(x: w + 6 + (Kit.axis - 6) / 2, y: y)
                 }

@@ -629,13 +629,24 @@ struct ClipLoop: UIViewRepresentable {
         var playerLayer: AVPlayerLayer { layer as! AVPlayerLayer }
         let player = AVQueuePlayer()
         var looper: AVPlayerLooper?
+        private var counted = false
+        /// Counts the loops that play with sound, so dictation keeps the audio session for them (2026-11-06).
+        func sounding(_ on: Bool) {
+            guard on != counted else { return }
+            counted = on
+            ClipLoop.withSound += on ? 1 : -1
+        }
     }
+
+    /// How many loops play with sound now. Read by VoiceNote when dictation ends.
+    nonisolated(unsafe) static var withSound = 0
 
     func makeUIView(context: Context) -> Box {
         let v = Box()
         v.playerLayer.videoGravity = gravity
         v.playerLayer.player = v.player
         v.player.isMuted = !sound
+        v.sounding(sound)
         AVAudioSession.sharedInstance().use(sound ? .playback : .ambient, sound ? [] : .mixWithOthers)
         v.looper = AVPlayerLooper(player: v.player, templateItem: AVPlayerItem(url: url))
         v.player.play()
@@ -645,11 +656,13 @@ struct ClipLoop: UIViewRepresentable {
     func updateUIView(_ v: Box, context: Context) {
         guard v.player.isMuted == sound else { return }
         v.player.isMuted = !sound
+        v.sounding(sound)
         AVAudioSession.sharedInstance().use(sound ? .playback : .ambient, sound ? [] : .mixWithOthers)
     }
 
     static func dismantleUIView(_ v: Box, coordinator: ()) {
         v.player.pause()
+        v.sounding(false)
         v.looper = nil
     }
 }

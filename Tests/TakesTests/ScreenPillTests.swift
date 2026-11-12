@@ -37,8 +37,15 @@ struct ScreenPillTests {
             ("countdown", .cameraScreen, false, .countdown(2)),
             ("recording", .cameraScreen, false, .recording(Date().addingTimeInterval(-42))),
             ("recording-notch", .cameraScreen, true, .recording(Date().addingTimeInterval(-42))),
+            ("idle-keys", .screen, false, .idle),
+            ("recording-keys", .screen, false, .recording(Date().addingTimeInterval(-42))),
         ]
+        let keys = KeyLog.on
+        defer { KeyLog.on = keys; app.screen.keysLive = false }
         for (name, m, notch, phase) in states {
+            // 2026-10-30: the pill's ⌨, on before Record and lit while the take notes shortcuts.
+            KeyLog.on = name.hasSuffix("-keys")
+            app.screen.keysLive = name == "recording-keys"
             app.mode = m
             app.notchOpen = notch
             app.phase = phase

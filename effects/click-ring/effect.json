@@ -1,0 +1,14 @@
+{
+  "name": "Click ring",
+  "description": "A soft ring opens at each click in a screen recording, right where the pointer clicked, then fades. The real pointer stays as it was recorded.",
+  "when": "Screen demos where the viewer should see what you clicked: a button, a menu, a link. Needs a screen take recorded with the cursor log (take-NN-screen.events.json).",
+  "needs": [
+    "a cut that shows a screen take (kind: screen)",
+    "the take's cursor log: get_session shows it as events under the screen take",
+    "the edit's size and frame.crop, if any"
+  ],
+  "kind": "Overlay",
+  "length_s": 6,
+  "shape": "any",
+  "shipped": true
+}

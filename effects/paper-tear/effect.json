@@ -1,0 +1,13 @@
+{
+  "name": "Paper tear",
+  "description": "A transition out of a full-frame page. The page rips in two down a jagged line with a white torn fibre edge, the halves twist and fall away to the sides, and the shot is under them.",
+  "when": "Right after a full-frame page (Press front, Banknote, a cover or a card), to get back to the shot.",
+  "needs": [
+    "a still of the page at the frame size (cover.png)",
+    "the cut time where it starts"
+  ],
+  "kind": "Full frame",
+  "length_s": 2,
+  "shape": "any",
+  "shipped": true
+}

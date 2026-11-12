@@ -85,11 +85,13 @@ final class PostQueue: ObservableObject {
 
     /// A post scheduled on the platform goes out at its time, so once that passes it is posted and
     /// the session published (dated at that time; Claude adds the link and numbers later). Not one
-    /// that changed since it was scheduled: the platform may still have the old time.
+    /// that changed since it was scheduled: the platform may still have the old time. Not one an
+    /// autopost plugin sends: it marks that one posted itself, with the link, or failed.
     static func settle(_ list: inout [QueuedPost], now: Date = Date()) {
+        let sends = Plugins.builtAutopost?.sends
         for i in list.indices {
             let c = list[i].content
-            guard c.status == .scheduled, !c.needsUpdate, let at = c.at, at <= now else { continue }
+            guard c.status == .scheduled, !c.needsUpdate, let at = c.at, at <= now, sends?(c) != true else { continue }
             let s = list[i].session, p = list[i].platform
             PostFile.update(s, p) { $0.status = .posted }
             SessionDoc(url: s).markPublished(p.name, at: at)

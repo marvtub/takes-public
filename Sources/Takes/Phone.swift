@@ -465,6 +465,20 @@ final class PhoneServer: PhoneHandler, @unchecked Sendable {
             if let f = req.file { try? FileManager.default.removeItem(at: f) }
             return .error(e.status, e.message)
         }
+        // A change the phone sent again (its answer was lost): the first answer, done once.
+        if req.method != "GET", let op = req.header("x-takes-op"), !op.isEmpty {
+            let (r, again) = await once.run(op) { [self] in await self.route(req) }
+            // A repeated upload's own copy of the file is not needed.
+            if again, let f = req.file { try? FileManager.default.removeItem(at: f) }
+            return r
+        }
+        return await route(req)
+    }
+
+    /// Repeats sent by the phone's outbox (`PhoneOnce`).
+    private let once = PhoneOnce()
+
+    private func route(_ req: PhoneRequest) async -> PhoneResponse {
         if req.path.hasPrefix("/api/chat"), let lane = Self.lane(req.query["id"]) {
             return await boardChat(req, lane: lane)
         }
@@ -510,7 +524,7 @@ final class PhoneServer: PhoneHandler, @unchecked Sendable {
         case ("POST", "/api/chat"):
             guard let s = session(req.query["id"]) else { return .error(404, "No such session") }
             let b = (try? JSONDecoder().decode([String: String].self, from: req.body)) ?? [:]
-            return await send(b["text"] ?? "", to: s, origin: Self.origin(b), tokens: b["tokens"] == "1")
+            return await send(b["text"] ?? "", to: s, origin: Self.origin(b), tokens: b["tokens"] == "1", mentions: b["mentions"])
         case ("POST", "/api/chat/stop"):
             guard let s = session(req.query["id"]) else { return .error(404, "No such session") }
             await MainActor.run { self.app?.chats.existing(s)?.stop() }
@@ -558,6 +572,8 @@ final class PhoneServer: PhoneHandler, @unchecked Sendable {
             // {"file": "script.md" | "posts/linkedin.md", "quote": "…" (none = all of it), "text": "…"}
             // or {"file": "edits/hook-v2.mp4", "start": 3.0, "end": 6.0, "rect": [x, y, w, h], "text": "…"}
             // or {"file": "storyboard/storyboard.json", "shot": "s3", "text": "…"}: feedback on a storyboard shot.
+            // or {"file": "posts/carousel.json", "slide": 2, "rect": [x, y, w, h], "place": "linkedin", "text": "…"}:
+            // a carousel slide (from 1), on an area or the whole slide, drawn for the post it shows on.
             guard let s = commentRoot(req.query["id"]) else { return .error(404, "No such session") }
             guard let b = try? JSONDecoder().decode(PhoneComment.self, from: req.body),
                   let text = b.text?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty else {
@@ -566,6 +582,15 @@ final class PhoneServer: PhoneHandler, @unchecked Sendable {
             if let shot = b.shot, !shot.isEmpty {
                 guard Storyboard.read(s)?.shots.contains(where: { $0.id == shot }) == true else { return .error(404, "No such shot") }
                 return .encode(CommentStore.addText(s, file: Storyboard.commentFile, quote: nil, text: text, shot: shot))
+            }
+            if let n = b.slide {
+                guard let c = CarouselFile.read(s), c.slides.indices.contains(n - 1) else { return .error(404, "No such slide") }
+                let rect = b.rect.flatMap { r in r.count == 4 ? CGRect(x: r[0], y: r[1], width: r[2], height: r[3]) : nil }
+                let place = b.place.flatMap(CarouselPlace.init(rawValue:)) ?? .linkedin
+                let name = UserDefaults.standard.string(forKey: "linkedinName") ?? "You"
+                await SlidePictures.shared.preload(c.loads(n - 1, in: s))
+                let picture = await MainActor.run { CarouselExport.picture(c, n - 1, place: place, session: s, name: name) }
+                return .encode(CommentStore.addSlide(s, slide: n, rect: rect, text: text, picture: picture))
             }
             if Self.commentable(b.file) || (library(req.query["id"]) != nil && ["README.md", "tokens.json"].contains(b.file)) {
                 let quote = b.quote.flatMap { $0.isEmpty ? nil : $0 }
@@ -655,6 +680,18 @@ final class PhoneServer: PhoneHandler, @unchecked Sendable {
             guard let s = session(req.query["id"]) else { return .error(404, "No such session") }
             let b = (try? JSONDecoder().decode([String: String].self, from: req.body)) ?? [:]
             return await MainActor.run { self.setStyle(b, in: s) }
+        case ("GET", "/api/effects"):
+            return .encode(await Task.detached(priority: .userInitiated) { self.effects() }.value)
+        case ("GET", "/api/effects/file"), ("HEAD", "/api/effects/file"):
+            guard let f = effectFile(req.query["slug"], req.query["file"]) else { return .error(404, "No such file") }
+            return .file(f, type: Self.type(of: f))
+        case ("POST", "/api/effects"):
+            let b = (try? JSONDecoder().decode([String: String].self, from: req.body)) ?? [:]
+            return await MainActor.run { self.changeEffect(b) }
+        case ("GET", "/api/mentions"):
+            // ?id=<session> (optional): the style that video uses says "In use".
+            let s = session(req.query["id"])
+            return .encode(await Task.detached(priority: .userInitiated) { self.mentions(s) }.value)
         case ("GET", "/api/profile/photo"):
             if demo { return demoPhoto.map { .file($0, type: "image/jpeg") } ?? .error(404, "No photo") }
             guard FileManager.default.fileExists(atPath: LinkedIn.photoURL.path) else { return .error(404, "No photo") }
@@ -983,11 +1020,20 @@ final class PhoneServer: PhoneHandler, @unchecked Sendable {
         let profile = currentProfile
         var board: [PhoneShot]?
         if let b = Storyboard.read(s) {
+            // A clip shows in its own shape, as on the Mac. Each shape is a header read: read them all at once.
+            let ratios = await withTaskGroup(of: (Int, Double?).self) { group in
+                for (i, x) in b.shots.enumerated() {
+                    guard let v = x.video else { continue }
+                    let u = s.appending(path: v)
+                    group.addTask { (i, await Self.clipRatio(u)) }
+                }
+                var out: [Int: Double] = [:]
+                for await (i, r) in group { if let r { out[i] = r } }
+                return out
+            }
             var shots: [PhoneShot] = []
-            for (x, start) in zip(b.shots, b.starts) {
-                // A clip shows in its own shape, as on the Mac.
-                var ratio = Double(b.ratio)
-                if let v = x.video, let r = await Self.clipRatio(s.appending(path: v)) { ratio = r }
+            for (i, (x, start)) in zip(b.shots, b.starts).enumerated() {
+                let ratio = ratios[i] ?? Double(b.ratio)
                 shots.append(PhoneShot(id: x.id, section: x.section.rawValue, kind: x.kind, say: x.say, how: x.how, seconds: x.length,
                           start: start, image: x.video.map { s.appending(path: $0).path } ?? x.image.map { Storyboard.folder(s).appending(path: $0).path },
                           error: x.error,
@@ -1044,13 +1090,15 @@ final class PhoneServer: PhoneHandler, @unchecked Sendable {
 
     /// `tokens`: a phone from 2026-10-05 on says "@comments" when the open comments should go with
     /// the message, as the Mac's box does. An older phone sends them with every message.
-    private func send(_ text: String, to s: URL, origin: String?, tokens: Bool = false) async -> PhoneResponse {
+    /// `mentions`: the ids of the styles, effects and skills picked with @ (PhoneMention), one a line.
+    private func send(_ text: String, to s: URL, origin: String?, tokens: Bool = false, mentions picks: String? = nil) async -> PhoneResponse {
         let typed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         let mentions = ClaudeChat.mentionsComments(typed)
         let text = tokens ? ClaudeChat.withoutCommentsToken(typed) : typed
         guard !text.isEmpty else { return .error(400, "The message is empty") }
         let meta = Store.readMeta(s)
         let title = meta?.title ?? s.lastPathComponent
+        let note = ClaudeChat.isCompact(text) ? "" : mentionNote(picks, text: text, session: s)
         let ok: Bool = await MainActor.run {
             guard let c = self.app?.chats.chat(s) else { return false }
             // While Takes works the message waits in the queue, as on the Mac (2026-10-09: the phone
@@ -1059,8 +1107,9 @@ final class PhoneServer: PhoneHandler, @unchecked Sendable {
             // A new session from the phone's + starts empty and untitled: the first message is the idea.
             let first = c.messages.isEmpty && meta?.named == false
             let comments = !tokens || mentions
-            let said = first ? Self.firstChat(text)
-                : comments && !ClaudeChat.isCompact(text) ? ClaudeChat.withComments(text, CommentStore.read(s).comments) : text
+            // The @ note first, then the open comments, as the Mac's box sends them.
+            let said = first ? Self.firstChat(text) + note
+                : comments && !ClaudeChat.isCompact(text) ? ClaudeChat.withComments(text + note, CommentStore.read(s).comments) : text + note
             c.send(said, title: title, onStage: nil, origin: origin)
             return true
         }
@@ -1250,7 +1299,8 @@ final class PhoneServer: PhoneHandler, @unchecked Sendable {
             store.approve(s, text: text, variant: variant ?? 0)
         case "decline":
             let reason = DeclineReason(rawValue: b["reason"] as? String ?? "") ?? .other
-            store.decline(s, wrongPost: b["wrongPost"] as? Bool ?? false, reason: reason, note: b["note"] as? String ?? "")
+            store.decline(s, wrongPost: b["wrongPost"] as? Bool ?? false, reason: reason, note: b["note"] as? String ?? "",
+                          variant: variant)
         case "feedback":
             guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return .error(400, "The note is empty") }
             store.feedback(s, note: text, variant: variant, edit: b["edit"] as? String, send: true)  // the phone has no feedback pill
@@ -1378,8 +1428,11 @@ final class PhoneServer: PhoneHandler, @unchecked Sendable {
             if let ctx = c.context { ev["context"] = ["used": ctx.used, "window": ctx.window] }
             broadcast(ev)
         }
-        // A suggestion added, changed or redrafted: the phone's Comments tab reloads.
-        let copilot = "\(Store.modified(CopilotStore.suggestions(root))?.timeIntervalSince1970 ?? 0)|\(app.copilot.runner.running)"
+        // A suggestion added, changed or redrafted, or a chat that finds or posts starts or ends:
+        // the phone's Comments tab reloads.
+        let copilot = Self.copilotSignature(changed: Store.modified(CopilotStore.suggestions(root)),
+                                            redrafting: app.copilot.runner.running,
+                                            finding: app.chats.comments.running, posting: app.chats.commentsPost.running)
         if said["copilot"] != copilot {
             said["copilot"] = copilot
             broadcast(["type": "copilot"])
@@ -1400,6 +1453,12 @@ final class PhoneServer: PhoneHandler, @unchecked Sendable {
             lastBeat = Date()
             broadcast(["type": "beat"])
         }
+    }
+
+    /// Changes when anything the phone's Comments tab shows changes. Without the two chats, the
+    /// phone's "Finding posts…" stayed until a manual reload (2026-11-06).
+    static func copilotSignature(changed: Date?, redrafting: Bool, finding: Bool, posting: Bool) -> String {
+        "\(changed?.timeIntervalSince1970 ?? 0)|\(redrafting)|\(finding)|\(posting)"
     }
 
     // MARK: Keep the Mac awake
@@ -1611,6 +1670,9 @@ struct PhoneComment: Decodable {
     var end: Double?
     var rect: [Double]?
     var shot: String?
+    /// A carousel slide, from 1, and the post it shows on (instagram, linkedin, tiktok).
+    var slide: Int?
+    var place: String?
 }
 
 extension Dictionary {

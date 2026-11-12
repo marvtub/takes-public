@@ -40,7 +40,7 @@ final class Model: ObservableObject {
     private var updates: Task<Void, Never>?
     let uploads = Uploads()
     /// Changes made while the Mac was away, until it has them.
-    let outbox = Outbox()
+    let outbox: Outbox
 
     @AppStorage("server") var server = ""
     private(set) var token: String?
@@ -66,7 +66,8 @@ final class Model: ObservableObject {
     private(set) var renamed: [String: String] = (UserDefaults.standard.dictionary(forKey: "renamedSessions") as? [String: String]) ?? [:]
     func resolve(_ id: String) -> String { renamed[id] ?? id }
 
-    init() {
+    init(outbox given: Outbox? = nil, outboxDirectory: URL = Outbox.dir) {
+        outbox = given ?? Outbox(directory: outboxDirectory)
         // UI tests point the app at a stand-in server.
         if let s = ProcessInfo.processInfo.environment["TAKES_SERVER"] {
             Vault.delete()
@@ -75,6 +76,7 @@ final class Model: ObservableObject {
         phase = Vault.hasToken ? .locked : .pairing
         uploads.model = self
         outbox.model = self
+        RecorderLeftovers.remove(in: FileManager.default.temporaryDirectory.appending(path: "outbox"))
         // Takes that were uploading when the app quit: never send them twice.
         uploads.session.getAllTasks { [outbox] tasks in
             let ids = tasks.compactMap { $0.taskDescription.flatMap(UUID.init(uuidString:)) }
@@ -84,18 +86,33 @@ final class Model: ObservableObject {
         if phase != .pairing { sessions = withLocal(Cache.load([Session].self, "sessions") ?? []) }
     }
 
+#if DEBUG
+    /// Opens only the delivery lane for an app-target test; no keychain or network setup.
+    func prepareOutboxTest() {
+        token = "test"
+        phase = .open
+        connected = true
+        outbox.inFlight([])
+    }
+#endif
+
     // MARK: Pair and unlock
 
     func pair() async {
         error = nil
+        guard let serverURL = ServerAddress.url(server) else {
+            error = "Enter a valid Mac address."
+            return
+        }
+        let pairingAPI = API(base: serverURL, token: nil)
         do {
-            try await API(base: URL(string: server)!, token: nil).ping()
+            try await pairingAPI.ping()
         } catch {
             self.error = "Can't reach the Mac at \(server). Is Tailscale on, and Takes open? (\(error.localizedDescription))"
             return
         }
         do {
-            let t = try await API(base: URL(string: server)!, token: nil).pair(name: UIDevice.current.name)
+            let t = try await pairingAPI.pair(name: UIDevice.current.name)
             try Vault.save(t)
             token = t
             phase = .open
@@ -345,29 +362,39 @@ final class Model: ObservableObject {
     /// Claude, so it knows what the user is looking at and reads past transcription slips.
     /// `tokens`: the text says "@comments" when the open comments should go with it (the chat box).
     /// Without it the Mac adds them to every message, as before 2026-10-05.
-    func say(_ text: String, in id: String, from: String? = nil, voice: Bool = false, tokens: Bool = false) async -> Bool {
+    /// `mentions`: the ids of the styles, effects and skills picked with @ (MentionItem).
+    func say(_ text: String, in id: String, from: String? = nil, voice: Bool = false, tokens: Bool = false, mentions: [String] = []) async -> Bool {
         var json: [String: Any] = ["text": text]
         if let from { json["from"] = from }
         if voice { json["voice"] = "1" }
         if tokens { json["tokens"] = "1" }
+        if !mentions.isEmpty { json["mentions"] = mentions.joined(separator: "\n") }
         let op = Outbox.Op(.say, session: id, path: "/api/chat", query: ["id": id], json: json)
-        // The message shows at once, not after the Mac answers; the Mac's copy replaces it (2026-10-08).
-        // Not while Claude works: the Mac then holds a session message back until the run ends.
-        if chatID == id, var c = live.chat, !c.running {
-            c.messages.append(Self.waitingMessage(op))
+        // The message shows at once, never after the Mac answers: on a weak link that took up to
+        // 12 s and it looked lost, so the user sent it again (2026-11-02). The Mac's copy replaces it
+        // (2026-10-08). While Claude works the Mac holds it back until the run ends: it shows as
+        // queued then, as the Mac's chat shows it.
+        var queuedHere = false
+        if chatID == id, var c = live.chat {
+            if c.running {
+                c.queued = (c.queued ?? []) + [text]
+                queuedHere = true
+            } else {
+                c.messages.append(Self.waitingMessage(op))
+                sending.insert(op.id)
+            }
             live.chat = c
-            sending.insert(op.id)
         }
         defer { sending.remove(op.id) }
         do {
             switch try await outbox.send(op) {
             case .now:
-                if chatID == id, var c = live.chat, !c.running {
+                if chatID == id, var c = live.chat, !c.running, !queuedHere {
                     c.running = true
                     live.chat = c
                 }
             case .queued(let o):
-                if chatID == id, var c = live.chat, !c.messages.contains(where: { $0.id == o.id }) {
+                if chatID == id, !queuedHere, var c = live.chat, !c.messages.contains(where: { $0.id == o.id }) {
                     c.messages.append(Self.waitingMessage(o))
                     live.chat = c
                 }
@@ -377,12 +404,26 @@ final class Model: ObservableObject {
             if chatID == id { await loadChat(id) }
             return true
         } catch {
-            if chatID == id, var c = live.chat, c.messages.contains(where: { $0.id == op.id }) {
-                c.messages.removeAll { $0.id == op.id }
+            // Never back into the text box (asked for every week until 2026-11-02): the message
+            // waits in the outbox. A weak link's error (a 5xx, a lost answer) goes again on its
+            // own; a real no from the Mac waits with Send again in the list of waiting changes.
+            let e = error as? APIError
+            let passing = e.map { $0.status == 0 || $0.status == 401 || $0.status == 408 || $0.status == 429 || $0.status >= 500 } ?? true
+            guard outbox.keep(op, refused: passing ? nil : e?.message) else {
+                if chatID == id, var c = live.chat {
+                    if queuedHere, let i = c.queued?.lastIndex(of: text) { c.queued?.remove(at: i) }
+                    c.messages.removeAll { $0.id == op.id }
+                    live.chat = c
+                }
+                return false
+            }
+            if chatID == id, var c = live.chat {
+                if queuedHere, let i = c.queued?.lastIndex(of: text) { c.queued?.remove(at: i) }
+                if !c.messages.contains(where: { $0.id == op.id }) { c.messages.append(Self.waitingMessage(op)) }
                 live.chat = c
             }
-            self.error = error.localizedDescription
-            return false
+            if !passing { self.error = e?.message ?? error.localizedDescription }
+            return true
         }
     }
     /// Messages shown before the Mac has them (`say`).
@@ -411,12 +452,24 @@ final class Model: ObservableObject {
 
     /// Shows at once; the outbox brings it to the Mac.
     func archive(_ id: String, _ on: Bool) async {
+        let previous = sessions.first(where: { $0.id == id })?.archived
         if let i = sessions.firstIndex(where: { $0.id == id }) { sessions[i].archived = on }
-        _ = try? await outbox.send(Outbox.Op(.archive, session: id, path: "/api/archive", query: ["id": id, "on": on ? "1" : "0"]))
+        do {
+            _ = try await outbox.send(Outbox.Op(.archive, session: id, path: "/api/archive", query: ["id": id, "on": on ? "1" : "0"]))
+        } catch {
+            if let i = sessions.firstIndex(where: { $0.id == id }), sessions[i].archived == on {
+                sessions[i].archived = previous ?? false
+            }
+        }
     }
 
-    func keeper(_ id: String, take: Int) async {
-        _ = try? await outbox.send(Outbox.Op(.keeper, session: id, path: "/api/keeper", query: ["id": id, "take": String(take)]))
+    func keeper(_ id: String, take: Int) async -> Bool {
+        do {
+            _ = try await outbox.send(Outbox.Op(.keeper, session: id, path: "/api/keeper", query: ["id": id, "take": String(take)]))
+            return true
+        } catch {
+            return false
+        }
     }
 
     /// Makes the thumbnail the cover of one platform's post (the Mac puts it on the video's first frame).
@@ -448,6 +501,14 @@ final class Model: ObservableObject {
         return await comment(id, body)
     }
 
+    /// A comment on carousel slide `slide` (from 1), on an area or the whole slide. The Mac draws the
+    /// slide for `place`, the post it shows on, for the comment's frame PNG.
+    func comment(_ id: String, slide: Int, rect: CGRect?, place: SlidePlace, text: String) async -> Comment? {
+        var body: [String: Any] = ["file": "posts/carousel.json", "slide": slide, "place": place.rawValue, "text": text]
+        if let rect { body["rect"] = [rect.minX, rect.minY, rect.width, rect.height].map(Double.init) }
+        return await comment(id, body)
+    }
+
     /// Feedback on a storyboard shot.
     func comment(_ id: String, shot: String, text: String) async -> Comment? {
         await comment(id, ["file": "storyboard/storyboard.json", "shot": shot, "text": text])
@@ -461,14 +522,24 @@ final class Model: ObservableObject {
         }
     }
 
-    func reply(_ id: String, comment: String, text: String) async {
-        _ = try? await outbox.send(Outbox.Op(.reply, session: id, path: "/api/comments/reply", query: ["id": id],
-                                             json: ["id": comment, "text": text]))
+    func reply(_ id: String, comment: String, text: String) async -> Bool {
+        do {
+            _ = try await outbox.send(Outbox.Op(.reply, session: id, path: "/api/comments/reply", query: ["id": id],
+                                                json: ["id": comment, "text": text]))
+            return true
+        } catch {
+            return false
+        }
     }
 
-    func resolve(_ id: String, comment: String, _ resolved: Bool) async {
-        _ = try? await outbox.send(Outbox.Op(.resolve, session: id, path: "/api/comments/reply", query: ["id": id],
-                                             json: ["id": comment, "resolved": resolved ? "true" : "false"]))
+    func resolve(_ id: String, comment: String, _ resolved: Bool) async -> Bool {
+        do {
+            _ = try await outbox.send(Outbox.Op(.resolve, session: id, path: "/api/comments/reply", query: ["id": id],
+                                                json: ["id": comment, "resolved": resolved ? "true" : "false"]))
+            return true
+        } catch {
+            return false
+        }
     }
 
     // MARK: Actions that need the Mac now (2026-10-09)
@@ -553,7 +624,7 @@ final class Model: ObservableObject {
         let id = "phone/" + UUID().uuidString
         var op = Outbox.Op(.newSession, session: id, path: "/api/sessions", json: ["project": project, "title": "", "idea": ""])
         op.created = Date()
-        outbox.add(op)
+        try outbox.add(op)
         let s = Self.localSession(op)
         let d = SessionDetail(session: s, folder: "", script: "", files: [], post: nil,
                               chat: Chat(running: false, messages: []), openComments: 0, profile: nil, storyboard: nil)
@@ -594,20 +665,27 @@ final class Model: ObservableObject {
         try? await Task.sleep(nanoseconds: 5_000_000_000)
         var stamps = (UserDefaults.standard.dictionary(forKey: "prefetchedAt") as? [String: Double]) ?? [:]
         let recent = sessions.filter { !$0.published }.sorted { $0.updated > $1.updated }.prefix(12)
+        let api = self.api
         for s in recent where stamps[s.id] != s.updated.timeIntervalSince1970 {
             guard connected, phase == .open else { return }
-            guard let d = try? await api.detail(s.id) else { continue }
+            let cacheGeneration = CacheWrites.begin()
+            // The session and its comments together: one wait, not two. Still one session at a time.
+            async let sessionCopy = try? await api.detail(s.id)
+            async let commentsCopy = try? await api.comments(s.id)
+            guard let d = await sessionCopy else { continue }
             let k = "session-" + s.id
-            Task.detached(priority: .utility) { Cache.save(d, k) }
-            if let c = try? await api.comments(s.id) { let k = "comments-" + s.id; Task.detached(priority: .utility) { Cache.save(c, k) } }
+            await CacheWrites.shared.save(d, k, generation: cacheGeneration)
+            if let c = await commentsCopy { let k = "comments-" + s.id; Task.detached(priority: .utility) { Cache.save(c, k) } }
             stamps[s.id] = s.updated.timeIntervalSince1970
         }
         let keep = Set(recent.map(\.id))
         UserDefaults.standard.set(stamps.filter { keep.contains($0.key) }, forKey: "prefetchedAt")
-        // Comments and Performance: only where those boards show.
+        // Comments and Performance: only where those boards show. Both at once.
         guard Features.socialBoards else { return }
-        if let raw = try? await api.copilotData() { Cache.saveData(raw, "copilot") }
-        if let raw = try? await api.performanceData() { Cache.saveData(raw, "performance") }
+        async let copilot = try? await api.copilotData()
+        async let performance = try? await api.performanceData()
+        if let raw = await copilot { Cache.saveData(raw, "copilot") }
+        if let raw = await performance { Cache.saveData(raw, "performance") }
     }
 
     /// The session's comments: the Mac's, or the last copy, with the waiting changes on top.
@@ -717,7 +795,7 @@ final class Model: ObservableObject {
         return Comment(id: "waiting-" + op.id.uuidString, file: j["file"] as? String ?? "", quote: j["quote"] as? String,
                        text: j["text"] as? String ?? "", status: "open", by: "user", at: Dates.plain.string(from: op.created),
                        replies: nil, shot: j["shot"] as? String, start: j["start"] as? Double, end: j["end"] as? Double,
-                       rect: j["rect"] as? [Double])
+                       rect: j["rect"] as? [Double], slide: j["slide"] as? Int)
     }
 }
 
@@ -785,9 +863,11 @@ final class Uploads: NSObject, ObservableObject {
     }
 
     @Published var items: [Item] = []
+    @Published private(set) var chat = ChatUploadState()
     weak var model: Model?
-    /// Finished uploads hand their path on: the chat puts it in the message.
-    var finished: ((Item) -> Void)?
+    /// Files still uploading when the user sent the message: each goes to the chat as its own
+    /// message once the Mac has it, so the send never waits on an upload (2026-11-02).
+    var follow: Set<Int> = []
     var backgroundDone: (() -> Void)?
     private var answers: [Int: Data] = [:]
 
@@ -838,6 +918,13 @@ final class Uploads: NSObject, ObservableObject {
     }
 
     func clearDone() { items.removeAll { $0.done && $0.failed == nil } }
+
+    func beginChatFile(_ id: Int, in session: String) { chat.begin(id, in: session) }
+    func removeChatFile(_ path: String, from session: String) { chat.remove(path, from: session) }
+
+    func sentChatDraft(in session: String) {
+        follow.formUnion(chat.sent(in: session))
+    }
 }
 
 extension Uploads: URLSessionDataDelegate {
@@ -883,7 +970,12 @@ extension Uploads: URLSessionDataDelegate {
             } else {
                 items[i].path = json?["path"] as? String
                 items[i].sent = items[i].total
-                finished?(items[i])
+                if follow.remove(id) != nil, let p = items[i].path {
+                    let session = items[i].session
+                    Task { _ = await model?.say("I sent you these from my phone:\n" + p, in: session, from: "Chat") }
+                } else if let p = items[i].path {
+                    chat.complete(id, path: p)
+                }
             }
         }
     }

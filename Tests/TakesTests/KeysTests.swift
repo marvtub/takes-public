@@ -39,6 +39,19 @@ struct KeysTests {
         #expect(!KeyRouter.isTyping(t))
     }
 
+    @Test func videoWithoutPlayerYetStillTakesSpace() {
+        var c = video
+        c.hasPlayer = false
+        for key in [Key.space, Key.left, Key.right] {
+            #expect(KeyRouter.action(key: key, modifiers: [], c) != nil, "key \(key) would beep")
+        }
+    }
+
+    @Test func audioOnStagePlays() {
+        let audio = KeyContext(hasPreview: true, hasPlayer: true)
+        #expect(KeyRouter.action(key: Key.space, modifiers: [], audio) == .playPause)
+    }
+
     @Test func typingKeepsKeysForTheField() {
         var c = video
         c.typing = true

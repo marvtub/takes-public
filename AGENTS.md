@@ -72,19 +72,24 @@ docs here. To add or change a tool, read `mcp/AGENTS.md`.
 
 ## Skills
 
-Takes ships three skills. The app copies them to `~/.claude/skills` and `~/.agents/skills` at
+Takes ships four skills. The app copies them to `~/.claude/skills` and `~/.agents/skills` at
 launch, each with a `.takes-skill` marker (`AgentSetup.swift`):
 
 - `takes-storyboard`: an idea becomes a script and a sketch storyboard (`set_storyboard`).
 - `takes-video-edit`: edit a take (cuts, recipes, HyperFrames layers), write versions to `edits/`,
   answer review comments.
 - `takes-image-prompt`: prompts for `make_image`, from a collection it downloads at run time.
+- `takes-ai-video`: AI footage that looks real (2026-11-09): plan the look, place still, character
+  sheet, voice line first (`higgsfield audio`), one action per clip, check, sound and grade in the edit.
 
 Their source is `skills/`. Update a skill when you change the tools or the
 workflow it describes.
 
 Takes also downloads the **HyperFrames** skills (HeyGen, Apache-2.0, `SkillPack.hyperframes` in
-`Plugins/Skills.swift`) from their GitHub repo at first launch, never bundled. The Skills plugin
+`Plugins/Skills.swift`) from their GitHub repo at first launch, never bundled. The **Raea** pack
+(`SkillPack.raea`, `Plugins/Raea.swift`, 2026-11-05) starts off: switching it on also downloads the
+raea engine from its own GitHub release into `~/.raea` (FSL-1.1: users may run it, Takes may not
+bundle it), and off moves only an engine Takes installed to the Trash. The Skills plugin
 (Plugins › Skills, public since 2026-10-13) switches each skill and pack on or off
 (`skillsOff` in UserDefaults: launch skips those), updates the pack, and adds any skill from a
 GitHub link or a folder. Takes updates and removes only skills with its marker.

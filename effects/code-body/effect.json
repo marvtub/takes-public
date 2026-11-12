@@ -1,0 +1,15 @@
+{
+  "name": "Code body",
+  "description": "A wipe comes down and turns the shot into code. The speaker is made of monospace letters coloured by the footage, and bright parts become solid blocks. The room is faint green code. The letters get finer in steps until the face resolves. A wipe up brings the shot back.",
+  "when": "When you talk about code, AI or what is under the hood: 'it is all just code'.",
+  "needs": [
+    "the cut time where it starts",
+    "a cutout of the speaker (made in the steps)",
+    "the letter grid (grid.js, made in the steps)",
+    "optional: the text the letters come from"
+  ],
+  "kind": "Cut-out",
+  "length_s": 3,
+  "shape": "any",
+  "shipped": true
+}

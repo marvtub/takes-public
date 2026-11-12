@@ -1,0 +1,15 @@
+{
+  "name": "Blow away",
+  "description": "An ending. The speaker turns to dust from the bottom left up to the top of the head, and the dust blows off to the right, swirling and fading. The empty room is left.",
+  "when": "At the very end of a video, as a sign-off: 'and then I was gone'.",
+  "needs": [
+    "the cut time where it starts (at the end of the edit)",
+    "a cutout of the speaker (made in the steps)",
+    "a still of the cutout (person-still.png, made in the steps)",
+    "a clean plate: the room without the speaker (plate.png)"
+  ],
+  "kind": "Cut-out",
+  "length_s": 3,
+  "shape": "any",
+  "shipped": true
+}

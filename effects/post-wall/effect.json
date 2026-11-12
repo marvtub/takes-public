@@ -1,0 +1,15 @@
+{
+  "name": "Post wall",
+  "description": "A wall of small squares, like a contribution graph, fills in behind the speaker's head from the bottom up. A day counter and a big post count run up with it. At the end the count turns gold. Then the wall snaps away.",
+  "when": "When you show a streak or a count: days in a row, posts made, 'I posted every day for a year'.",
+  "needs": [
+    "the number of days and the number to count up to",
+    "the word after the count (POSTS)",
+    "the cut time where it starts",
+    "a cutout of the speaker (made in the steps)"
+  ],
+  "kind": "Cut-out",
+  "length_s": 3,
+  "shape": "any",
+  "shipped": true
+}

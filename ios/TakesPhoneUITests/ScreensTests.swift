@@ -8,6 +8,17 @@ final class ScreensTests: XCTestCase {
         freshStandin()
     }
 
+    func testMalformedServerAddressStaysOnPairing() {
+        let app = XCUIApplication()
+        app.launchEnvironment["TAKES_SERVER"] = "http://["
+        app.launch()
+
+        XCTAssertTrue(app.buttons["Connect"].waitForExistence(timeout: 5))
+        app.buttons["Connect"].tap()
+        XCTAssertTrue(app.staticTexts["Enter a valid Mac address."].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["Connect"].exists)
+    }
+
     func testWalkThrough() throws {
         let env = ProcessInfo.processInfo.environment
         try standin("/test/screens")
@@ -439,10 +450,8 @@ final class ScreensTests: XCTestCase {
         XCTAssertTrue(latest.waitForExistence(timeout: 5))
         let reading = try XCTUnwrap(visibleEarlier())
         let readingY = reading.frame.minY
-        try fixture("/test/chat/grow")
-        // Kept: the tail is off screen, so nothing shows the reply landed, and the point is that
-        // the reader does not move. Give the app time to take the stream in.
-        sleep(3)
+        // Wait for the off-screen tail to change before judging whether the reader moved.
+        try grow()
         XCTAssertEqual(reading.frame.minY, readingY, accuracy: 2, "A streaming reply moved the reader")
         XCTAssertTrue(latest.exists)
         shot(app, "chat-3-reading-history")
@@ -478,10 +487,9 @@ final class ScreensTests: XCTestCase {
     }
 
     private func shot(_ app: XCUIApplication, _ name: String) {
-        let png = XCUIScreen.main.screenshot().pngRepresentation
-        let dir = ProcessInfo.processInfo.environment["TAKES_SHOTS"] ?? NSTemporaryDirectory()
-        try? png.write(to: URL(fileURLWithPath: dir).appendingPathComponent(name + ".png"))
-        let a = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+        let screenshot = XCUIScreen.main.screenshot()
+        writeScreenshot(screenshot, named: name)
+        let a = XCTAttachment(screenshot: screenshot)
         a.name = name
         a.lifetime = .keepAlways
         add(a)

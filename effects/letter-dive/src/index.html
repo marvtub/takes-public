@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <!-- Letter dive: a transition. The shot drops away to warm paper, a word types on in a big serif, and the
+         footage plays inside the letters. Then the camera dives into one letter (the stem of the i): the word grows
+         until that letter fills the frame and you are back in the shot.
+         Input next to this file: footage.mp4 (the moment, at the frame size).
+         Full frame: render it as mp4 and lay it over the cut. The frame size is data-width / data-height on #root.
+         Edit WORD, LOOK and AT below. -->
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+    <style>
+      @font-face { font-family: "Old Standard"; src: url("fonts/OldStandard-Regular.ttf"); font-weight: 400; }
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
+      #root { position: relative; width: 100%; height: 100%; overflow: hidden; background: #000; }
+      #root video, .full { position: absolute; inset: 0; width: 100%; height: 100%; }
+      #root video { object-fit: cover; }
+      #paper { opacity: 0; }
+      #word { font-family: "Old Standard", serif; }
+    </style>
+  </head>
+  <body>
+    <div id="root" data-composition-id="main" data-start="0" data-duration="3.0" data-width="1080" data-height="1920">
+      <video id="footage" class="clip" src="footage.mp4" muted playsinline data-start="0" data-track-index="0"></video>
+      <svg id="paper" class="full"><defs><mask id="holes" maskUnits="userSpaceOnUse"><rect id="mrect" fill="#fff"></rect><text id="word" fill="#000"></text></mask></defs><rect id="sheet" mask="url(#holes)"></rect><text id="ruler" opacity="0"></text></svg>
+      <video id="drop" class="clip" src="footage.mp4" muted playsinline data-start="0" data-duration="0.42" data-track-index="1"></video>
+    </div>
+    <script>
+      // The word, and which letter the camera dives into (its place in the word, from 0) and where in that letter
+      // (0 = its left edge, 1 = its right edge; 0.5 hits the stem of an i or l).
+      const WORD = { text: "dive.", dive: 1, into: 0.5, y: 0.5 };
+      // Look: paper colour, word size (px at a 1080 px short side; it shrinks to fit), letter spacing.
+      const LOOK = { paper: "#efe9dd", size: 500, track: -0.01 };
+      // When (seconds): the shot drops away, the first letter, time per letter, how long each letter takes to rise
+      // into place, the dive and how long it takes.
+      const AT = { drop: 0.3, type: 0.36, every: 0.067, rise: 0.12, dive: 0.95, diveFor: 0.55 };
+
+      const root = document.getElementById("root");
+      const FRAME = { w: Number(root.dataset.width), h: Number(root.dataset.height) };
+      const U = Math.min(FRAME.w, FRAME.h) / 1080;
+      const paper = document.getElementById("paper");
+      paper.setAttribute("viewBox", `0 0 ${FRAME.w} ${FRAME.h}`);
+      for (const id of ["mrect", "sheet"]) { const r = document.getElementById(id); r.setAttribute("width", FRAME.w); r.setAttribute("height", FRAME.h); }
+      document.getElementById("sheet").setAttribute("fill", LOOK.paper);
+      const NS = "http://www.w3.org/2000/svg";
+      const word = document.getElementById("word");
+      const letters = [...WORD.text].map((c) => { const s = document.createElementNS(NS, "tspan"); s.textContent = c; word.appendChild(s); return s; });
+      // Measure the word once the font is in (a hidden copy outside the mask), then build the timeline.
+      const ruler = document.getElementById("ruler");
+      let size = LOOK.size * U, x0 = 0, base = 0, px = 0, py = 0;
+      const S = { k: 1 };
+      function layout() {
+        ruler.textContent = WORD.text; ruler.setAttribute("font-family", '"Old Standard", serif');
+        ruler.setAttribute("letter-spacing", LOOK.track * size); ruler.setAttribute("font-size", size);
+        const w0 = ruler.getComputedTextLength() || WORD.text.length * size * 0.38;
+        size *= Math.min(FRAME.w * 0.93 / w0, 1.8);
+        ruler.setAttribute("font-size", size); ruler.setAttribute("letter-spacing", LOOK.track * size);
+        const w = ruler.getComputedTextLength() || WORD.text.length * size * 0.38;
+        x0 = (FRAME.w - w) / 2; base = WORD.y * FRAME.h + size * 0.33;
+        const before = WORD.dive ? ruler.getSubStringLength(0, WORD.dive) : 0, lw = ruler.getSubStringLength(WORD.dive, 1);
+        px = x0 + before + lw * WORD.into; py = base - size * 0.22;
+        word.setAttribute("x", x0); word.setAttribute("y", base); word.setAttribute("font-size", size);
+        word.setAttribute("letter-spacing", LOOK.track * size);
+      }
+      function draw() {
+        word.setAttribute("transform", `translate(${px} ${py}) scale(${S.k}) translate(${-px} ${-py})`);
+        const t = tl.time();
+        // Each letter pops up into place from a little below, fading in, as it is typed.
+        letters.forEach((l, i) => {
+          const k = Math.min(1, Math.max(0, (t - AT.type - i * AT.every) / AT.rise));
+          const e = 1 - Math.pow(1 - k, 3);
+          l.setAttribute("opacity", k > 0 ? Math.min(1, k * 2.5) : 0);
+          l.setAttribute("y", base + (1 - e) * size * 0.16);
+        });
+      }
+      window.__timelines = window.__timelines || {};
+      const tl = gsap.timeline({ paused: true, onUpdate: draw });
+      document.fonts.load(`400 ${Math.round(size)}px "Old Standard"`).then(() => { layout(); draw(); });
+      layout();
+      // The shot drops away into the bottom corner and the paper shows.
+      tl.set("#paper", { opacity: 1 }, AT.drop);
+      // (#drop is a copy of the shot on top of the paper; it ends at drop + 0.12 s, data-duration on its tag.)
+      tl.fromTo("#drop", { scale: 1, transformOrigin: "0% 45%" }, { scale: 0.2, duration: 0.12, ease: "power3.in", immediateRender: false }, AT.drop - 0.01);
+      // The dive: slow start, then fast, so it feels like falling in.
+      tl.to(S, { k: 70, duration: AT.diveFor, ease: "expo.in" }, AT.dive);
+      tl.set("#paper", { opacity: 0 }, AT.dive + AT.diveFor);
+      tl.set({}, {}, Number(root.dataset.duration));
+      window.__timelines["main"] = tl;
+      draw(); tl.seek(0);
+    </script>
+  </body>
+</html>

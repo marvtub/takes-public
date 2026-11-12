@@ -55,6 +55,18 @@ enum ChatMCP {
                 out[k] = v
             }
         }
+        // A remote server's call stops after 4 minutes (2026-11-05: nimo calls hung 436 s and 940 s, so a daily check
+        // ran an hour). nimo polls an audit for up to 3 minutes, so a real call fits. A limit the user set stays. The
+        // stdio servers keep Claude Code's default: takes runs slow work as jobs. With "MCP servers in the chat" on,
+        // `config` is nil and no limit is added.
+        for (k, v) in out {
+            guard var e = v as? [String: Any], ["http", "sse"].contains(e["type"] as? String), e["timeout"] == nil else { continue }
+            e["timeout"] = remoteTimeout
+            out[k] = e
+        }
         return out
     }
+
+    /// Claude Code's per-server tool-call limit, in milliseconds.
+    static let remoteTimeout = 240_000
 }

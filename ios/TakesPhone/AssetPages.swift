@@ -245,8 +245,7 @@ struct PlaceEffect: View {
     let videos: [RemoteFile]
     let place: (String, Double) async -> String?
     let close: () -> Void
-    @State private var video: RemoteFile?
-    @State private var at = 0.0
+    @State private var selection = PlaceEffectSelection<RemoteFile>()
     @State private var busy = false
     @State private var failed: String?
 
@@ -257,34 +256,41 @@ struct PlaceEffect: View {
                 Text("On").font(.inter(.footnote, .medium)).foregroundStyle(Palette.muted)
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 6) {
-                        ForEach(videos) { v in ToggleChip(title: v.name, on: v.id == video?.id) { video = v } }
+                        ForEach(videos) { v in
+                            ToggleChip(title: v.name, on: v.id == selection.target?.id) {
+                                selection.select(v, duration: v.duration)
+                            }
+                        }
                     }
                 }
                 Text("At").font(.inter(.footnote, .medium)).foregroundStyle(Palette.muted)
                 HStack(spacing: 10) {
-                    step("minus", "Earlier") { at = max(0, at - 0.5) }
-                    Text(String(format: "%d:%04.1f", Int(at) / 60, at.truncatingRemainder(dividingBy: 60)))
+                    step("minus", "Earlier") { selection.earlier() }
+                    Text(String(format: "%d:%04.1f", Int(selection.seconds) / 60, selection.seconds.truncatingRemainder(dividingBy: 60)))
                         .font(.inter(.title3, .semibold)).monospacedDigit()
                         .frame(maxWidth: .infinity).frame(height: 44)
                         .background(Palette.well, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-                    step("plus", "Later") { at = min(video?.duration ?? 3600, at + 0.5) }
+                    step("plus", "Later") { selection.later() }
                 }
                 if let failed { Text(failed).font(.inter(.footnote, .medium)).foregroundStyle(Palette.danger) }
                 HStack(spacing: 8) {
                     Spacer()
                     Button("Cancel", action: close).buttonStyle(.pill(.quiet, small: true))
                     Button(busy ? "Adding…" : "Add") {
-                        guard let v = video?.rel(in: sessionID) else { return }
+                        guard let selected = selection.target, let v = selected.rel(in: sessionID) else { return }
+                        let at = selection.submission()
                         busy = true
                         Task {
                             if let e = await place(v, at) { failed = e; busy = false } else { close() }
                         }
                     }
-                    .buttonStyle(.pill(.ink, small: true)).disabled(busy || video == nil)
+                    .buttonStyle(.pill(.ink, small: true)).disabled(busy || selection.target == nil)
                 }
             }
         }
-        .onAppear { video = videos.first }
+        .onAppear {
+            if let first = videos.first { selection.select(first, duration: first.duration) }
+        }
     }
 
     private func step(_ icon: String, _ label: String, _ action: @escaping () -> Void) -> some View {

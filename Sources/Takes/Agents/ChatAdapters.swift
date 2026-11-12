@@ -214,11 +214,38 @@ extension CodexAdapter: ChatAdapter {
         return out + "\""
     }
 
+    /// Where Codex keeps its config and sessions.
+    static var home: URL {
+        ProcessInfo.processInfo.environment["CODEX_HOME"].map { URL(fileURLWithPath: $0) }
+            ?? FileManager.default.homeDirectoryForCurrentUser.appending(path: ".codex")
+    }
+
+    /// How full the thread's context is: the last model call's tokens over the model's window, from
+    /// the last token_count in sessions/…/rollout-…-<thread>.jsonl. Only the file's end is read:
+    /// a long thread's file runs to hundreds of MB.
+    static func context(thread: String, home: URL = CodexAdapter.home) -> ChatContext? {
+        let sessions = home.appending(path: "sessions")
+        guard let walk = FileManager.default.enumerator(at: sessions, includingPropertiesForKeys: nil) else { return nil }
+        let name = "-\(thread).jsonl"
+        guard let file = walk.compactMap({ $0 as? URL }).first(where: { $0.lastPathComponent.hasSuffix(name) }),
+              let h = try? FileHandle(forReadingFrom: file) else { return nil }
+        defer { try? h.close() }
+        let end = (try? h.seekToEnd()) ?? 0
+        try? h.seek(toOffset: end > 262_144 ? end - 262_144 : 0)
+        guard let data = try? h.readToEnd() else { return nil }
+        for line in String(decoding: data, as: UTF8.self).split(separator: "\n").reversed() where line.contains("\"token_count\"") {
+            guard let o = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any],
+                  let info = (o["payload"] as? [String: Any])?["info"] as? [String: Any],
+                  let last = info["last_token_usage"] as? [String: Any] else { continue }
+            let used = (last["input_tokens"] as? Int ?? 0) + (last["output_tokens"] as? Int ?? 0)
+            return ChatContext(used: used, window: info["model_context_window"] as? Int ?? 272_000)
+        }
+        return nil
+    }
+
     /// Codex has the takes server in its config (AgentSetup adds it). Without it, -c on its env
     /// would make a server with no command, and Codex would not start.
     static var hasTakes: Bool {
-        let home = ProcessInfo.processInfo.environment["CODEX_HOME"].map { URL(fileURLWithPath: $0) }
-            ?? FileManager.default.homeDirectoryForCurrentUser.appending(path: ".codex")
         let text = (try? String(contentsOf: home.appending(path: "config.toml"), encoding: .utf8)) ?? ""
         return text.split(separator: "\n").contains { $0.trimmingCharacters(in: .whitespaces).hasPrefix("[mcp_servers.takes") }
     }
@@ -252,10 +279,13 @@ extension CodexAdapter: ChatAdapter {
             p.closeOpen()
             if let u = o["usage"] as? [String: Any] {
                 let used = (u["input_tokens"] as? Int ?? 0) + (u["output_tokens"] as? Int ?? 0)
-                p.context = ChatContext(used: used, window: 272_000)
                 p.spent += used
                 p.spentOut += u["output_tokens"] as? Int ?? 0
             }
+            // The turn's usage adds up every model call in it, so a turn with many tools went past
+            // the window (2026-10-29: "200%+"). The context is the last call alone, and only
+            // Codex's own session file has it, with the model's real window.
+            if let thread = p.thread, let c = Self.context(thread: thread) { p.context = c }
         case "turn.failed":
             p.finished = true
             p.closeOpen()

@@ -1,0 +1,15 @@
+{
+  "name": "Cursor looks",
+  "description": "The pointer of a screen recording in one of eight playful looks: Glass, Comet, Ink, Caption, Pointer stick, Pixel, Plasma or Glassmorph. Each look has its own move, hover, text, drag and wait state, and presses and bursts on every click.",
+  "when": "Screen demos that should feel fun or on brand: launches, social clips, tutorials. Needs a screen take recorded with the cursor log (take-NN-screen.events.json).",
+  "needs": [
+    "a cut that shows a screen take (kind: screen)",
+    "the take's cursor log: get_session shows it as events under the screen take",
+    "which look (ask if the user did not say), and optional colour and size",
+    "the edit's size and frame.crop, if any"
+  ],
+  "kind": "Overlay",
+  "length_s": 4,
+  "shape": "any",
+  "shipped": true
+}

@@ -69,6 +69,72 @@ let carouselDir = ProcessInfo.processInfo.environment["TAKES_CAROUSEL"]
         #expect(c.context(.vertical) == nil && c.context(.x) == nil)
     }
 
+    @Test func commentOnASlideKeepsTheSlideAndItsFrame() throws {
+        let s = try Self.session()
+        defer { Self.clean(s) }
+        let c = CarouselFile(slides: Self.slides)
+        let store = CommentStore()
+        store.load(s)
+        let made = try #require(store.add(slide: 3, rect: CGRect(x: 0.1, y: 0.2, width: 0.5, height: 0.3), text: "Bigger",
+                                          picture: CarouselExport.picture(c, 2, place: .linkedin, session: s, name: "Test Name")))
+        #expect(made.file == CarouselFile.rel && made.slide == 3 && made.frame == "comments/\(made.id).png")
+        let rep = try #require(NSBitmapImageRep(data: Data(contentsOf: s.appending(path: made.frame!))))
+        #expect(rep.pixelsWide == Int(CarouselPlace.linkedin.size.width))
+        let whole = try #require(store.add(slide: 1, rect: nil, text: "Darker", picture: nil))
+        #expect(whole.rect == nil && whole.frame == nil && store.on(CarouselFile.rel).count == 2)
+        #expect(CommentStore.read(s).comments.map(\.slide) == [3, 1])
+    }
+
+    /// From the phone (2026-10-31): the same slide comment, written outside the app's store.
+    @Test func phoneCommentOnASlideKeepsTheSlideAndItsFrame() throws {
+        let s = try Self.session()
+        defer { Self.clean(s) }
+        let c = CarouselFile(slides: Self.slides)
+        let made = CommentStore.addSlide(s, slide: 2, rect: CGRect(x: 0.1, y: 0.1, width: 0.4, height: 0.2), text: "Bigger",
+                                         picture: CarouselExport.picture(c, 1, place: .tiktok, session: s, name: "Test Name"))
+        #expect(made.file == CarouselFile.rel && made.slide == 2 && made.rect == [0.1, 0.1, 0.4, 0.2] && made.frame == "comments/c1.png")
+        let rep = try #require(NSBitmapImageRep(data: Data(contentsOf: s.appending(path: "comments/c1.png"))))
+        #expect(rep.pixelsWide == Int(CarouselPlace.tiktok.size.width))
+        let whole = CommentStore.addSlide(s, slide: 1, rect: nil, text: "Darker", picture: nil)
+        #expect(whole.id == "c2" && whole.frame == nil && CommentStore.read(s).comments.map(\.slide) == [2, 1])
+    }
+
+    /// TAKES_SNAPSHOT=<dir>: the LinkedIn slide with comment pins, and with an area being marked.
+    @Test func slideCommentsSnapshot() throws {
+        guard let dir = ProcessInfo.processInfo.environment["TAKES_SNAPSHOT"] else { return }
+        let s = try Self.session()
+        defer { Self.clean(s) }
+        let pins: [(number: Int, comment: Takes.Comment)] = [
+            (2, Takes.Comment(id: "c2", file: CarouselFile.rel, rect: [0.08, 0.3, 0.5, 0.25], text: "Bigger", status: "open",
+                        by: "user", at: "", slide: 2)),
+            (3, Takes.Comment(id: "c3", file: CarouselFile.rel, text: "Darker", status: "open", by: "user", at: "", slide: 2)),
+        ]
+        for (name, notes) in [("pins", SlideNotes(pins: pins, focused: "c2")),
+                              ("marking", SlideNotes(pins: pins, marking: true)),
+                              ("draft", SlideNotes(pins: pins, draft: (1, CGRect(x: 0.1, y: 0.55, width: 0.6, height: 0.2))))] {
+            let v = CarouselPager(slides: Self.slides, place: .linkedin, name: "Test Name", index: .constant(1), width: 540,
+                                  session: s, notes: notes)
+            try CarouselExport.png(v.environment(\.colorScheme, .light), to: URL(fileURLWithPath: dir).appending(path: "slide-comments-\(name).png"))
+        }
+    }
+
+    /// TAKES_SNAPSHOT=<dir>: a cover slide whose picture is gone, and one with none yet, light and dark.
+    /// The hint sat over the title (2026-11-07).
+    @Test func coverWithoutItsPictureSnapshot() throws {
+        guard let dir = ProcessInfo.processInfo.environment["TAKES_SNAPSHOT"] else { return }
+        let s = try Self.session()
+        defer { Self.clean(s) }
+        let gone = CarouselSlide(layout: .cover, kicker: "Swipe →", title: "Mehmet makes videos now.", body: "Small text", media: "assets/gone.png")
+        let none = CarouselSlide(layout: .cover, kicker: "Swipe →", title: "Mehmet makes videos now.", body: "Small text")
+        for (name, slide) in [("gone", gone), ("empty", none)] {
+            for scheme in [ColorScheme.light, .dark] {
+                let v = CarouselPager(slides: [slide], place: .linkedin, name: "Test Name", index: .constant(0), width: 540, session: s)
+                try CarouselExport.png(v.environment(\.colorScheme, scheme),
+                                       to: URL(fileURLWithPath: dir).appending(path: "cover-\(name)-\(scheme == .dark ? "dark" : "light").png"))
+            }
+        }
+    }
+
     @Test func exportWritesTheSizesEachAppWants() async throws {
         let s = try Self.session()
         defer { Self.clean(s) }

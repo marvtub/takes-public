@@ -1,0 +1,17 @@
+{
+  "name": "Comment drop",
+  "description": "A call to action. A big keyword drops in letter by letter over an empty comment box, falls into it and types itself, and it posts as your pinned comment. A viewer's reply with the keyword drops in under it, hearts fill and likes tick up. Sticker captions stack up near the hands.",
+  "when": "At the end, for a 'comment KEYWORD to get it' ask.",
+  "needs": [
+    "the keyword",
+    "The user's handle",
+    "the rest of the pinned comment",
+    "the sticker captions with their times",
+    "a round photo of the speaker (avatar.png)",
+    "the cut time where it starts"
+  ],
+  "kind": "Full frame",
+  "length_s": 4,
+  "shape": "any",
+  "shipped": true
+}

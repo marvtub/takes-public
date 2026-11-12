@@ -115,4 +115,15 @@ struct SoundFXTests {
             }
         }
     }
+
+    @Test func recordingsLoadWithTheirFilesInTheirGroups() throws {
+        let r = SFXRecordings.sounds
+        #expect(r.count >= 9)
+        #expect(r.allSatisfy { SFXRecordings.isRecording($0.id) })
+        let click = try #require(r.first { $0.id == "rec/click/mouse" })
+        #expect(click.name == "Mouse click")
+        #expect(click.group.name == "Clicks and taps")
+        #expect(r.first { $0.id == "rec/typing/computer" }?.group.name == "Typing")
+        for s in r { #expect(SFXRecordings.file(s.id).map { FileManager.default.fileExists(atPath: $0.path) } == true) }
+    }
 }

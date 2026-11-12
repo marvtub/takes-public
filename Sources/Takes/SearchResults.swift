@@ -278,10 +278,12 @@ enum SearchMedia {
             return Shape(size: turned ? CGSize(width: h, height: w) : CGSize(width: w, height: h))
         }
         let asset = AVURLAsset(url: url)
+        // The length loads beside the picture's size: neither needs the other.
+        async let length = try? await asset.load(.duration).seconds
         guard let track = try? await asset.loadTracks(withMediaType: .video).first,
               let (natural, transform) = try? await track.load(.naturalSize, .preferredTransform) else { return nil }
         let r = CGRect(origin: .zero, size: natural).applying(transform)
-        let seconds = try? await asset.load(.duration).seconds
+        let seconds = await length
         return Shape(size: CGSize(width: abs(r.width).rounded(), height: abs(r.height).rounded()), seconds: seconds.flatMap { $0.isFinite ? $0 : nil })
     }
 

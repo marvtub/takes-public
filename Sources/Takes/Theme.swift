@@ -134,14 +134,50 @@ extension NSColor {
 
 // MARK: - Building blocks
 
+/// Optional type overrides for embedded native views. Empty keeps their normal look (2026-11-07).
+struct NativeTextStyle {
+    var font: Font?
+    var weight: Font.Weight?
+    var color: Color?
+}
+
+private struct NativeTextStyleKey: EnvironmentKey {
+    static let defaultValue = NativeTextStyle()
+}
+
+extension EnvironmentValues {
+    var nativeTextStyle: NativeTextStyle {
+        get { self[NativeTextStyleKey.self] }
+        set { self[NativeTextStyleKey.self] = newValue }
+    }
+}
+
+private struct NativeText: ViewModifier {
+    let font: Font
+    let color: Color?
+    @Environment(\.nativeTextStyle) private var style
+
+    func body(content: Content) -> some View {
+        let font = style.font ?? font
+        let drawn = content.font(style.weight.map { font.weight($0) } ?? font)
+        if let color = style.color ?? color { drawn.foregroundStyle(color) }
+        else { drawn }
+    }
+}
+
+extension View {
+    func nativeText(font: Font, color: Color? = nil) -> some View {
+        modifier(NativeText(font: font, color: color))
+    }
+}
+
 /// A quiet group label: "Sessions", "Published". Sentence case, third strength.
 struct SectionLabel: View {
     var number: String? = nil  // kept for old call sites; not shown any more
     let text: String
     var body: some View {
         Text(text.prefix(1).uppercased() + text.dropFirst())
-            .font(Theme.sans(11.5, .medium))
-            .foregroundStyle(Theme.faint)
+            .nativeText(font: Theme.sans(11.5, .medium), color: Theme.faint)
     }
 }
 

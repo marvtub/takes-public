@@ -1,0 +1,16 @@
+{
+  "name": "Impact frame",
+  "description": "A manga impact frame: the speaker in two-tone ink with outlines, speed lines bursting behind the head, and a huge word across the chest over a black band with rushing lines. It flips to negative on the hits and shakes a little at the start.",
+  "when": "On the one big hit of a video: a reveal, a punchline, a single loud word.",
+  "needs": [
+    "the word across the chest",
+    "the times of the hits",
+    "the cut time where it starts",
+    "a cutout of the speaker (made in the steps)",
+    "the ink drawing (person-ink.webm, made in the steps)"
+  ],
+  "kind": "Cut-out",
+  "length_s": 2,
+  "shape": "any",
+  "shipped": true
+}

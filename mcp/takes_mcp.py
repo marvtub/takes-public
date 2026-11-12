@@ -9,13 +9,111 @@ The app rescans every 2 seconds, so changes show up without a click.
 Register:  python3 <path>/takes_mcp.py --setup   (adds it to every agent on this Mac)
        or:  claude mcp add takes --scope user -- python3 <path>/takes_mcp.py
 """
+import os
+import sys
+
+# ---------- start from bytecode (2026-11-06) ----------
+# `python3 takes_mcp.py` compiles this whole file at every start: about 190 ms, and the compiler leaves
+# about 100 MB of freed but dirty memory in the process for as long as it lives. A server lives as long
+# as its agent's chat (often days, dozens at once). So the server and the long job runners save the
+# compiled file once (~/Library/Caches/Takes/mcp-pyc, keyed by path, size and mtime) and replace themselves (same pid,
+# same stdin and stdout, nothing read yet) with a fresh python that loads it: about 20 MB instead of 128.
+# TAKES_PYC_DIR=off turns it off.
+PYC_BOOT = r"""
+import marshal, os, sys
+src, pyc = sys.argv[1], sys.argv[2]
+sys.argv = [src] + sys.argv[3:]
+sys.path[0] = os.path.dirname(src)
+g = sys.modules["__main__"].__dict__
+g.update(__file__=src, TAKES_FROM_PYC=True)
+try:
+    with open(pyc, "rb") as f:
+        code = marshal.loads(f.read()[16:])
+except Exception:
+    with open(src, "rb") as f:
+        code = compile(f.read(), src, "exec", dont_inherit=True)
+exec(code, g)
+"""
+
+
+def pyc_place():
+    """(source, its bytecode file, the header a fresh one starts with), or None when the cache is off."""
+    folder = os.environ.get("TAKES_PYC_DIR") or os.path.expanduser("~/Library/Caches/Takes/mcp-pyc")
+    if folder == "off":
+        return None
+    import importlib.util
+    src = os.path.abspath(__file__)
+    st = os.stat(src)
+    head = (importlib.util.MAGIC_NUMBER + b"\0\0\0\0" + (int(st.st_mtime) & 0xFFFFFFFF).to_bytes(4, "little")
+            + (st.st_size & 0xFFFFFFFF).to_bytes(4, "little"))
+    return src, os.path.join(folder, src.strip("/").replace("/", "%") + "." + sys.implementation.cache_tag + ".pyc"), head
+
+
+def pyc_fresh(place):
+    try:
+        with open(place[1], "rb") as f:
+            return f.read(16) == place[2]
+    except OSError:
+        return False
+
+
+def self_argv(args):
+    """The command that runs this file with args (2026-11-07): from its bytecode when that is fresh, so it
+    compiles nothing, else from the source. A job's runner starts through two of these (--detach, then
+    --job-run): from the source they were two compiles, and on a Mac at load 80 that took over 10 s."""
+    try:
+        place = pyc_place()
+        if place and pyc_fresh(place):
+            return [sys.executable, "-c", PYC_BOOT, place[0], place[1]] + args
+    except Exception:
+        pass
+    return [sys.executable, os.path.abspath(__file__)] + args
+
+
+def pyc_reexec():
+    """Run the server from bytecode (above). Only when this file runs as the script, not yet from bytecode,
+    and in a mode that lives long: the server (no arguments) or a job runner (--*-run)."""
+    if __name__ != "__main__" or globals().get("TAKES_FROM_PYC"):
+        return
+    if sys.argv[1:] and not sys.argv[1].endswith("-run"):
+        return
+    try:
+        import marshal
+        import time
+        place = pyc_place()
+        if not place:
+            return
+        src, pyc, head = place
+        if not pyc_fresh(place):  # compile the bytes that match the stat, not the running code: the file may just have changed
+            st = os.stat(src)
+            with open(src, "rb") as f:
+                data = f.read()
+            if head != pyc_place()[2] or len(data) != st.st_size:
+                return
+            folder = os.path.dirname(pyc)
+            os.makedirs(folder, exist_ok=True)
+            tmp = "%s.%d.tmp" % (pyc, os.getpid())
+            with open(tmp, "wb") as f:
+                f.write(head + marshal.dumps(compile(data, src, "exec", dont_inherit=True)))
+            os.replace(tmp, pyc)
+            for name in os.listdir(folder):  # copies of the file that no longer start (old worktrees, test folders)
+                old = os.path.join(folder, name)
+                if old != pyc and time.time() - os.stat(old).st_mtime > 14 * 86400:
+                    os.remove(old)
+        sys.stdout.flush()
+        os.execv(sys.executable, [sys.executable, "-c", PYC_BOOT, src, pyc] + sys.argv[1:])
+    except Exception:
+        return  # no cache folder, no exec: start from source as before
+
+
+pyc_reexec()
+
 import array
 import concurrent.futures
 import glob
 import hashlib
 import json
 import math
-import os
 import platform
 import random
 import re
@@ -24,7 +122,6 @@ import shlex
 import shutil
 import signal
 import subprocess
-import sys
 import tempfile
 import time
 import unicodedata
@@ -165,8 +262,14 @@ def title_from_folder(name):
 def read_meta(session):
     p = os.path.join(session, "session.json")
     if os.path.exists(p):
-        with open(p) as f:
-            return json.load(f)
+        try:
+            with open(p) as f:
+                return json.load(f)
+        except ValueError:
+            # Caught mid-write (an older app wrote it in place): read once more.
+            time.sleep(0.1)
+            with open(p) as f:
+                return json.load(f)
     created = datetime.fromtimestamp(os.stat(session).st_birthtime, timezone.utc)
     return {"title": title_from_folder(os.path.basename(session)),
             "createdAt": created.replace(microsecond=0).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -180,8 +283,11 @@ def clock(sec):
 
 def write_meta(session, meta):
     meta.setdefault("id", session_id(session, meta))
-    with open(os.path.join(session, "session.json"), "w") as f:
+    # Temp file, then rename: the app never reads a half-written session.json.
+    p = os.path.join(session, "session.json")
+    with open(p + ".tmp", "w") as f:
         json.dump(meta, f, indent=2, sort_keys=True)
+    os.replace(p + ".tmp", p)
     # SESSION.md, same shape the app writes.
     date = meta["createdAt"][:10]
     lines = ["# %s\n" % meta["title"],
@@ -573,7 +679,7 @@ def t_get_session(a):
     script = open(script_path).read() if os.path.exists(script_path) else ""
     takes = []
     cuts = read_cuts(s)
-    ready, jobs = {}, None
+    ready, jobs, lags, new_lags = {}, None, {}, 0
     for t in sorted(meta.get("takes", []), key=lambda t: (t["number"], t["kind"])):
         n = t["number"]
         if n not in ready:
@@ -591,8 +697,17 @@ def t_get_session(a):
         v = voice_view(s, t)
         c = cuts.get(str(n))
         c = {k: v for k, v in c.items() if k not in ("pid", "model")} if c else None
-        takes.append(dict(t, path=os.path.join(s, t["file"]), **ready[n], **({"voice": v} if v else {}),
-                          **({"best_cut": c} if c else {}), **take_said(s, t, meta.get("takes", []))))
+        if t["kind"] == "screen" and n not in lags:
+            # Measured once per take and cached; at most 2 new ones per call keep get_session quick.
+            lag = screen_lag(s, n, measure=False)
+            if lag is None and new_lags < 2:
+                lag, new_lags = screen_lag(s, n), new_lags + 1
+            lags[n] = lag
+        lag = {"screen_lag_s": round(lags[n], 3)} if t["kind"] == "screen" and lags.get(n) is not None else {}
+        ev = os.path.splitext(os.path.join(s, t["file"]))[0] + ".events.json"  # a screen take's cursor log
+        takes.append(dict(t, path=os.path.join(s, t["file"]), **ready[n], **lag, **({"voice": v} if v else {}),
+                          **({"best_cut": c} if c else {}), **({"events": ev} if os.path.exists(ev) else {}),
+                          **take_said(s, t, meta.get("takes", []))))
     checks = check_states(s)
     out = {"session": os.path.relpath(s, root()), "path": s, "id": shown_id(s, meta), "title": meta["title"],
            "created": meta["createdAt"], "script": script, "variants": variants(s),
@@ -718,6 +833,9 @@ def t_next_path(a):
     out = {"path": os.path.join(d, "%s-v%d%s" % (base, n, ext)), "version": n, "previous": prev,
            "note": "Write the file to exactly this path. Never overwrite an earlier version."
                    + (" For an edit, render_edit + publish_edit do this for you and keep the recipe." if kind == "edit" else "")}
+    if kind == "edit" and ext in (".mp4", ".mov"):
+        out["encode"] = ("For your own ffmpeg: %s. Never -preset slow or veryslow: a few times the time, no change "
+                         "you can see." % hand_encode())
     # A path refuses nothing: the rules come with it, once per chat (2026-10-10).
     if kind == "edit":
         return with_rules(out, *EDIT_AREAS)
@@ -789,7 +907,7 @@ def style_pick(project, session=None):
 def library_dir(level):
     """'style:<Name>' is one of the user's styles ('user' = the default style); anything else is a project."""
     level = (level or "user").strip()
-    # The comment copilot's files (lessons, target list, style guide): Comments > Library.
+    # The comment copilot's files (lessons, target list, best comments): Comments > Library.
     if level == "comments":
         return comments_dir()
     if level.lower().startswith("style:"):
@@ -920,6 +1038,105 @@ def merged_tokens(user, project):
     return out
 
 
+# ---------- pace: how often a video cuts ----------
+# A style made from a video keeps that video's pace (2026-11-04, after HyperFrames' style templates, which put
+# an episode's cuts a minute and longest hold beside the series' own): measure_pace writes it into style.json,
+# and check_edit holds each edit of a video in that style to it. A cut is a frame-to-frame change of small grey
+# frames far above the changes around it, as HyperFrames' `measure cuts` finds them; ffmpeg's scene score
+# misses a jump cut at the same angle.
+PACE_RATE = 10                 # frames a second read
+PACE_SIZE = (64, 36)
+PACE_LEVEL, PACE_RATIO, PACE_NEAR = 12.0, 4.0, 12   # mean grey levels; times the median around it; samples each side
+PACE_GAP = 0.3                 # s: changes this close are one cut (a whip, a dissolve)
+PACE_MIN_S = 15.0              # shorter edits have too few cuts to compare
+PACE_OFF = {"cuts": 2.0, "hold": 1.5, "hold_s": 2.0}  # factor either way; longest hold over style x 1.5 and + 2 s
+
+
+def cut_times(diffs, rate=PACE_RATE):
+    """Seconds of each cut, from the change between consecutive frames (diffs[i]: frame i-1 to i)."""
+    out = []
+    for i, d in enumerate(diffs):
+        if i == 0 or d < PACE_LEVEL:
+            continue
+        around = diffs[max(1, i - PACE_NEAR):i] + diffs[i + 1:i + 1 + PACE_NEAR]
+        if d >= PACE_RATIO * max(1.0, median(around) or 0.0):
+            t = i / float(rate)
+            if out and t - out[-1] < PACE_GAP:
+                continue
+            out.append(t)
+    return out
+
+
+def pace_numbers(cuts, dur):
+    shots = [b - a for a, b in zip([0.0] + cuts, cuts + [dur]) if b > a]
+    longest = max(shots or [dur])
+    at = ([0.0] + cuts)[shots.index(longest)] if shots else 0.0
+    return {"seconds": round(dur, 1), "cuts": len(cuts), "cuts_per_min": round(len(cuts) / max(dur, 1.0) * 60, 1),
+            "avg_shot_s": round(dur / (len(cuts) + 1), 1), "longest_hold_s": round(longest, 1),
+            "longest_at": round(at, 1)}
+
+
+def pace_of(path):
+    """{seconds, cuts, cuts_per_min, avg_shot_s, longest_hold_s, longest_at} of one video."""
+    dur = media_seconds(path)
+    w, h = PACE_SIZE
+    raw = subprocess.run([need_ffmpeg(), "-v", "error", "-i", path, "-an", "-vf", "fps=%d,scale=%d:%d:flags=area,"
+                          "format=gray" % (PACE_RATE, w, h), "-f", "rawvideo", "-"], capture_output=True, timeout=600).stdout
+    frames = [raw[i:i + w * h] for i in range(0, len(raw) - w * h + 1, w * h)]
+    if len(frames) < 2:
+        raise ValueError("Takes cannot read the picture of %s." % os.path.basename(path))
+    diffs = [0.0] + [_mad(a, b) for a, b in zip(frames, frames[1:])]
+    return pace_numbers(cut_times(diffs), dur or len(frames) / float(PACE_RATE))
+
+
+def t_measure_pace(a):
+    f = os.path.expanduser(a.get("file") or "")
+    if a.get("session") and not os.path.isabs(f):
+        f = os.path.join(resolve_session(a["session"]), f)
+    if not os.path.isfile(f):
+        raise ValueError("No video at %s. Give an absolute path, or session + a path in it." % (a.get("file") or "''"))
+    pace = pace_of(f)
+    name = (a.get("style") or "").strip()
+    if not name:
+        return dict(pace, note="Give style=<name> to keep this as that style's pace.")
+    if name not in style_names():
+        raise ValueError("No style '%s'. Styles: %s." % (name, ", ".join(style_names()) or "none"))
+    meta = style_meta(name)
+    meta["pace"] = dict(pace, source=os.path.basename(f), measured=now_iso())
+    write_text(os.path.join(styles_dir(), name, "style.json"), json.dumps(meta, indent=2, ensure_ascii=False) + "\n")
+    return dict(pace, style=name, note="Kept in style.json. check_edit now compares each edit in %s with it." % name)
+
+
+def style_pace(s):
+    """(style name, its pace) for the video in session folder s, or (name, None)."""
+    name = chosen_style(os.path.dirname(s), s)
+    pace = style_meta(name).get("pace") if name else None
+    return name, pace if isinstance(pace, dict) and pace.get("cuts_per_min") is not None else None
+
+
+def chk_style_pace(ctx):
+    name, want = style_pace(ctx["s"])
+    got = pace_of(ctx["path"])
+    w_cpm, w_hold = float(want["cuts_per_min"]), float(want.get("longest_hold_s") or 0)
+    rule = "about %g cuts a minute and no shot over %g s, as %s's source" % (w_cpm, w_hold, name)
+    say = fix = None
+    if w_cpm > 0 and got["cuts_per_min"] < w_cpm / PACE_OFF["cuts"]:
+        say = "It cuts %g times a minute; %s cuts %g." % (got["cuts_per_min"], name, w_cpm)
+        fix = ("Fewer cuts than the style. Tighten the pauses, or cut to a page or B-roll where the words show "
+               "something. Never add zooms.")
+    elif got["cuts_per_min"] > max(w_cpm, 1.0) * PACE_OFF["cuts"]:
+        say = "It cuts %g times a minute; %s cuts %g." % (got["cuts_per_min"], name, w_cpm)
+        fix = "More cuts than the style. Let shots run longer and join cuts that split one thought."
+    elif w_hold and got["longest_hold_s"] > max(w_hold * PACE_OFF["hold"], w_hold + PACE_OFF["hold_s"]):
+        say = "One shot holds %g s from %s; %s holds at most %g s." % (got["longest_hold_s"], mmss(got["longest_at"]),
+                                                                        name, w_hold)
+        fix = ("The shot from %.1f s runs %.1f s. Cut a pause in it, or cut to a page or B-roll for part of it."
+               % (got["longest_at"], got["longest_hold_s"]))
+    return (got["cuts_per_min"], [got["longest_at"]] if say and "holds" in say else [], say,
+            {"want": rule, "fix": fix, "note": "%g cuts a minute, longest shot %g s (the style: %g, %g s)."
+             % (got["cuts_per_min"], got["longest_hold_s"], w_cpm, w_hold)})
+
+
 def t_get_library(a):
     uses = style_uses()
     styles = [style_card(n, uses) for n in style_names()]
@@ -1020,14 +1237,24 @@ def t_create_style(a):
     sample = os.path.join(root(), LIB, STYLE_SAMPLE)
     return {"style": name, "library": "style:" + name, "path": d, "sample": sample,
             "sample_exists": os.path.exists(sample),
-            "next": ["Study the source (open a link in your one background Chrome tab; read an image or video file).",
-                     "Write README.md (the look in rules), tokens.json (colours, type) and fonts/ (free fonts only).",
+            "next": ["Study the source (open a link in your one background Chrome tab; read an image or video file). "
+                     "Measure, don't guess: a video file first gets measure_pace style='%s' file=<it> (its cuts a "
+                     "minute and longest hold; check_edit holds this style's edits to them). Read its frames at each "
+                     "cut and a few either side of every entrance and exit (ffmpeg): which way things move and for "
+                     "how many frames. Take colours from the pixels (the backdrop at several points, each text's "
+                     "fill), size type from its ink (a capital's height in pixels / the frame's height), and try 2-3 "
+                     "free fonts at that size before you pick one by its shapes." % name,
+                     "Write README.md (the look in rules, and which fonts stand in for the source's), tokens.json "
+                     "(colours, type) and fonts/ (free fonts only).",
                      "Build a title card, a lower third and a caption look in this style (HyperFrames); keep each "
                      "with save_to_library library='style:%s' group=Motion." % name,
                      "Render preview.mp4 (6 s) and preview.png (its best frame) into %s: the sample clip %s with "
                      "the title card, a caption and the lower third on it. Every style uses the same sample, so "
                      "The user compares like with like. No sample yet: cut 6 s of the user talking from a recent "
                      "keeper take to that path first." % (d, sample),
+                     "Compare once: a still of the source beside the same kind of moment in preview.png (ffmpeg "
+                     "hstack, the same height). Fix what differs (type size, weight, colour, spacing, timing), render "
+                     "the preview once more, then stop.",
                      "Tell the user it is on the Styles board. The user keeps it there, or trashes it."]}
 
 
@@ -1095,7 +1322,7 @@ def assets(s, take_files):
         dirs[:] = [d for d in dirs if not d.startswith(".") and not (rel == "." and (
             d.startswith("_") or d in ("variants", "history", "comments", "posts", "voice", "storyboard")))]
         for f in files:
-            if f.startswith(".") or f.endswith((".words.json", RECIPE_EXT)) or (rel == "." and (f in skip_files or f in take_files)):
+            if f.startswith(".") or f.endswith((".words.json", ".events.json", RECIPE_EXT)) or (rel == "." and (f in skip_files or f in take_files)):
                 continue
             path = os.path.join(dirpath, f)
             out.append({"folder": top, "file": os.path.relpath(path, s), "path": path,
@@ -1144,7 +1371,21 @@ def comment_view(s, c):
         img = x and x.get("image") and os.path.join(s, STORYBOARD_DIR, x["image"])
         out["frame"] = img if img and os.path.exists(img) else None
         return out
-    if c.get("quote") is not None:
+    if c.get("slide"):
+        # A comment on a carousel slide (2026-10-30): the slide as it is now; 'frame' shows it as
+        # The user saw it, with the area outlined.
+        try:
+            slides = (read_carousel(s) or {}).get("slides", [])
+        except ValueError:
+            slides = []
+        n = c["slide"]
+        out["when"] = "carousel slide %d" % n
+        out["slide_now"] = slides[n - 1] if 0 < n <= len(slides) else None
+    elif c["file"].startswith("board:"):
+        # A comment on a Site board (2026-11-06): 'frame' is the board as the user saw it.
+        out["path"] = None
+        out["when"] = "board " + c["file"][len("board:"):]
+    elif c.get("quote") is not None:
         out["when"] = "selected text"
     elif c.get("start") is not None:
         out["when"] = clock(c["start"]) + ("-" + clock(c["end"]) if c.get("end") is not None
@@ -1156,8 +1397,9 @@ def comment_view(s, c):
     else:
         out["when"] = "whole video"
     r = c.get("rect")
-    out["area"] = None if c.get("quote") is not None else ("x %.0f%%-%.0f%%, y %.0f%%-%.0f%% of the frame (from top left)"
-                   % (r[0] * 100, (r[0] + r[2]) * 100, r[1] * 100, (r[1] + r[3]) * 100)) if r else "whole frame"
+    of = "slide" if c.get("slide") else "board" if c["file"].startswith("board:") else "frame"
+    out["area"] = None if c.get("quote") is not None else ("x %.0f%%-%.0f%%, y %.0f%%-%.0f%% of the %s (from top left)"
+                   % (r[0] * 100, (r[0] + r[2]) * 100, r[1] * 100, (r[1] + r[3]) * 100, of)) if r else "whole " + of
     if c.get("frame"):
         fp = os.path.join(s, c["frame"])
         out["frame"] = fp if os.path.exists(fp) else None
@@ -1239,8 +1481,9 @@ def t_list_effects(a):
     dirs = effect_dirs()
     slug = (a.get("effect") or "").strip()
     if not slug:
-        return {"effects": [effect_card(n, d) for n, d in dirs.items()], "rule": EFFECT_RULE,
-                "note": "Pass effect=<slug> for its README and source."}
+        out = {"effects": [effect_card(n, d) for n, d in dirs.items()], "rule": EFFECT_RULE,
+               "note": "Pass effect=<slug> for its README and source."}
+        return out
     if slug not in dirs:
         # The user may say the name ("Text behind"), not the slug.
         slug = next((n for n, d in dirs.items() if effect_card(n, d)["name"].lower() == slug.lower()), slug)
@@ -1249,12 +1492,13 @@ def t_list_effects(a):
     d = dirs[slug]
     readme = os.path.join(d, "README.md")
     src = os.path.join(d, "src")
-    return dict(effect_card(slug, d), path=d, readme=read_text(readme) if os.path.exists(readme) else None,
-                src=src if os.path.isdir(src) else None,
-                files=[f for f in library_files(d) if f not in EFFECT_FILES],
-                rule=EFFECT_RULE,
-                note="Copy src/ into the edit's _edit/<name>/ and change the copy, never the effect itself. "
-                     "Use the video's style (get_library) for type and colour where the README allows.")
+    out = dict(effect_card(slug, d), path=d, readme=read_text(readme) if os.path.exists(readme) else None,
+               src=src if os.path.isdir(src) else None,
+               files=[f for f in library_files(d) if f not in EFFECT_FILES],
+               rule=EFFECT_RULE,
+               note="Copy src/ into the edit's _edit/<name>/ and change the copy, never the effect itself. "
+                    "Use the video's style (get_library) for type and colour where the README allows.")
+    return out
 
 
 # ---------- transcripts ----------
@@ -1456,7 +1700,10 @@ def t_get_comments(a):
                     "with update_session / update_variant; in the post (posts/linkedin.md, posts/x.md, posts/youtube.md, posts/vertical.md" + (", posts/article.md" if BLOG else "") + ") with set_post (and that platform), in a post variant (posts/variants/<slug>.md, posts/x/variants/<slug>.md) with set_post variant=<slug>; in a library "
                     "README.md or tokens.json edit the file. Storyboard comments carry 'shot' (its id) and "
                     "'shot_now': change the shot with set_storyboard (keep every id; the storyboard skill), "
-                    "and the script with update_session if the lines change. "
+                    "and the script with update_session if the lines change. Carousel comments carry 'slide' "
+                    "(from 1) and 'slide_now': change the slides with set_carousel (it takes all of them). "
+                    "Site board comments (library 'site', file 'board:<tab>'): the frame is the board as the user saw it; "
+                    "change what it points at (a ticket, a goal, a page) and say in the reply what you did. "
                     "Then reply_comment with resolve=true and a lesson for each (get_rules for that step first: a rule "
                     "that covers it, 'new' with rule={area, text}, or 'one-off')."}
 
@@ -2212,7 +2459,7 @@ NOT_FOUND = "Takes could not find this edit in %s (heavy music, another take or 
 GIVEN_SHARE = 0.25  # a source argument still needs this share of the edit's sound found in it
 OUT_OF_TIME = "Out of time. Run check_edit again; the second run is faster."
 LABELS = {"streams": "Extra track", "frozen_video": "Frozen picture", "echo": "Echo", "words": "Missing words",
-          "regression": "Fix undone", "framing": "Framed too tight"}
+          "regression": "Fix undone", "framing": "Framed too tight", "style_pace": "Off the style's pace"}
 
 
 class Skip(Exception):
@@ -3896,6 +4143,8 @@ def run_builtin(s, rel, path, given=None, as_rel=None):
     elif src["path"]:
         ctx["why"] = "The edit has no sound, so Takes cannot find it in the take."
     names = ["av_sync", "frozen_video", "band_balance", "echo", "picture_drift", "framing", "words", "regression"]
+    if p["video"] and style_pace(s)[1] and (p["duration"] or 0) >= PACE_MIN_S:
+        names.append("style_pace")  # listed only when it can say something: a style with a pace, a long enough edit
     if not p["video"]:
         names = [n for n in names if n not in PICTURE_CHECKS]  # a sound-only edit: picture checks are not listed
     ex = concurrent.futures.ThreadPoolExecutor(4)
@@ -4313,6 +4562,25 @@ def write_storyboard(s, d):
     os.replace(tmp, storyboard_file(s))
 
 
+def storyboard_lock(s):
+    """The lock every storyboard.json writer holds from its read to its write (the app's Storyboard.pick too):
+    `with storyboard_lock(s):`. Closing the file lets it go."""
+    import fcntl
+    os.makedirs(os.path.join(s, STORYBOARD_DIR), exist_ok=True)
+    lock = open(os.path.join(s, STORYBOARD_DIR, ".edit"), "w")
+    fcntl.flock(lock, fcntl.LOCK_EX)
+    return lock
+
+
+def clip_running(s, rel):
+    """The Higgsfield or Replicate job of a shot's `generating` clip still runs. The job's id is the clip's
+    name (generated/<id>.mp4). A job that ended, or whose runner died, does not."""
+    try:
+        return read_job(s, os.path.splitext(os.path.basename(rel))[0], True)["status"] in ("starting", "running")
+    except ValueError:
+        return False
+
+
 # Any "W:H" shape works. These are the ones Gemini draws in; another shape is drawn in the
 # nearest of them and the app fits it to the card. 4:5 was the only one before 2026-10-05.
 FORMATS = ("16:9", "9:16", "4:5", "1:1", "3:4", "4:3", "2:3", "3:2", "5:4", "21:9")
@@ -4400,8 +4668,12 @@ def storyboard_view(s):
             r["video"] = x["video"]
         if x.get("variants"):
             r["variants"] = x["variants"]
-        if x.get("generating"):
+        if x.get("generating") and clip_running(s, x["generating"]):
             r["generating"] = x["generating"]
+        elif x.get("generating"):
+            # Its runner died: the app keeps Make the clip off while the file says generating.
+            rel = x["generating"]
+            edit_shot(s, x.get("id"), lambda y: y.pop("generating", None) if y.get("generating") == rel else None)
         if x.get("clip_error"):
             r["clip_error"] = x["clip_error"]
         if takes.get(x.get("id")):
@@ -4419,57 +4691,61 @@ def t_set_storyboard(a):
     """Write the storyboard and draw the missing sketches in the background."""
     s = resolve_session(a["session"])
     need_rules("storyboard", "script")
-    before = read_storyboard(s)
-    old = before["shots"]
-    fmt = (a.get("format") or before.get("format") or DEFAULT_FORMAT).strip()
-    fmt = parse_format(fmt)
-    shots = []
-    for i, x in enumerate(a["shots"]):
-        say, sketch = (x.get("say") or "").strip(), (x.get("sketch") or "").strip()
-        video = shot_video(s, (x.get("video") or "").strip())
-        variants = None
-        if isinstance(x.get("variants"), list):
-            variants = list(dict.fromkeys(shot_video(s, str(v).strip()) for v in x["variants"] if str(v).strip()))
-            video = video or (variants[0] if variants else None)
-            if video and video not in variants:
-                variants.insert(0, video)
-        given_image = (x.get("image") or "").strip()
-        if not sketch and not video and not given_image:
-            raise ValueError("Shot %d has no sketch: say what the frame shows." % (i + 1))
-        shot = {"section": shot_section(x), "kind": (x.get("kind") or "SHOT").strip().upper(), "say": say,
-                "do": (x.get("do") or "").strip(), "sketch": sketch}
-        if x.get("seconds"):
-            shot["seconds"] = round(float(x["seconds"]), 1)
-        if video:
-            # A real clip shows instead of a sketch (the app plays it on hover): nothing to draw.
-            shot["video"] = video
-            if variants and len(variants) > 1:
-                shot["variants"] = variants
-        elif given_image:
-            shot["image"] = shot_image(s, given_image, sketch, fmt)
-        else:
-            name = sketch_name(sketch, fmt)
-            if os.path.exists(os.path.join(s, STORYBOARD_DIR, name)) and not x.get("redraw"):
-                shot["image"] = name
-        shots.append(shot)
-    olds = {o.get("id"): o for o in old}
-    for shot, i, given in zip(shots, shot_ids(old, a["shots"]), a["shots"]):
-        shot["id"] = i
-        # Variants left out are kept while the shot still shows one of them: a rewrite of the lines
-        # must not drop the angles the user is choosing between.
-        o = olds.get(i) or {}
-        if "variants" not in given and shot.get("video") in (o.get("variants") or []):
-            shot["variants"] = o["variants"]
-    # A Higgsfield clip still on its way keeps its place: the runner finds the shot by id.
-    running = {o.get("id"): o["generating"] for o in old if o.get("generating")}
-    for shot in shots:
-        if shot["id"] in running and not shot.get("video"):
-            shot["generating"] = running[shot["id"]]
-    # The app shows hook, main, end in that order: keep the file in the same order.
-    shots.sort(key=lambda x: SECTIONS.index(x["section"]))
-    todo = sum(1 for x in shots if not x.get("image") and not x.get("video"))
-    nokey = bool(todo) and not image_sources()
-    write_storyboard(s, dict({"shots": shots, "format": fmt}, **({"nokey": True} if nokey else {})))
+    # From the read to the write under the lock edit_shot and the app hold: a clip that lands meanwhile
+    # is not written over.
+    with storyboard_lock(s):
+        before = read_storyboard(s)
+        old = before["shots"]
+        fmt = (a.get("format") or before.get("format") or DEFAULT_FORMAT).strip()
+        fmt = parse_format(fmt)
+        shots = []
+        for i, x in enumerate(a["shots"]):
+            say, sketch = (x.get("say") or "").strip(), (x.get("sketch") or "").strip()
+            video = shot_video(s, (x.get("video") or "").strip())
+            variants = None
+            if isinstance(x.get("variants"), list):
+                variants = list(dict.fromkeys(shot_video(s, str(v).strip()) for v in x["variants"] if str(v).strip()))
+                video = video or (variants[0] if variants else None)
+                if video and video not in variants:
+                    variants.insert(0, video)
+            given_image = (x.get("image") or "").strip()
+            if not sketch and not video and not given_image:
+                raise ValueError("Shot %d has no sketch: say what the frame shows." % (i + 1))
+            shot = {"section": shot_section(x), "kind": (x.get("kind") or "SHOT").strip().upper(), "say": say,
+                    "do": (x.get("do") or "").strip(), "sketch": sketch}
+            if x.get("seconds"):
+                shot["seconds"] = round(float(x["seconds"]), 1)
+            if video:
+                # A real clip shows instead of a sketch (the app plays it on hover): nothing to draw.
+                shot["video"] = video
+                if variants and len(variants) > 1:
+                    shot["variants"] = variants
+            elif given_image:
+                shot["image"] = shot_image(s, given_image, sketch, fmt)
+            else:
+                name = sketch_name(sketch, fmt)
+                if os.path.exists(os.path.join(s, STORYBOARD_DIR, name)) and not x.get("redraw"):
+                    shot["image"] = name
+            shots.append(shot)
+        olds = {o.get("id"): o for o in old}
+        for shot, i, given in zip(shots, shot_ids(old, a["shots"]), a["shots"]):
+            shot["id"] = i
+            # Variants left out are kept while the shot still shows one of them: a rewrite of the lines
+            # must not drop the angles the user is choosing between.
+            o = olds.get(i) or {}
+            if "variants" not in given and shot.get("video") in (o.get("variants") or []):
+                shot["variants"] = o["variants"]
+        # A Higgsfield clip still on its way keeps its place: the runner finds the shot by id. One whose
+        # runner died is let go, or the app keeps Make the clip off for good.
+        running = {o.get("id"): o["generating"] for o in old if o.get("generating") and clip_running(s, o["generating"])}
+        for shot in shots:
+            if shot["id"] in running and not shot.get("video"):
+                shot["generating"] = running[shot["id"]]
+        # The app shows hook, main, end in that order: keep the file in the same order.
+        shots.sort(key=lambda x: SECTIONS.index(x["section"]))
+        todo = sum(1 for x in shots if not x.get("image") and not x.get("video"))
+        nokey = bool(todo) and not image_sources()
+        write_storyboard(s, dict({"shots": shots, "format": fmt}, **({"nokey": True} if nokey else {})))
     for given in a["shots"]:
         if given.get("redraw") and not given.get("image"):
             p = os.path.join(s, STORYBOARD_DIR, sketch_name((given.get("sketch") or "").strip(), fmt))
@@ -4568,20 +4844,21 @@ def sketch_run(s, retry=False):
     except OSError:
         return  # another runner draws; it re-reads the storyboard before it stops
     mu = threading.Lock()
-    d = read_storyboard(s)
     nokey = not image_sources()
-    if retry and not nokey:
-        for x in d["shots"]:
-            x.pop("error", None)
-    if nokey or d.pop("nokey", None) or retry:
-        if nokey:
-            d["nokey"] = True
-        write_storyboard(s, d)
+    with storyboard_lock(s):
+        d = read_storyboard(s)
+        if retry and not nokey:
+            for x in d["shots"]:
+                x.pop("error", None)
+        if nokey or d.pop("nokey", None) or retry:
+            if nokey:
+                d["nokey"] = True
+            write_storyboard(s, d)
     if nokey:
         return
 
     def land(sketch, image=None, error=None):
-        with mu:
+        with mu, storyboard_lock(s):
             d = read_storyboard(s)
             for x in d["shots"]:
                 if x.get("sketch") == sketch:
@@ -5023,6 +5300,17 @@ def eleven_save_key(key):
         raise ValueError("The Keychain did not take the key.")
 
 
+class ElevenError(ValueError):
+    """An ElevenLabs refusal: the message for the user, plus the answer's detail (dict) for the caller."""
+    def __init__(self, msg, code=None, detail=None):
+        super().__init__(msg)
+        self.code, self.detail = code, detail if isinstance(detail, dict) else {}
+
+
+ELEVEN_PERMS = {"music_generation": "Music Generation", "text_to_speech": "Text to Speech",
+                "speech_to_speech": "Speech to Speech", "speech_to_text": "Speech to Text"}
+
+
 def eleven_problem(code, body):
     try:
         d = json.loads(body).get("detail")
@@ -5030,6 +5318,11 @@ def eleven_problem(code, body):
     except (ValueError, AttributeError):
         msg = body
     msg = str(msg).strip()[:240]
+    perm = re.search(r"missing the permission (\w+)", msg)
+    if perm:
+        name = ELEVEN_PERMS.get(perm.group(1), perm.group(1))
+        return ("Your ElevenLabs API key may not use %s. On elevenlabs.io › Developers › API Keys, edit the key "
+                "and set %s to Access." % (name, name))
     if code == 401:
         return "ElevenLabs did not take the API key (%s). %s" % (msg, ELEVEN_SETUP)
     return "ElevenLabs said %s: %s" % (code, msg)
@@ -5067,7 +5360,12 @@ def eleven_http(method, path, body=None, files=None, query=None, raw=False):
         with urllib.request.urlopen(req, timeout=600) as r:
             out = r.read()
     except urllib.error.HTTPError as e:
-        raise ValueError(eleven_problem(e.code, e.read().decode(errors="replace")))
+        text = e.read().decode(errors="replace")
+        try:
+            detail = json.loads(text).get("detail")
+        except (ValueError, AttributeError):
+            detail = None
+        raise ElevenError(eleven_problem(e.code, text), e.code, detail)
     except urllib.error.URLError as e:
         raise ValueError("ElevenLabs did not answer: %s" % e.reason)
     return out if raw else json.loads(out or b"{}")
@@ -5567,7 +5865,7 @@ def job_log_max():
 def spawn_detached(argv):
     """Start `takes_mcp.py <argv>` so its parent is launchd at once: the chat's kill of its own
     process tree (ClaudeChat.end walks pgrep -P) cannot reach it. Returns the runner's pid."""
-    p = subprocess.Popen([sys.executable, os.path.abspath(__file__), "--detach"] + [str(x) for x in argv],
+    p = subprocess.Popen(self_argv(["--detach"] + [str(x) for x in argv]),
                          stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                          start_new_session=True)
     line = p.stdout.readline()
@@ -5588,7 +5886,7 @@ def detach_exec(argv):
         os._exit(0)
     null = os.open(os.devnull, os.O_RDWR)
     os.dup2(null, 1)
-    os.execv(sys.executable, [sys.executable, os.path.abspath(__file__)] + argv)
+    os.execv(sys.executable, self_argv(argv))
 
 
 def job_lock(path):
@@ -6090,6 +6388,10 @@ def job_env(s=None, job_id=None):
     """The command's environment: no variables of a Claude that started the chat, Homebrew first."""
     env = {k: v for k, v in os.environ.items() if not k.startswith(("CLAUDECODE", "CLAUDE_CODE_"))}
     env["PATH"] = "/opt/homebrew/bin:/usr/local/bin" + (":" + env["PATH"] if env.get("PATH") else "")
+    # Takes puts ffmpeg and the Raea engine there (2026-11-05): a recipe step finds `raea` there too.
+    local = os.path.expanduser("~/.local/bin")
+    if local not in env["PATH"].split(os.pathsep):
+        env["PATH"] += os.pathsep + local
     if job_id:
         env["TAKES_JOB_ID"] = job_id
     if s:
@@ -6329,6 +6631,28 @@ def hf_save_job(s, job):
     return p
 
 
+def claim_clip(s, name, ext=".mp4"):
+    """The next free <name>-vN for a Higgsfield or Replicate job, as (job id, file). generated/ has the clip only
+    when it lands, so the job file is made with O_EXCL: two calls before the first clip lands get two numbers.
+    What an older job with this id left (told, stop, lock) goes, or the new one would read as told or lost."""
+    have = versions_in(os.path.join(s, GENERATED_DIR), name)
+    n = (have[-1] if have else 0) + 1
+    os.makedirs(hf_jobs_dir(s), exist_ok=True)
+    while True:
+        job_id = "%s-v%d" % (name, n)
+        try:
+            os.close(os.open(job_path(s, job_id, ".json", True), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644))
+            break
+        except FileExistsError:
+            n += 1
+    for left in (".told", ".stop", ".lock"):
+        try:
+            os.remove(job_path(s, job_id, left, True))
+        except OSError:
+            pass
+    return job_id, os.path.join(GENERATED_DIR, job_id + ext)
+
+
 def put_clip(x, f):
     """A new clip on a shot: it shows, and the one it replaces stays as a variant (2026-10-09)."""
     v = list(x.get("variants") or [])
@@ -6342,10 +6666,7 @@ def put_clip(x, f):
 
 def edit_shot(s, shot_id, fn):
     """Change one shot under a lock, so a runner and the sketch writer do not drop each other's change."""
-    import fcntl
-    os.makedirs(os.path.join(s, STORYBOARD_DIR), exist_ok=True)
-    with open(os.path.join(s, STORYBOARD_DIR, ".edit"), "w") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+    with storyboard_lock(s):
         d = read_storyboard(s)
         for x in d["shots"]:
             if x.get("id") == shot_id:
@@ -6456,6 +6777,11 @@ def t_higgsfield(a):
     # 2026-10-25 (alter): several references, e.g. a target frame then the product alone, in @image order.
     for ref in a.get("images") or []:
         args += ["--image", media(ref)]
+    # 2026-11-09 (takes-ai-video): a voice line made first (voiceover) drives the voice and the lips, so one
+    # character keeps one voice across shots. Seedance takes sound only as a reference.
+    audio = media(a.get("audio"))
+    if audio:
+        args += ["--audio", audio]
     ratio = (a.get("aspect_ratio") or "").strip()
     if not ratio and shot:
         ratio = board.get("format") or DEFAULT_FORMAT
@@ -6467,6 +6793,8 @@ def t_higgsfield(a):
     if duration and workflow != "reframe":
         args += ["--duration", str(int(round(float(duration))))]
     params = dict(a.get("params") or {})
+    if audio and not workflow and "mode" not in params:
+        params["mode"] = "omni_reference"
     # 2026-10-25 (alter): an edit keeps the take's own sound. Seedance's made-up track has murmured voices in it,
     # and the motion is the take's, so the take's sound fits (put back with the alter skill's finish script).
     if params.get("mode") == "video_edit" and "generate_audio" not in params:
@@ -6478,12 +6806,8 @@ def t_higgsfield(a):
     args += ["--wait", "--wait-timeout", "30m", "--json"]
 
     name = slug(a.get("name") or (shot and "shot-%s" % shot["id"]) or " ".join(prompt.split()[:5]) or "clip") or "clip"
-    d = os.path.join(s, GENERATED_DIR)
-    os.makedirs(d, exist_ok=True)
-    have = versions_in(d, name)
-    n = (have[-1] if have else 0) + 1
-    rel = os.path.join(GENERATED_DIR, "%s-v%d%s" % (name, n, ".mp4" if kind == "video" else ".png"))
-    job = {"id": "%s-v%d" % (name, n), "file": rel, "kind": kind, "args": args, "shot": shot and shot["id"],
+    job_id, rel = claim_clip(s, name, ".mp4" if kind == "video" else ".png")
+    job = {"id": job_id, "file": rel, "kind": kind, "args": args, "shot": shot and shot["id"],
            "status": "running", "started": now_iso(), "from_chat": from_chat()}
     if params.get("draft") in (True, "true"):
         job["draft"] = True
@@ -6551,11 +6875,8 @@ def hf_finalise(s, a):
         return hf_cost(args)
     args += ["--wait", "--wait-timeout", "30m", "--json"]
     base = re.sub(r"-v\d+$", "", name) + "-final"
-    d = os.path.join(s, GENERATED_DIR)
-    have = versions_in(d, base)
-    n = (have[-1] if have else 0) + 1
-    rel = os.path.join(GENERATED_DIR, "%s-v%d.mp4" % (base, n))
-    job = {"id": "%s-v%d" % (base, n), "file": rel, "kind": "video", "args": args, "shot": None, "status": "running",
+    job_id, rel = claim_clip(s, base)
+    job = {"id": job_id, "file": rel, "kind": "video", "args": args, "shot": None, "status": "running",
            "started": now_iso(), "from_chat": from_chat(), "from_draft": name}
     job["label"] = (hf_label(job) + " final of " + name)[:60]
     start_higgsfield(s, hf_save_job(s, job))
@@ -6759,9 +7080,26 @@ def rep_http(method, path, body=None, upload=None):
         with urllib.request.urlopen(req, timeout=600) as r:
             return json.loads(r.read() or b"{}")
     except urllib.error.HTTPError as e:
-        raise ValueError(rep_problem(e.code, e.read().decode(errors="replace")))
+        why = rep_problem(e.code, e.read().decode(errors="replace"))
+        raise (RepBlip if e.code >= 500 or e.code == 429 else ValueError)(why)
     except urllib.error.URLError as e:
-        raise ValueError("Replicate did not answer: %s" % e.reason)
+        raise RepBlip("Replicate did not answer: %s" % e.reason)
+
+
+class RepBlip(ValueError):
+    """Replicate did not answer, or answered 5xx or 429: asking again later may work."""
+
+
+REP_POLL_RETRY = 10 * 60  # a running prediction is polled again for this long after a blip (or the Mac's sleep)
+REP_TIMEOUT = 40 * 60  # a prediction still running after this is cancelled
+
+
+def rep_cancel(p):
+    """Best effort: stop a prediction Takes gave up on, so Replicate stops billing it."""
+    try:
+        rep_http("POST", (p.get("urls") or {}).get("cancel") or "/predictions/%s/cancel" % p["id"])
+    except Exception:
+        pass
 
 
 def rep_config_path():
@@ -7244,12 +7582,8 @@ def t_replicate(a):
                 if not str(ref).startswith(("http://", "https://", "data:")):
                     files[str(ref)] = rep_local(s, ref, shot)
     name = slug(a.get("name") or (shot and "shot-%s" % shot["id"]) or " ".join((a.get("prompt") or "").split()[:5]) or "clip") or "clip"
-    d = os.path.join(s, GENERATED_DIR)
-    os.makedirs(d, exist_ok=True)
-    have = versions_in(d, name)
-    n = (have[-1] if have else 0) + 1
-    rel = os.path.join(GENERATED_DIR, "%s-v%d.mp4" % (name, n))
-    job = {"id": "%s-v%d" % (name, n), "provider": "replicate", "file": rel, "kind": "video", "model": model,
+    job_id, rel = claim_clip(s, name)
+    job = {"id": job_id, "provider": "replicate", "file": rel, "kind": "video", "model": model,
            "version": info["version"] if ":" in model else None, "input": inp, "files": files,
            "shot": shot and shot["id"], "status": "running", "started": now_iso(),
            "label": clip_label(rep_label(model), shot), "from_chat": from_chat()}
@@ -7331,12 +7665,24 @@ def replicate_run(s, job_path, poll=5):
             p = rep_http("POST", "/models/%s/predictions" % job["model"], {"input": inp})
         job["prediction"] = p.get("id")
         hf_save_job(s, job)
-        deadline = time.time() + 40 * 60
-        while p.get("status") not in ("succeeded", "failed", "canceled"):
-            if time.time() > deadline:
-                raise ValueError("Replicate did not finish in 40 min (prediction %s)." % p.get("id"))
-            time.sleep(poll)
-            p = rep_http("GET", (p.get("urls") or {}).get("get") or "/predictions/" + p["id"])
+        deadline, blip, ended = time.time() + REP_TIMEOUT, None, ("succeeded", "failed", "canceled")
+        try:
+            while p.get("status") not in ended:
+                time.sleep(poll)
+                try:
+                    p, blip = rep_http("GET", (p.get("urls") or {}).get("get") or "/predictions/" + p["id"]), None
+                except (RepBlip, OSError):
+                    # The prediction runs on (and bills) through a network blip: ask again for a while.
+                    blip = blip or time.time()
+                    if time.time() - blip >= REP_POLL_RETRY:
+                        raise
+                else:
+                    # Only an answer ends it on time: after the Mac's sleep the first ask often fails, and the clip may be done.
+                    if p.get("status") not in ended and time.time() > deadline:
+                        raise ValueError("Replicate did not finish in %d min (prediction %s)." % (REP_TIMEOUT // 60, p.get("id")))
+        except Exception:
+            rep_cancel(p)
+            raise
         if p["status"] != "succeeded":
             raise ValueError("Replicate: %s" % (p.get("error") or p["status"]))
         url = rep_output_url(p.get("output"))
@@ -7366,6 +7712,8 @@ def replicate_run(s, job_path, poll=5):
             edit_shot(s, job["shot"], failed)
     hf_save_job(s, job)
     job_unlock(lock, job_path[:-5] + ".lock")
+
+
 
 
 # ---------- the post (same format as Sources/Takes/Post.swift) ----------
@@ -8430,9 +8778,10 @@ def t_rename_take(a):
         new = take_file(n, sl, t["kind"], os.path.splitext(t["file"])[1] or ".mov")
         if new != t["file"] and os.path.exists(os.path.join(s, t["file"])):
             os.rename(os.path.join(s, t["file"]), os.path.join(s, new))
-            words = os.path.join(s, os.path.splitext(t["file"])[0] + ".words.json")
-            if os.path.exists(words):  # the transcript keeps the video's name
-                os.rename(words, os.path.join(s, os.path.splitext(new)[0] + ".words.json"))
+            for ext in (".words.json", ".events.json"):  # the transcript and the cursor log keep the video's name
+                side = os.path.join(s, os.path.splitext(t["file"])[0] + ext)
+                if os.path.exists(side):
+                    os.rename(side, os.path.join(s, os.path.splitext(new)[0] + ext))
             t["file"] = new
         if name:
             t["name"] = name
@@ -8972,6 +9321,18 @@ def t_update_idea(a):
 
 
 
+
+
+# ---------- Sound FX (earshot, 2026-10-19; public 2026-10-22) ----------
+# Sound effects made in code on demand: earshot (github.com/Leonxlnx/earshot, MIT) renders 215 bank
+# sounds by id with exact length, peak time and pitch, and its forge designs new ones from a recipe and
+# a description, scored against reference recordings. It runs from its own venv, so it is a local
+# install, not part of Takes: Plugins › Sound FX installs the bank (about 300 MB, no models) into
+# ~/Library/Application Support/Takes/earshot, and sound design (torch, ~1.1 GB of models) on top.
+# The same card turns it on and off (the app's pluginsRemoved list); off, the tools are not listed
+# and refuse. SoundFX.swift looks in the same places.
+SFX_DIR = os.path.expanduser("~/Library/Application Support/Takes/earshot")
+SFX_PYS = [os.path.join(SFX_DIR, ".venv/bin/python")]
 SFX_TOOLS = {"sfx_sounds", "make_sfx", "design_sfx"}
 SFX_RECIPES = {}  # recipe -> its default target, read once from earshot forge --list
 
@@ -9002,9 +9363,22 @@ def sfx_need():
         raise ValueError("Sound FX is off in Takes (Plugins › Sound FX). Ask the user to turn it on.")
 
 
+def sfx_takes_bank():
+    """Takes' own sounds (assets/sfx/takes-bank.json, earshot recipes with Takes' settings), loaded on top of
+    earshot's bank through EARSHOT_BANK: the app's Resources/SFX next to this file, else the repo's assets/sfx."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    for d in (os.path.join(here, "SFX"), os.path.join(here, "..", "assets", "sfx")):
+        f = os.path.normpath(os.path.join(d, "takes-bank.json"))
+        if os.path.exists(f):
+            return f
+    return None
+
+
 def sfx_env():
     env = dict(os.environ, EARSHOT_OFFLINE="1", HF_HUB_OFFLINE="1", TRANSFORMERS_OFFLINE="1",
                PYTHONWARNINGS="ignore")
+    if "EARSHOT_BANK" not in env and sfx_takes_bank():
+        env["EARSHOT_BANK"] = sfx_takes_bank()
     if sfx_python().startswith(SFX_DIR + os.sep):
         env.setdefault("EARSHOT_HOME", os.path.join(SFX_DIR, "home"))  # its model cache, where the card fetched it
     return env
@@ -9032,9 +9406,24 @@ def sfx_run(args, timeout=120):
 SFX_BANK = []
 
 
+def sfx_recordings():
+    """Takes' real recordings (assets/sfx/recordings.json beside takes-bank.json): CC0 sounds from Freesound
+    that the user picked over the bank's clicks and typing (2026-11-08). Ids start with rec/."""
+    bank = sfx_takes_bank()
+    f = os.path.join(os.path.dirname(bank), "recordings.json") if bank else None
+    if not f or not os.path.exists(f):
+        return []
+    rows = []
+    for x in json.load(open(f))["sounds"]:
+        rows.append(dict(x, type="recording", path=os.path.join(os.path.dirname(f), x["file"]), knobs={"dur": "cut"},
+                         notes="%s (%s by %s, %s)" % (x["notes"], x["source"]["title"], x["source"]["author"],
+                                                      x["source"]["license"])))
+    return rows
+
+
 def sfx_bank():
     if not SFX_BANK:
-        SFX_BANK.extend(sfx_run(["sfx", "list"])["sounds"])
+        SFX_BANK.extend(sfx_recordings() + sfx_run(["sfx", "list"])["sounds"])
     return SFX_BANK
 
 
@@ -9053,9 +9442,18 @@ def sfx_row(x):
     pitch = (x.get("knobs") or {}).get("pitch")
     return {"id": x["id"], "seconds": round(x["dur_s"], 3), "peak_s": round(x["peak_s"], 3),
             "kinds": x.get("kinds") or [], "what": x.get("notes") or "",
-            "from": "a real recording, as code" if x.get("type") == "fit" else "made in code",
+            "from": {"fit": "a real recording, as code", "recording": "a real recording"}.get(x.get("type"), "made in code"),
             "pitch": pitch.get("note") if isinstance(pitch, dict) else None,
             "apex": bool((x.get("knobs") or {}).get("apex"))}
+
+
+# Screen recordings (2026-10-30): a viewer knows a mouse click, and the bank's clicks and swipes made in
+# code did not sound like one ("none sound like clicks ppl would recognize"). The effects carry real ones.
+# 2026-11-08: The user's picks for the defaults: the real click rec/click/mouse and typing_key/clicky per keystroke.
+SFX_SCREEN_NOTE = ("For a click use the real recording rec/click/mouse (or the click ring effect, list_effects "
+                   "click-ring, which carries its own). For typing, one typing_key/clicky take per keystroke "
+                   "(takes=3 and alternate them); for a run of typing under a shot, a rec/typing/ recording cut "
+                   "to length. For a camera box that changes layout use the real whooshes in list_effects layout-morph.")
 
 
 def t_sfx_sounds(a):
@@ -9069,7 +9467,8 @@ def t_sfx_sounds(a):
     return {"sounds": rows, "count": len(rows), "recipes": sfx_recipes(),
             "note": "make_sfx renders one by id in about a second (dur, apex, pitch, takes). design_sfx makes new "
                     "ones from a recipe and a description in a few minutes. 'a real recording, as code' sounds "
-                    "read as real; 'made in code' ones can sound synthetic: pick those only when that fits."}
+                    "read as real; 'made in code' ones can sound synthetic: pick those only when that fits.",
+            "screen": SFX_SCREEN_NOTE}
 
 
 def sfx_num(a, k, lo, hi):
@@ -9113,6 +9512,8 @@ def t_make_sfx(a):
     takes = int(a.get("takes") or 1)
     if not 1 <= takes <= 12:
         raise ValueError("takes is 1 to 12.")
+    if known[sound].get("type") == "recording":
+        return sfx_make_recording(s, known[sound], a)
     knobs = {"dur": sfx_num(a, "dur", 0.02, 10), "apex": sfx_num(a, "apex", 0, 10)}
     if a.get("pitch") not in (None, ""):
         knobs["pitch"] = str(a["pitch"])
@@ -9148,6 +9549,25 @@ def t_make_sfx(a):
     return {"sound": sound, "from": sfx_row(known[sound])["from"], "files": files,
             "note": "On the Assets tab. 48 kHz 24-bit, peak -1 dBFS. In render_edit put each in sfx with "
                     "at = the cut time minus its peak_s (a hit or click: minus onset_s), and gain_db."}
+
+
+def sfx_make_recording(s, x, a):
+    """A real recording into generated/: the file as it is, or cut to dur with a short fade. It has one take."""
+    if a.get("apex") is not None or a.get("pitch") not in (None, ""):
+        raise ValueError("%s is a real recording: it takes dur only (no apex, no pitch)." % x["id"])
+    dur = sfx_num(a, "dur", 0.02, x["dur_s"])
+    rel = next_generated(s, slug(a.get("name") or x["id"].replace("/", "-")) or "sfx", ".wav")
+    fade = [] if dur is None else ["-af", "afade=t=out:st=%.3f:d=%.3f" % (max(0, dur - min(0.08, dur / 3)),
+                                                                        min(0.08, dur / 3)), "-t", "%.3f" % dur]
+    ff("-i", x["path"], *fade, "-ar", "48000", "-c:a", "pcm_s24le", os.path.join(s, rel))
+    note_model(s, rel, "recording · %s (%s, %s)" % (x["id"], x["source"]["url"], x["source"]["license"]))
+    seconds = round(dur if dur is not None else x["dur_s"], 3)
+    return {"sound": x["id"], "from": "a real recording", "files": [
+        {"file": rel, "onset_s": x["onset_s"], "peak_s": min(x["peak_s"], seconds), "seconds": seconds,
+         "clean": True}],
+            "note": "On the Assets tab. A real recording (%s by %s, %s). In render_edit put it in sfx with at = the "
+                    "cut time minus its onset_s, and gain_db." % (x["source"]["title"], x["source"]["author"],
+                                                                  x["source"]["license"])}
 
 
 def sfx_ref(s, f):
@@ -9221,7 +9641,6 @@ def sfx_finish(work, name, recipe, first):
         shutil.copyfile(p, os.path.join(s, rel))
         note_model(s, rel, "earshot · designed %s" % recipe)
         print("%s <- %s" % (rel, os.path.basename(p)))
-# </private>
 
 
 # ---------- phone videos (AirDropped into Downloads) ----------
@@ -9527,7 +9946,7 @@ def song_title(name):
     return re.sub(r"^\d+_", "", os.path.splitext(os.path.basename(name))[0])
 
 
-def audio_tags(path):
+def audio_tags(path, prompt=False):
     for probe in ("ffprobe", "/opt/homebrew/bin/ffprobe", "/usr/local/bin/ffprobe"):
         try:
             out = subprocess.run([probe, "-v", "error", "-show_entries", "format=duration:format_tags",
@@ -9538,15 +9957,104 @@ def audio_tags(path):
             for key, name in (("artist", "artist"), ("genre", "genre"), ("tbpm", "bpm"), ("bpm", "bpm")):
                 if tags.get(key):
                     info[name] = int(float(tags[key])) if name == "bpm" else tags[key]
+            if prompt and tags.get("comment"):
+                info["prompt"] = tags["comment"]  # make_music keeps its prompt there
             return info
         except (OSError, ValueError, subprocess.TimeoutExpired):
             continue
     return {}
 
 
+# Tags (2026-11-08): <audio>/.tags.json maps a file's path inside audio/ to its tags, e.g.
+# {"Made/Edu Marimba Data v1.mp3": ["Education", "Calm"]}. Same file as the app's SoundTags
+# (Sources/Takes/Sounds.swift). A tag keeps the case it was first typed in; two tags that differ
+# only in case are one tag.
+TAGS_FILE = ".tags.json"
+TAG_MAX = 32
+
+
+def sound_tags_path():
+    return os.path.join(audio_dir(), TAGS_FILE)
+
+
+def load_sound_tags(strict=False):
+    p = sound_tags_path()
+    if not os.path.exists(p):
+        return {}
+    try:
+        with open(p) as f:
+            d = json.load(f)
+        if not isinstance(d, dict):
+            raise ValueError("not an object")
+        return {k: [x for x in v if isinstance(x, str)] for k, v in d.items() if isinstance(v, list)}
+    except (OSError, ValueError) as e:
+        if strict:  # never write a fresh file over one we cannot read
+            raise ValueError("%s does not parse (%s): fix or remove it first." % (p, e))
+        return {}
+
+
+def clean_tag(t):
+    return re.sub(r"\s+", " ", str(t or "")).strip()[:TAG_MAX].strip()
+
+
+def merge_tags(have, add=(), remove=()):
+    """have + add - remove, case-insensitive, in order, keeping the first spelling."""
+    gone = {clean_tag(x).lower() for x in remove}
+    out, seen = [], set()
+    for x in list(have) + [clean_tag(x) for x in add]:
+        k = x.lower()
+        if x and k not in seen and k not in gone:
+            seen.add(k)
+            out.append(x)
+    return out
+
+
+def library_spelling(tags, all_tags):
+    """A new tag takes the spelling the library already uses ('education' -> 'Education')."""
+    known = {x.lower(): x for v in all_tags.values() for x in v}
+    return [known.get(clean_tag(x).lower(), clean_tag(x)) for x in tags]
+
+
+def save_sound_tags(d):
+    os.makedirs(audio_dir(), exist_ok=True)
+    write_json(sound_tags_path(), {k: v for k, v in sorted(d.items()) if v})
+
+
+def t_tag_sounds(a):
+    files = [f for f in (a.get("files") or []) if f]
+    if not files:
+        raise ValueError("Pass files: the 'file' values from list_music.")
+    add, remove = a.get("add") or [], a.get("remove") or []
+    if a.get("tags") is None and not add and not remove:
+        raise ValueError("Pass add, remove, or tags (the whole list).")
+    d, base = load_sound_tags(strict=True), audio_dir()
+    out = {}
+    for f in files:
+        rel = os.path.normpath(f[len(LIB_REF + "audio/"):] if f.startswith(LIB_REF + "audio/") else f)
+        if rel.startswith("..") or os.path.isabs(rel) or not os.path.isfile(os.path.join(base, rel)):
+            raise ValueError("No sound %r in %s: use the file from list_music." % (f, base))
+        start = [] if a.get("tags") is not None else d.get(rel, [])
+        d[rel] = merge_tags(start, library_spelling(list(a.get("tags") or []) + list(add), d), remove)
+        out[rel] = d[rel]
+    save_sound_tags(d)
+    return {"tags": out, "all_tags": tag_counts(d), "note": "The Sound pane shows them under each sound and as filters."}
+
+
+def tag_counts(d):
+    counts = {}
+    for v in d.values():
+        for x in v:
+            k = x.lower()
+            name, n = counts.get(k, (x, 0))
+            counts[k] = (name, n + 1)
+    return {name: n for name, n in sorted(counts.values(), key=lambda c: (-c[1], c[0].lower()))}
+
+
 def t_list_music(a):
     copied = sync_audio()
     d, q, group = audio_dir(), (a.get("query") or "").lower(), a.get("group")
+    want = clean_tag(a.get("tag")).lower()
+    tagged = load_sound_tags()
     out = []
     for dirpath, dirs, files in os.walk(d):
         dirs[:] = [x for x in dirs if not x.startswith(".")]
@@ -9555,11 +10063,105 @@ def t_list_music(a):
                 continue
             rel = os.path.relpath(os.path.join(dirpath, f), d)
             g = rel.split(os.sep)[0] if os.sep in rel else ""
-            if (group and g.lower() != group.lower()) or (q and q not in f.lower()):
+            tags = tagged.get(rel, [])
+            low = [x.lower() for x in tags]
+            if (group and g.lower() != group.lower()) or (want and want not in low) \
+                    or (q and q not in f.lower() and not any(q in x for x in low)):
                 continue
-            out.append(dict({"file": rel, "group": g, "title": song_title(f), "path": os.path.join(d, rel)},
-                            **audio_tags(os.path.join(d, rel))))
-    return {"library": d, "source": sound_source(), "copied_new": copied, "sounds": out}
+            item = {"file": rel, "group": g, "title": song_title(f), "path": os.path.join(d, rel)}
+            if tags:
+                item["tags"] = tags
+            out.append(dict(item, **audio_tags(os.path.join(d, rel), prompt=g == MUSIC_GROUP)))
+    return {"library": d, "source": sound_source(), "copied_new": copied, "tags": tag_counts(tagged), "sounds": out}
+
+
+# Music made to order (2026-11-03): ElevenLabs Music writes a new song from a prompt into
+# _library/audio/Made/, so it shows on the Sound pane's Made tab and goes into an edit like any song.
+# Uses the Voices key; the key needs Music Generation. The prompt is kept in the file's comment tag.
+MUSIC_GROUP = "Made"
+MUSIC_MODEL = "music_v1"
+MUSIC_SECONDS = (10, 300)   # what ElevenLabs makes in one call
+MUSIC_VARIANTS = 3
+MUSIC_CREDITS_PER_MIN = 900  # ElevenLabs' list price; measured about 750 (2026-11-03)
+
+
+def made_name(text):
+    """'moonlight piano, over soft D&B' -> 'Moonlight piano over soft D&B': a title the Sound pane shows as is."""
+    words = re.sub(r"[^\w&' -]+", " ", unicodedata.normalize("NFC", text)).split()[:6]
+    t = " ".join(words)[:48].strip()
+    return (t[:1].upper() + t[1:]) if t else "Song"
+
+
+def made_path(name):
+    """Claim <audio>/Made/<name> vN.mp3 (the next free N), so two runs never write one file."""
+    d = os.path.join(audio_dir(), MUSIC_GROUP)
+    os.makedirs(d, exist_ok=True)
+    n = 1
+    while True:
+        p = os.path.join(d, "%s v%d.mp3" % (name, n))
+        try:
+            os.close(os.open(p, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644))
+            return p
+        except FileExistsError:
+            n += 1
+
+
+def music_call(prompt, ms, instrumental):
+    body = {"prompt": prompt, "music_length_ms": ms, "model_id": MUSIC_MODEL, "force_instrumental": instrumental}
+    return eleven_audio("/v1/music", body)
+
+
+def t_make_music(a):
+    prompt = (a.get("prompt") or "").strip()
+    if not prompt:
+        raise ValueError("Describe the music: style, instruments, tempo, mood, how it starts and ends.")
+    lo, hi = MUSIC_SECONDS
+    sec = max(lo, min(hi, float(a.get("seconds") or 45)))
+    n = max(1, min(MUSIC_VARIANTS, int(a.get("variants") or 1)))
+    instrumental = a.get("instrumental", True) is not False
+    name = made_name(a.get("name") or " ".join(prompt.split()[:5]))
+    used, changed = prompt, None
+    try:
+        first = music_call(used, int(sec * 1000), instrumental)
+    except ElevenError as e:
+        # A prompt that names a song or an artist: ElevenLabs suggests one without it. Use that once.
+        hint = (e.detail.get("data") or {}).get("prompt_suggestion") if isinstance(e.detail.get("data"), dict) else None
+        if not hint:
+            raise
+        used, changed = hint, "ElevenLabs refused the prompt (it names a song or an artist), so Takes used its suggestion."
+        first = music_call(used, int(sec * 1000), instrumental)
+    clips = [first]
+    if n > 1:
+        with concurrent.futures.ThreadPoolExecutor(n - 1) as ex:
+            clips += list(ex.map(lambda _: music_call(used, int(sec * 1000), instrumental), range(n - 1)))
+    files = []
+    for data in clips:
+        p = made_path(name)
+        with tempfile.TemporaryDirectory() as tmp:
+            raw = os.path.join(tmp, "raw.mp3")
+            with open(raw, "wb") as f:
+                f.write(data)
+            try:
+                ff("-i", raw, "-map", "0:a", "-c", "copy", "-metadata", "artist=ElevenLabs Music",
+                   "-metadata", "genre=Made", "-metadata", "comment=" + used[:900], "-id3v2_version", "3", p)
+            except ValueError:
+                shutil.copyfile(raw, p)  # no ffmpeg: the song without tags
+        rel = os.path.relpath(p, audio_dir())
+        files.append(dict({"file": rel, "ref": LIB_REF + "audio/" + rel, "title": song_title(p)}, **audio_tags(p)))
+    if a.get("tags"):
+        tagged = t_tag_sounds({"files": [f["file"] for f in files], "add": a["tags"]})["tags"]
+        for f in files:
+            f["tags"] = tagged.get(f["file"], [])
+    out = {"files": files, "prompt": used, "seconds": sec,
+           "credits": "about %d" % round(MUSIC_CREDITS_PER_MIN * sec / 60.0 * n),
+           "note": "On the Sound pane's Made tab. Put one in an edit with render_edit music "
+                   "[{file: <ref>}]; one song per ask unless the user wants more."}
+    if changed:
+        out["changed_prompt"] = changed
+    acct = eleven_account()
+    if "characters_left" in acct:
+        out["credits_left"] = acct["characters_left"]
+    return out
 
 
 # ---------- B-roll ----------
@@ -9729,7 +10331,7 @@ def t_trash_takes(a):
         numbers = {int(x) for x in a.get("takes", [])}
     doomed = [t for t in meta["takes"] if t["number"] in numbers]
     files = [os.path.join(s, t["file"]) for t in doomed]
-    files += [os.path.splitext(f)[0] + ".words.json" for f in files]
+    files += [os.path.splitext(f)[0] + ext for f in files for ext in (".words.json", ".events.json")]
     trash([f for f in files if os.path.exists(f)])
     meta["takes"] = [t for t in meta["takes"] if t["number"] not in numbers]
     write_meta(s, meta)
@@ -10114,6 +10716,8 @@ def t_open_in_app(a):
     path = ref if os.path.isabs(ref) else os.path.join(root(), ref)
     open_in_app(os.path.normpath(path))
     return {"opened": path}
+
+
 
 
 # ---------- Saving to the b-roll library ----------
@@ -11331,6 +11935,7 @@ def cut_run(req):
     mp4, wav = os.path.join(WORK_DIR, ".%s-v%d.part.mp4" % (name, n)), os.path.join(WORK_DIR, ".%s-v%d.part.wav" % (name, n))
     try:
         render_cut(segs, files, clocks, voices, mp4, wav)
+        pointer_pass(mp4, segs, files, clocks)
         os.replace(mp4, stem + ".mp4")
         os.replace(wav, stem + ".wav")
     finally:
@@ -11814,13 +12419,19 @@ def short_name(text):
 # name              agent                required on a first recipe; from base after
 # cut               agent                required: [{take, in, out, kind?}] (rough_cut's cut), whole frames
 # frame             agent                {"shape": "source"}: the first take's size and fps; crop: none
-# over              agent                []: picture layers {file, at, in?, out?, alpha?}; their sound is never used
+#                                        ({x, y, w, h, follow_face?})
+# over              agent                []: picture layers {file, at, in?, out?, alpha?, hide_in_silence?};
+#                                        their sound is never used
 # music, sfx        agent                []: music {file, at 0, in 0, out?, gain_db -18, duck_db 8, fade_out 1.5},
 #                                        sfx {file, at, gain_db -10}
 # style             render_edit          the session's style, params {}
 # steps             agent                []: [{run: [argv], cwd: _edit/<name>, makes: [files]}]
 # cover             agent                from the base; null takes it off: {image, seconds 0.1}
 # loudness          agent (LUFS)         null = the voice's own setting: normal -14, quiet -18
+# pointer           agent                {}: screen takes whose video left the pointer out get it drawn where it
+#                                        was; {smooth?, hide_idle?, size?, look?, hot?} change how (see "the pointer")
+# zoom              agent                {}: none; {auto?, level?, follow?, spans?} zooms into the screen (see "the zoom")
+# keys              agent                false: true shows the shortcuts screen takes logged, as key badges
 # takes, voice, inputs, parent, made, by, host, commands, render_id, job, started, src, src_skipped,
 # edit, checks, length_s, rendered, mix (the loudness it reached): Takes. note, fixed, accepted: publish_edit.
 # Times in over, music and sfx are seconds of the cut: a cover adds its seconds before them by itself.
@@ -11835,13 +12446,14 @@ RENDER_KEEP_DAYS = 7
 FREEZE_MAX = 1 << 30
 FREEZE_SKIP = {".versions", "node_modules", ".cache"}
 SHAPES = {"9:16": (1080, 1920), "16:9": (1920, 1080), "1:1": (1080, 1080), "4:5": (1080, 1350)}
-AGENT_FIELDS = ("name", "cut", "frame", "over", "music", "sfx", "style", "steps", "cover", "loudness")
+AGENT_FIELDS = ("name", "cut", "frame", "over", "music", "sfx", "style", "steps", "cover", "loudness", "pointer", "keys",
+                "zoom")
 MUSIC_DEFAULTS = {"at": 0.0, "in": 0.0, "gain_db": -18, "duck_db": 8, "fade_out": 1.5}
 SFX_DEFAULTS = {"gain_db": -10}
 MUSIC_LUFS = -14.0
 TRUE_PEAK = -1.0
 LOUDNESS_TARGET = {"normal": -14.0, "quiet": -18.0}
-RENDER_STAGES = {"cut": "Cutting the takes", "steps": "Making the graphics", "picture": "Making the picture",
+RENDER_STAGES = {"cut": "Cutting the takes", "face": "Finding the face", "steps": "Making the graphics", "picture": "Making the picture",
                  "sound": "Mixing the sound", "check": "Checking the edit"}
 RENDER_DONE = "Ready. Takes checks it before it saves it."
 def prores():
@@ -12141,14 +12753,16 @@ def norm_recipe(s, r):
     if frame.get("crop"):
         c = frame["crop"]
         if not isinstance(c, dict) or not all(k in c for k in ("x", "y", "w", "h")):
-            raise ValueError("frame.crop is {x, y, w, h} in pixels of the take.")
+            raise ValueError("frame.crop is {x, y, w, h, follow_face?} in pixels of the take.")
         f["crop"] = {k: int(num(c[k], "frame.crop." + k, 0, 16384)) for k in ("x", "y", "w", "h")}
+        if c.get("follow_face"):
+            f["crop"]["follow_face"] = True
     out["frame"] = f
     over = []
     for i, o in enumerate(r.get("over") or []):
         what = "over[%d]" % i
         if not isinstance(o, dict):
-            raise ValueError("%s is {file, at, in?, out?, alpha?}." % what)
+            raise ValueError("%s is {file, at, in?, out?, alpha?, hide_in_silence?}." % what)
         e = {"file": ref_of(s, o.get("file"), what, later=os.path.join(EDIT_DIR, name)),
              "at": num(o.get("at", 0), what + ".at", 0)}
         for k in ("in", "out"):
@@ -12158,8 +12772,32 @@ def norm_recipe(s, r):
             raise ValueError("%s.out must be after its in." % what)
         if o.get("alpha"):
             e["alpha"] = True
+        if o.get("hide_in_silence"):
+            e["hide_in_silence"] = True
         over.append(e)
     out["over"] = over
+    pt = r.get("pointer") or {}
+    if not isinstance(pt, dict) or set(pt) - {"smooth", "hide_idle", "size", "look", "hot"}:
+        raise ValueError("pointer is {smooth?, hide_idle?, size?, look?, hot?}.")
+    out["pointer"] = {k: True for k in ("smooth", "hide_idle") if pt.get(k)}
+    if pt.get("size") is not None and float(num(pt["size"], "pointer.size", 0.5, 4)) != 1:
+        out["pointer"]["size"] = num(pt["size"], "pointer.size", 0.5, 4)
+    look = pt.get("look") or "system"
+    if look not in POINTER_LOOKS:
+        if not str(look).lower().endswith(".png"):
+            raise ValueError("pointer.look is %s or a .png in the session or the library." % ", ".join(POINTER_LOOKS))
+        look = ref_of(s, look, "pointer.look")
+    if look != "system":
+        out["pointer"]["look"] = look
+    if pt.get("hot") is not None:
+        h = pt["hot"]
+        if not isinstance(h, list) or len(h) != 2:
+            raise ValueError("pointer.hot is [x, y]: the tip of the look's PNG, in its pixels.")
+        out["pointer"]["hot"] = [num(h[0], "pointer.hot x", 0, 4096), num(h[1], "pointer.hot y", 0, 4096)]
+    out["zoom"] = norm_zoom(r.get("zoom"), out["frame"])
+    if r.get("keys") not in (None, True, False):
+        raise ValueError("keys is true (show the logged shortcuts) or false.")
+    out["keys"] = bool(r.get("keys"))
     music = []
     for i, m in enumerate(r.get("music") or []):
         what = "music[%d]" % i
@@ -12342,14 +12980,1062 @@ def recipe_target(r):
 
 
 def picture_codec():
+    """The render's one lossy encode. VideoToolbox at constant quality on Apple silicon, as video_codec: a 32 s
+    1080x1920 render with two layers, 22 CPU-s and 2-4 s against 80 CPU-s and 6 s for libx264 fast, VMAF 82.7
+    against 82.6, the file +5% (2026-11-01). The encoder was 3/4 of the picture pass; the filters are the rest."""
+    if apple_silicon() and has_encoder("h264_videotoolbox"):
+        return ["-c:v", "h264_videotoolbox", "-q:v", "72"]
     if has_encoder("libx264"):
         # fast: the same size and VMAF (96.6) as medium on a 40 s take, 10% less CPU (2026-10-13).
         return ["-c:v", "libx264", "-crf", "18", "-preset", "fast"]
     return ["-c:v", "h264_videotoolbox", "-b:v", "20M"]
 
 
+def hand_encode():
+    """next_path's encode hint for an edit made with your own ffmpeg: in 30 days to 2026-11-01, 28 of 48
+    presets in hand edits were slow or veryslow, a few times the time of fast for no change you can see."""
+    return " ".join(picture_codec() + ["-pix_fmt", "yuv420p"])
+
+
 def fill_frame(w, h):
     return "scale=%d:%d:force_original_aspect_ratio=increase,crop=%d:%d,setsar=1" % (w, h, w, h)
+
+
+# Two looks for screen + camera edits (2026-10-30), each opt in: Takes uses them when the user asks or his
+# rules say so, never by default, since everyone grows their own style.
+# over[i].hide_in_silence: the layer (a camera bubble over the screen) fades out in a pause of HIDE_GAP s
+# or more and is back just before the next word. The pauses come from the edit's word times.
+# frame.crop.follow_face: the crop keeps its size (no zoom) and follows the face: it holds still while the
+# face stays near where it sits and pans there, eased, when it drifts. A new part of the cut may jump.
+HIDE_GAP = 1.5
+HIDE_FADE = 0.3
+HIDE_AFTER = 0.3   # the layer stays this long after the last word
+HIDE_BEFORE = 0.15  # and is back this long before the next word
+FOLLOW_EVERY = 0.5
+FOLLOW_SLACK = 0.06  # the share of the crop the face may drift before the crop follows
+FOLLOW_TAU = 0.35  # seconds of each of the two smoothings of a move
+
+
+def silence_shown(words, lo, hi):
+    """[(a, b)]: the parts of lo...hi (edit seconds) a hide_in_silence layer shows. It fades in from a (when a > lo)
+    and out to b (when b < hi). No words: shown the whole time, since a pause cannot be told from a gap in the
+    transcript."""
+    ws = sorted((float(w["start"]), float(w["end"])) for w in words or [] if w.get("end", 0) > w.get("start", 0))
+    if not ws:
+        return [(lo, hi)]
+    pauses = [(float("-inf"), ws[0][0])] + [(ws[i][1], ws[i + 1][0]) for i in range(len(ws) - 1)] + \
+        [(ws[-1][1], float("inf"))]
+    hides = []
+    for e, n in pauses:
+        if n - e < HIDE_GAP:
+            continue
+        a = lo if e == float("-inf") else e + HIDE_AFTER + HIDE_FADE
+        b = hi if n == float("inf") else n - HIDE_BEFORE - HIDE_FADE
+        a, b = max(a, lo), min(b, hi)
+        if b - a > 0.04:
+            hides.append((a, b))
+    shown, at = [], lo
+    for a, b in hides:
+        if a - at > 0.04:
+            shown.append((at, a))
+        at = max(at, b)
+    if hi - at > 0.04:
+        shown.append((at, hi))
+    return shown
+
+
+def follow_keys(samples, parts, crop, size):
+    """[(t, x, y)] keyframes (cut seconds, take pixels) of a crop of fixed size that keeps the face in its middle
+    across, at the height the recipe's crop puts it (30-60% down). samples: [(t, cx, cy)] face centres, cx None for no face.
+    parts: [(start, end, kind)] of the cut. Linear between keyframes, a key every FOLLOW_EVERY s while it moves."""
+    W, H = size
+    w, h = crop["w"], crop["h"]
+
+    def place(cx, cy, dy):
+        return (min(max(cx - w / 2.0, 0), max(W - w, 0)), min(max(cy - dy, 0), max(H - h, 0)))
+    keys = []
+    for p0, p1, kind in parts:
+        if keys and p0 - keys[-1][0] > 0.004:
+            keys.append((p0 - 0.002, keys[-1][1], keys[-1][2]))  # held to the cut, then a new part may jump
+        got = [(t, cx, cy) for t, cx, cy in samples if p0 <= t < p1 and cx is not None] if kind == "camera" else []
+        if not got:
+            keys.append((p0, crop["x"], crop["y"]))
+            continue
+        # A median of five samples (2.5 s): a blink of a wrong face or a hand does not move the crop.
+        med = []
+        for i, (t, _, _) in enumerate(got):
+            near = got[max(0, i - 2):i + 3]
+            med.append((t, sorted(c[1] for c in near)[len(near) // 2], sorted(c[2] for c in near)[len(near) // 2]))
+        # The face's height in the crop the recipe gave, kept between 30% and 60% of the crop: a face the
+        # recipe's crop missed goes a little above the middle.
+        dy = min(max(med[0][2] - crop["y"], 0.3 * h), 0.6 * h)
+        # The target holds while the face stays within FOLLOW_SLACK of it; two smoothings in a row ease each
+        # move in and out, so a slow drift becomes one calm pan and never a stop-and-go.
+        tx, ty = place(med[0][1], med[0][2], dy)
+        ax = bx = tx
+        ay = by = ty
+        k = 1 - math.exp(-FOLLOW_EVERY / FOLLOW_TAU)
+        keys.append((p0, tx, ty))
+        at = {t: (cx, cy) for t, cx, cy in med}
+        for t in [t for t, _, _ in samples if med[0][0] < t < p1]:
+            if t in at:
+                nx, ny = place(at[t][0], at[t][1], dy)
+                if abs(nx - tx) > FOLLOW_SLACK * w or abs(ny - ty) > FOLLOW_SLACK * h:
+                    tx, ty = nx, ny
+            ax, ay = ax + (tx - ax) * k, ay + (ty - ay) * k
+            bx, by = bx + (ax - bx) * k, by + (ay - by) * k
+            if abs(bx - tx) < 1 and abs(by - ty) < 1:
+                bx, by = ax, ay = tx, ty
+            keys.append((t, bx, by))
+    # A held stretch needs only its two ends.
+    return [q for n, q in enumerate(keys) if not (0 < n < len(keys) - 1 and q[1:] == keys[n - 1][1:] == keys[n + 1][1:])]
+
+
+def piecewise(pieces, var):
+    """An ffmpeg expression in var from [(start, expr)] (sorted): each expr from its start to the next one's, the
+    first also before it. A balanced tree of if(): ffmpeg refuses a sum of more than about 90 terms (2026-10-31)."""
+    def tree(a, b):
+        if b - a == 1:
+            return pieces[a][1]
+        m = (a + b) // 2
+        return "if(lt(%s,%s),%s,%s)" % (var, pieces[m][0], tree(a, m), tree(m, b))
+    return tree(0, len(pieces))
+
+
+def follow_expr(keys, i):
+    """The ffmpeg expression in t of coordinate i (1 = x, 2 = y) along keys: piecewise linear."""
+    pieces = []
+    for (t0, *a), (t1, *b) in zip(keys, keys[1:]):
+        v0, v1 = a[i - 1], b[i - 1]
+        if t1 - t0 < 1e-3:
+            continue
+        val = "%.1f" % v0 if abs(v1 - v0) < 0.05 else "(%.1f+(t-%.3f)*%.4f)" % (v0, t0, (v1 - v0) / (t1 - t0))
+        pieces.append(("%.3f" % t0, val))
+    pieces.append(("%.3f" % keys[-1][0], "%.1f" % keys[-1][i]))
+    return piecewise(pieces, "t")
+
+
+def crop_filter(c, keys=None):
+    """The crop of frame.crop: still, or along follow_keys."""
+    if not keys:
+        return "crop=%d:%d:%d:%d," % (c["w"], c["h"], c["x"], c["y"])
+    return "crop=w=%d:h=%d:x='%s':y='%s'," % (c["w"], c["h"], follow_expr(keys, 1), follow_expr(keys, 2))
+
+
+def face_track(path, size, length):
+    """[(t, cx, cy)] the biggest face's centre in take pixels every FOLLOW_EVERY s of the cut, cx None for none."""
+    tmp = tempfile.mkdtemp(prefix="takes-follow-")
+    try:
+        subprocess.run([need_ffmpeg(), "-v", "error", "-y", "-i", path, "-an", "-vf",
+                        "fps=%g,scale=640:-2" % (1.0 / FOLLOW_EVERY), os.path.join(tmp, "%06d.png")],
+                       capture_output=True, timeout=max(120, length * 2))
+        pngs = sorted(glob.glob(os.path.join(tmp, "*.png")))
+        boxes = {}
+        for i in range(0, len(pngs), 200):
+            got = face_boxes(pngs[i:i + 200])
+            if got is None:
+                raise RenderStop("follow_face needs takes-faces, which is not in Takes.app. Update Takes")
+            boxes.update(got)
+        out = []
+        for i, p in enumerate(pngs):
+            fs = boxes.get(p) or []
+            if fs:
+                b = max(fs, key=lambda b: b[2] * b[3])
+                out.append((i * FOLLOW_EVERY, (b[0] + b[2] / 2.0) * size[0], (b[1] + b[3] / 2.0) * size[1]))
+            else:
+                out.append((i * FOLLOW_EVERY, None, None))
+        return out
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def speech_spans(wav, lead=0.0, floor_db=-40):
+    """[{start, end}] (edit seconds) of the sound between silences in wav: the words of an edit without a
+    transcript (a cut of the screen file), for hide_in_silence."""
+    r = subprocess.run([need_ffmpeg(), "-nostdin", "-v", "info", "-i", wav, "-af",
+                        "silencedetect=noise=%ddB:d=0.4" % floor_db, "-f", "null", "-"],
+                       capture_output=True, text=True, timeout=600)
+    starts = [float(x) for x in re.findall(r"silence_start: (-?[\d.]+)", r.stderr)]
+    ends = [float(x) for x in re.findall(r"silence_end: ([\d.]+)", r.stderr)]
+    length = media_seconds(wav) or 0.0
+    out, at = [], 0.0
+    for i, a in enumerate(starts):
+        if a - at > 0.05:
+            out.append({"start": round(lead + at, 3), "end": round(lead + a, 3)})
+        at = ends[i] if i < len(ends) else length
+    if length - at > 0.05:
+        out.append({"start": round(lead + at, 3), "end": round(lead + length, 3)})
+    return out
+
+
+# ---------- the pointer (2026-10-30) ----------
+# Screen takes record without the pointer when Takes logs it (CursorLog.swift: "pointer": false in
+# take-NN-screen.events.json, with the system arrow as a PNG). render_edit draws it back on every part
+# of the edit that shows such a screen file: by default exactly where it was, so the edit looks like
+# the screen did. Two opt-in looks, recipe pointer {smooth, hide_idle}:
+#   smooth     an eased path (a centred average, so it never lags), exactly on the click near a click
+#              and during a drag
+#   hide_idle  fades out after POINTER_IDLE_S without a move or click, back on the next move
+# The pointer is one overlay per take, moved frame by frame with sendcmd (x, y, and its alpha).
+
+POINTER_IDLE_S = 2.0
+POINTER_FADE_S = 0.3
+POINTER_SMOOTH_S = 0.12
+POINTER_CLICK_S = 0.25
+POINTER_OFF = -10000
+
+
+def pointer_events(video):
+    """A screen file's cursor log when its video leaves the pointer out, else None (old takes: no change)."""
+    try:
+        with open(os.path.splitext(video)[0] + ".events.json") as f:
+            ev = json.load(f)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(ev, dict) or ev.get("pointer") is not False or not isinstance(ev.get("arrow"), dict) \
+            or not ev.get("moves") or not ev.get("size"):
+        return None
+    return ev
+
+
+def pointer_shapes(ev):
+    """The cursor looks of a log: "shapes" (2026-10-30: the arrow, an I-beam, a hand...), else the arrow."""
+    shapes = [x for x in ev.get("shapes") or [] if isinstance(x, dict) and x.get("png")]
+    return shapes or [ev["arrow"]]
+
+
+def pointer_track(ev, times, smooth=False, hide_idle=False):
+    """[(x, y, alpha, shape)] in pixels of the take at each take time (sorted). shape indexes pointer_shapes."""
+    import bisect
+    moves = ev["moves"]
+    mt = [m[0] for m in moves]
+    n_shapes = len(pointer_shapes(ev))
+
+    def shape_of(m):
+        s = int(m[3]) if len(m) > 3 else 0
+        return s if 0 <= s < n_shapes else 0
+
+    shapes = [shape_of(moves[max(0, bisect.bisect_right(mt, t) - 1)]) for t in times]
+
+    def at(t):
+        i = max(0, bisect.bisect_right(mt, t) - 1)
+        return moves[i][1], moves[i][2]
+
+    pts = [at(t) for t in times]
+    clicks = [c for c in ev.get("clicks") or [] if c.get("button") in ("left", "right", "other")]
+    if smooth and len(times) > 1:
+        # Held exactly where it was near a click and while a button is down (a drag).
+        downs = sorted(c["t"] for c in clicks if c.get("down"))
+        held, start = [], None
+        for c in sorted(clicks, key=lambda c: c["t"]):
+            if c.get("down") and start is None:
+                start = c["t"]
+            elif not c.get("down") and start is not None:
+                held.append((start, c["t"]))
+                start = None
+        if start is not None:
+            held.append((start, float("inf")))
+        # A Gaussian (sigma half of POINTER_SMOOTH_S): against the old box of +-POINTER_SMOOTH_S, 25-47% less
+        # jerk and 2-3 px closer to the real pointer (2026-11-02, a real and a hand-made cursor log).
+        sig = POINTER_SMOOTH_S / 2.0
+        out = []
+        for i, t in enumerate(times):
+            lo = bisect.bisect_left(times, t - 3 * sig)
+            hi = bisect.bisect_right(times, t + 3 * sig)
+            ws = [math.exp(-0.5 * ((times[j] - t) / sig) ** 2) for j in range(lo, hi)]
+            tw = sum(ws)
+            ax = sum(w * pts[j][0] for w, j in zip(ws, range(lo, hi))) / tw
+            ay = sum(w * pts[j][1] for w, j in zip(ws, range(lo, hi))) / tw
+            j = bisect.bisect_left(downs, t)
+            d = min([abs(t - downs[k]) for k in (j - 1, j) if 0 <= k < len(downs)] or [float("inf")])
+            if any(a <= t <= b for a, b in held):
+                d = 0.0
+            w = min(1.0, d / POINTER_CLICK_S)
+            x, y = pts[i]
+            out.append((x + (ax - x) * w, y + (ay - y) * w))
+        pts = out
+    alphas = [1.0] * len(times)
+    if hide_idle:
+        acts = sorted(mt + [c["t"] for c in clicks])
+        for i, t in enumerate(times):
+            j = bisect.bisect_right(acts, t) - 1
+            idle = t - acts[j] if j >= 0 else t
+            alphas[i] = 1.0 if idle < POINTER_IDLE_S else max(0.0, 1.0 - (idle - POINTER_IDLE_S) / POINTER_FADE_S)
+    return [(x, y, a, s) for (x, y), a, s in zip(pts, alphas, shapes)]
+
+
+def pointer_fit(take_size, cut_size, crop, W, H):
+    """Take pixels to edit pixels: the cut's fit (render_cut scales a smaller or other-shaped take down and
+    pads it), frame.crop, then fill_frame's cover scale and centre cut. Returns (scale, dx, dy)."""
+    sw, sh = take_size
+    cw0, ch0 = cut_size
+    k1 = 1.0 if (sw, sh) == (cw0, ch0) else min(cw0 / sw, ch0 / sh)
+    px, py = (cw0 - sw * k1) / 2, (ch0 - sh * k1) / 2
+    cx, cy, cw, ch = (crop["x"], crop["y"], crop["w"], crop["h"]) if crop else (0, 0, cw0, ch0)
+    k = max(W / float(cw), H / float(ch))
+    ox, oy = math.floor((cw * k - W) / 2), math.floor((ch * k - H) / 2)
+    return k1 * k, (px - cx) * k - ox, (py - cy) * k - oy
+
+
+def pointer_layers(parts, F, total, opts, tag):
+    """The pointer layers of one picture stream. parts: [{start, len, in, ev, fit}] (edit seconds, take seconds,
+    the take's cursor log, pointer_fit). One layer per take and cursor shape it shows: {name, arrow, w, h, cmd},
+    where cmd is the sendcmd text that moves it every frame and hides it outside its parts and shape."""
+    if opts.get("look") == "none":
+        return []
+    by = {}
+    for p in parts:
+        by.setdefault(id(p["ev"]), []).append(p)
+    layers = []
+    for n, group in enumerate(by.values()):
+        ev = group[0]["ev"]
+        shapes = look_shapes(ev, opts)
+        k0 = group[0]["fit"][0] * float(ev.get("scale") or 1) * float(opts.get("size") or 1)
+        frames_ = []  # (edit time, x, y, alpha, shape) in edit pixels at the hot spot; None = the part ended
+        for p in group:
+            times = [p["in"] + i / float(F) for i in range(int(round(p["len"] * F)))]
+            sc, dx, dy = p["fit"]
+            for i, (x, y, a, s) in enumerate(pointer_track(ev, times, opts.get("smooth"), opts.get("hide_idle"))):
+                frames_.append((p["start"] + i / float(F), x * sc + dx, y * sc + dy, a, s))
+            if p["start"] + p["len"] < total - 1e-6:
+                frames_.append((p["start"] + p["len"], None, None, 0, -1))
+        if len(shapes) == 1:  # one look for every cursor shape
+            frames_ = [f_[:4] + (0 if f_[4] >= 0 else -1,) for f_ in frames_]
+        for s in sorted({f[4] for f in frames_ if f[4] >= 0}):
+            shape, name = shapes[s], "%s%d_%d" % (tag, n, s)
+            k = k0 * float(shape.get("zoom") or 1)
+            w, h = max(2, int(round(shape["size"][0] * k))), max(2, int(round(shape["size"][1] * k)))
+            hx, hy = shape["hot"][0] * k, shape["hot"][1] * k
+            lines, last = ["0.000 overlay@%s x %d, overlay@%s y %d;" % (name, POINTER_OFF, name, POINTER_OFF)], None
+            for t, x, y, a, fs in frames_:
+                now = (int(round(x - hx)), int(round(y - hy)), round(a, 2)) if fs == s else None
+                if now == last:
+                    continue
+                # Half a frame early, so the frame at t has it for sure.
+                at = max(0.0, t - 0.5 / F)
+                lines.append("%.4f overlay@%s x %d, overlay@%s y %d, colorchannelmixer@%s aa %.2f;"
+                             % (at, name, now[0], name, now[1], name, now[2]) if now else
+                             "%.4f overlay@%s x %d;" % (at, name, POINTER_OFF))
+                last = now
+            layers.append({"name": name, "arrow": shape, "w": w, "h": h, "cmd": "\n".join(lines) + "\n"})
+    return layers
+
+
+def pointer_write(layers, tmp):
+    """The job writes each layer's arrow PNG and sendcmd file; render_plan reads {name, png, cmd, w, h}."""
+    import base64
+    out = []
+    for L in layers:
+        png, cmd = os.path.join(tmp, L["name"] + ".png"), os.path.join(tmp, L["name"] + ".cmd")
+        with open(png, "wb") as f:
+            f.write(base64.b64decode(L["arrow"]["png"]))
+        with open(cmd, "w") as f:
+            f.write(L["cmd"])
+        out.append({"name": L["name"], "png": png, "cmd": cmd, "w": L["w"], "h": L["h"]})
+    return out
+
+
+def pointer_graph(graph, args, k, label, layers, F, total):
+    """Lays each pointer layer on the stream `label`. Returns the new label and the next input number."""
+    for L in layers:
+        args += ["-loop", "1", "-framerate", str(F), "-t", "%.3f" % total, "-i", L["png"]]
+        graph.append("[%d:v]scale=%d:%d:flags=lanczos,format=rgba,colorchannelmixer@%s=aa=1[%sa]"
+                     % (k, L["w"], L["h"], L["name"], L["name"]))
+        graph.append("[%s]sendcmd=f='%s'[%sc]" % (label, L["cmd"].replace("\\", "/").replace("'", "\\'").replace(":", "\\:"),
+                                                 L["name"]))
+        graph.append("[%sc][%sa]overlay@%s=x=%d:y=%d:eval=frame:format=auto[%sp]"
+                     % (L["name"], L["name"], L["name"], POINTER_OFF, POINTER_OFF, L["name"]))
+        label, k = L["name"] + "p", k + 1
+    return label, k
+
+
+# Pointer looks (2026-10-31), recipe pointer {look?, size?, hot?}, only when asked: "system" (default) draws the
+# cursor shapes the log saved (arrow, I-beam, hand...); "dot" a white disc with a dark edge, like a touch; a
+# .png of the session or the library one picture for every shape, as tall as the system arrow, its tip at hot
+# (its pixels, default the top left). size scales any look (1.5 = half again as big). "none" (2026-10-31) draws
+# no pointer: the cursor-looks effect lays its own animated pointer over the edit.
+POINTER_LOOKS = ("system", "dot", "none")
+POINTER_DOT_PT = 22  # the dot's width in points
+POINTER_FILE_PT = 40  # a PNG look's height in points: the system arrow's
+DOT_PNG = []  # made once
+
+
+def png_b64(w, h, px):
+    """A base64 RGBA PNG from rows of (r, g, b, a) bytes. No packages."""
+    import base64
+    import struct
+    import zlib
+    raw = b"".join(b"\0" + bytes(row) for row in px)
+
+    def chunk(t, d):
+        return struct.pack(">I", len(d)) + t + d + struct.pack(">I", zlib.crc32(t + d) & 0xffffffff)
+    data = b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 6, 0, 0, 0)) + \
+        chunk(b"IDAT", zlib.compress(raw, 9)) + chunk(b"IEND", b"")
+    return base64.b64encode(data).decode()
+
+
+def dot_png(d=96):
+    """The dot look: a white disc, a thin dark edge and a soft shadow, d x d pixels, 4x4 samples a pixel."""
+    if DOT_PNG:
+        return DOT_PNG[0]
+    c, R, edge, soft = d / 2.0, d * 0.36, d * 0.035, d * 0.1
+    rows = []
+    for y in range(d):
+        row = []
+        for x in range(d):
+            disc = ring = 0.0
+            for sy in range(4):
+                for sx in range(4):
+                    r = math.hypot(x + (sx + 0.5) / 4 - c, y + (sy + 0.5) / 4 - c)
+                    disc += r <= R
+                    ring += R < r <= R + edge
+            disc, ring = disc / 16, ring / 16
+            r = math.hypot(x + 0.5 - c, y + 0.5 - c)
+            shadow = 0.22 * max(0.0, 1 - max(0.0, r - R - edge) / soft) if r > R else 0.0
+            # The shadow, then the edge, then the disc, each over the one before.
+            a = ring * 0.5 + shadow * (1 - ring * 0.5)
+            wa = disc * 0.92
+            out_a = wa + a * (1 - wa)
+            rgb = 255 * wa / out_a if out_a > 0 else 0
+            row += [int(round(rgb))] * 3 + [int(round(out_a * 255))]
+        rows.append(row)
+    DOT_PNG.append(png_b64(d, d, rows))
+    return DOT_PNG[0]
+
+
+def png_dims(path):
+    with open(path, "rb") as f:
+        head = f.read(24)
+    if head[:8] != b"\x89PNG\r\n\x1a\n":
+        raise RenderStop("the pointer look is not a PNG")
+    return int.from_bytes(head[16:20], "big"), int.from_bytes(head[20:24], "big")
+
+
+def look_shapes(ev, opts):
+    """The cursor shapes to draw for a log: its own (system), or the one look of opts for every shape.
+    opts["look_file"] is the look's full path (render_pointer sets it)."""
+    look = opts.get("look") or "system"
+    if look == "system":
+        return pointer_shapes(ev)
+    if look == "dot":
+        p = POINTER_DOT_PT
+        return [{"png": dot_png(), "hot": [p / 2.0, p / 2.0], "size": [p, p], "zoom": 1}]
+    import base64
+    path = opts.get("look_file") or look
+    w, h = png_dims(path)
+    with open(path, "rb") as f:
+        png = base64.b64encode(f.read()).decode()
+    k = POINTER_FILE_PT / float(h)
+    hx, hy = opts.get("hot") or (0, 0)
+    return [{"png": png, "hot": [hx * k, hy * k], "size": [w * k, POINTER_FILE_PT], "zoom": 1}]
+
+
+# ---------- the zoom (2026-10-31) ----------
+# Opt in (only when asked, or the user's rules say so), recipe zoom {auto?, level?, follow?, spans?}: the screen
+# zooms in, the way screen video apps do, and the view follows the pointer.
+#   auto    Takes zooms in on each run of clicks of a screen part with a cursor log: in ZOOM_LEAD s before
+#           the first click (fully in ZOOM_LEAD - ZOOM_IN_S s before it), out ZOOM_TAIL s after the last.
+#           Clicks less than ZOOM_GAP s apart are one run. Typing (the log's "typing" runs, with the pill's ⌨ on)
+#           zooms too, TYPE_CLOSER closer: fully in TYPE_EARLY s before the first key, out from TYPE_LATE s after
+#           the last; typing and clicks less than ZOOM_GAP s apart are one zoom (a click into a field, then typing).
+#   spans   [{at, end, level?, x?, y?}] in seconds of the cut: the agent's own zooms, on what the voice talks
+#           about. x, y (shares of the frame) hold the view on that point; without them it follows the pointer.
+#   level   how close: 2 shows half the width (default ZOOM_LEVEL). follow false: the view holds where it went in.
+# The view eases in for ZOOM_IN_S and out for ZOOM_OUT_S, pans only when the pointer leaves the middle
+# ZOOM_SLACK of it (two smoothings, so a pan is one calm move), and never shows past the frame's edge. It zooms
+# the cut at its own size, before frame.crop and the scale to the frame: a 2x screen keeps its sharp text and
+# the drawn pointer zooms with the screen. Picture layers (the camera, captions, keys) stay as they are.
+# How a zoom should behave (the user's notes, 2026-11-02), for any change here:
+#   - Zoom on what changes, not on the mouse: the text cursor while typing (typing_spots), the place of a click.
+#     The mouse often rests or travels to the next thing; the view does not chase it.
+#   - One zoom is one place. A click farther than the view is wide starts a new zoom (out, then in), never a
+#     swing across the screen. A click right after typing (send, move on) gets no zoom.
+#   - In just before the action (the render knows what comes), out just after; closer for small text.
+#   - Check a zoom with a frame each 0.25-1 s over all of it, and on more than one take: a rule must hold for any
+#     video, not the one at hand.
+# render_edit writes the view to _edit/<name>/zoom.json for steps that place things on the screen
+# (click-ring's clicks.py --zoom) and the zooms it made to the recipe's "zooms".
+ZOOM_LEVEL = 1.8
+ZOOM_IN_S = 0.6
+ZOOM_OUT_S = 0.8
+ZOOM_LEAD = 0.9
+ZOOM_TAIL = 1.6
+ZOOM_GAP = 3.0
+TYPE_EARLY = 0.1  # fully in this long before the first key
+TYPE_CLOSER = 1.4  # typing zooms this much closer than the level (1.8 -> 2.5): text is small
+TYPE_AFTER = 2.0  # a click this soon after typing (send, move on) gets no zoom of its own
+TYPE_SLACK = 0.3  # while typing the view keeps the text cursor in its middle 30%, so the line never runs out
+# While typing the view follows the text cursor, not the mouse: typing_spots finds it in the video, as the one
+# small spot that changes between frames (the new letters). Any app, no Accessibility. (2026-11-02: on a real take
+# it tracked the line from 18% to 50% of the width, 1 s of work for 11 s of typing.)
+TYPE_LATE = 0.5  # the zoom out starts this long after the last key
+ZOOM_STAY = 2.0  # a zoom that would be out for less than this between two runs stays in
+ZOOM_SLACK = 0.6  # the pointer moves freely in the middle 60% of the view
+# The pan is smoothed both ways in time (a Gaussian of this sigma): no lag, and the view starts to move before
+# the pointer pushes it, as the render knows where the pointer goes. Against the old two one-way smoothings
+# (0.2 s each) and a 0.5 slack: 1.3-4x less jerk, half the acceleration, the pointer in view as often or more
+# (2026-11-02, a real 39 s screen take and a hand-made cursor log with shake, flicks and wiggles).
+ZOOM_SIGMA = 0.3
+ZOOM_PTR_SIGMA = 0.06  # seconds: the pointer's own smoothing before the pan reads it
+ZOOM_TOL = 0.25  # px of the cut a key may be off a straight line before it gets its own key
+ZOOM_KEY_MAX = 90  # frames between keys at most
+
+
+def norm_zoom(z, frame):
+    if not z:
+        return {}
+    shape = "zoom is {auto?, level?, follow?, spans?: [{at, end, level?, x?, y?}]}."
+    if not isinstance(z, dict) or set(z) - {"auto", "level", "follow", "spans"}:
+        raise ValueError(shape)
+    if (frame.get("crop") or {}).get("follow_face"):
+        raise ValueError("zoom and frame.crop.follow_face do not go together: pick one.")
+    out = {}
+    if z.get("auto"):
+        out["auto"] = True
+    if z.get("level") is not None:
+        out["level"] = num(z["level"], "zoom.level", 1.1, 4)
+    if z.get("follow") is False:
+        out["follow"] = False
+    spans = []
+    for i, sp in enumerate(z.get("spans") or []):
+        what = "zoom.spans[%d]" % i
+        if not isinstance(sp, dict) or sp.get("at") is None or sp.get("end") is None:
+            raise ValueError("%s is {at, end, level?, x?, y?} in seconds of the cut." % what)
+        e = {"at": num(sp["at"], what + ".at", 0), "end": num(sp["end"], what + ".end", 0)}
+        if e["end"] - e["at"] < ZOOM_IN_S + ZOOM_OUT_S:
+            raise ValueError("%s is %.1f s long; a zoom needs %.1f s or more to go in and out."
+                             % (what, e["end"] - e["at"], ZOOM_IN_S + ZOOM_OUT_S))
+        if sp.get("level") is not None:
+            e["level"] = num(sp["level"], what + ".level", 1.1, 4)
+        if (sp.get("x") is None) != (sp.get("y") is None):
+            raise ValueError("%s: x and y together (shares of the frame, 0 to 1), or neither to follow the pointer."
+                             % what)
+        if sp.get("x") is not None:
+            e["x"], e["y"] = num(sp["x"], what + ".x", 0, 1), num(sp["y"], what + ".y", 0, 1)
+        spans.append(e)
+    spans.sort(key=lambda e: e["at"])
+    for a, b in zip(spans, spans[1:]):
+        if b["at"] < a["end"]:
+            raise ValueError("zoom.spans overlap at %.2f s: one zoom at a time." % b["at"])
+    if spans:
+        out["spans"] = spans
+    if not out.get("auto") and not spans:
+        raise ValueError("zoom needs auto: true (Takes zooms on the clicks and the typing) or spans (your own zooms).")
+    return out
+
+
+def screen_log(video):
+    """A screen file's cursor log (moves and clicks), also when its video has the pointer in it."""
+    try:
+        with open(os.path.splitext(video)[0] + ".events.json") as f:
+            ev = json.load(f)
+    except (OSError, ValueError):
+        return None
+    return ev if isinstance(ev, dict) and ev.get("moves") and ev.get("size") else None
+
+
+def zoom_auto(parts, clicks, typing=(), far=None):
+    """[{at, end, click, typing?}] zooms of auto: one per run of clicks and typing (cut seconds), inside the screen
+    part it is in. parts: [(start, end)] of the screen parts with a cursor log; clicks: their button-down times, or
+    (t, x, y) with the place in edit pixels; typing: [(start, end)] of the runs of typing, cut seconds.
+    far: px; a click farther than this from the zoom's last click is a new place, so a new zoom (out, then in
+    again), never a swing across the screen. A click less than TYPE_AFTER s after typing gets no zoom."""
+    least = ZOOM_IN_S + ZOOM_OUT_S + 0.4
+    clicks = [c if isinstance(c, (tuple, list)) else (c, None, None) for c in clicks]
+    clicks = [c for c in clicks if not any(b < c[0] <= b + TYPE_AFTER for _, b in typing)]
+    marks = [(t, t, ZOOM_LEAD, ZOOM_TAIL, False, None if x is None else (x, y)) for t, x, y in clicks]
+    marks += [(a, b, ZOOM_IN_S + TYPE_EARLY, TYPE_LATE + ZOOM_OUT_S, True, None) for a, b in typing]
+
+    def place(run, last=True):
+        ps = [m[5] for m in run if m[5]]
+        return (ps[-1] if last else ps[0]) if ps else None
+
+    def same(p, q):
+        return far is None or p is None or q is None or math.hypot(p[0] - q[0], p[1] - q[1]) <= far
+    out = []
+    for p0, p1 in parts:
+        ms = sorted((m for m in marks if p0 <= m[0] < p1), key=lambda m: m[0])
+        runs = []
+        for m in ms:
+            if runs and m[0] - max(x[1] for x in runs[-1]) < ZOOM_GAP and same(place(runs[-1]), m[5]):
+                runs[-1].append(m)
+            else:
+                runs.append([m])
+        spans = []
+        for run in runs:
+            a = max(p0, min(m[0] - m[2] for m in run))
+            b = min(p1, max(m[1] + m[3] for m in run))
+            if spans and a - spans[-1]["end"] < ZOOM_STAY and same(spans[-1]["place"], place(run, False)):
+                spans[-1]["end"] = max(spans[-1]["end"], b)  # stay in rather than out and straight back in
+                spans[-1]["typing"] = spans[-1].get("typing") or any(m[4] for m in run)
+                spans[-1]["place"] = place(run) or spans[-1]["place"]
+                spans[-1]["places"] += [(m[0],) + m[5] for m in run if m[5] and not m[4]]
+                continue
+            if spans and a < spans[-1]["end"]:  # a new place before the last zoom is out: out, then in
+                mid = (a + spans[-1]["end"]) / 2.0
+                spans[-1]["end"], a = mid, mid
+            sp = {"at": a, "end": b, "click": run[0][0], "place": place(run),
+                  "places": [(m[0],) + m[5] for m in run if m[5] and not m[4]]}
+            if any(m[4] for m in run):
+                sp["typing"] = True
+            spans.append(sp)
+        for e in spans:
+            e.pop("place")
+            if e.get("typing") or not e["places"]:
+                e.pop("places")
+            if e["end"] - e["at"] < least:
+                e["end"] = min(p1, e["at"] + least)
+            if e["end"] - e["at"] >= ZOOM_IN_S + ZOOM_OUT_S:
+                out.append(e)
+    return out
+
+
+def typing_spots(video, t0, t1, rate=15, w=96, h=60):
+    """[(t, fx, fy)]: where the screen changed a little from one frame to the next between t0 and t1 (seconds of
+    the video), as shares of the frame: while typing, the new letters. A big change (a scroll, a new page) is left out."""
+    try:
+        raw = subprocess.run([need_ffmpeg(), "-v", "error", "-ss", "%.3f" % max(0.0, t0), "-t", "%.3f" % max(0.1, t1 - t0),
+                              "-i", video, "-vf", "fps=%d,format=gray,tblend=all_mode=difference,scale=%d:%d:flags=area"
+                              % (rate, w, h), "-f", "rawvideo", "-"], capture_output=True, timeout=120).stdout
+    except (OSError, subprocess.SubprocessError):
+        return []
+    out = []
+    for i in range(len(raw) // (w * h)):
+        f = raw[i * w * h:(i + 1) * w * h]
+        hot = [(k, v) for k, v in enumerate(f) if v > 8]
+        if not hot or len(hot) > 0.05 * w * h:
+            continue
+        sw = float(sum(v for _, v in hot))
+        out.append((max(0.0, t0) + (i + 1) / float(rate), (sum((k % w + 0.5) * v for k, v in hot) / sw) / w,
+                    (sum((k // w + 0.5) * v for k, v in hot) / sw) / h))
+    return out
+
+
+def ease(u):
+    u = min(1.0, max(0.0, u))
+    return 4 * u ** 3 if u < 0.5 else 1 - (-2 * u + 2) ** 3 / 2
+
+
+def gauss_smooth(vals, sigma):
+    """vals smoothed by a Gaussian of sigma samples, both ways (no lag); the ends are held."""
+    n = len(vals)
+    if sigma <= 0 or n < 3:
+        return list(vals)
+    r = int(math.ceil(3 * sigma))
+    w = [math.exp(-0.5 * (k / sigma) ** 2) for k in range(-r, r + 1)]
+    out = []
+    for i in range(n):
+        s = ws = 0.0
+        for k in range(-r, r + 1):
+            s += w[k + r] * vals[min(n - 1, max(0, i + k))]
+            ws += w[k + r]
+        out.append(s / ws)
+    return out
+
+
+def zoom_view(spans, W, H, F, n_frames, where=None, level=ZOOM_LEVEL, follow=True):
+    """{frame: (z, left, top)}: the view of each zoomed frame of the cut, in pixels of the edit's frame (left, top:
+    the view's corner before zooming). where(frame) -> (x, y) of the pointer in edit pixels, or None.
+    spans: [{at, end, level?, x?, y?, click?}] in cut seconds."""
+    out = {}
+    for sp in spans:
+        lvl = float(sp.get("level") or level) * (TYPE_CLOSER if sp.get("typing") else 1.0)
+        n0, n1 = max(0, int(math.ceil(sp["at"] * F))), min(n_frames, int(math.floor(sp["end"] * F)) + 1)
+        hw, hh = W / (2 * lvl), H / (2 * lvl)
+
+        def inside(x, y):
+            return min(max(x, hw), W - hw), min(max(y, hh), H - hh)
+        if sp.get("x") is not None:
+            tx, ty = inside(sp["x"] * W, sp["y"] * H)
+            fixed = True
+        else:
+            start = sp.get("click", sp["at"] + ZOOM_IN_S)
+            p = where(min(n1 - 1, max(n0, int(round(start * F))))) if where else None
+            tx, ty = inside(*(p or (W / 2.0, H / 2.0)))
+            fixed = not where or not follow
+        out_at = sp["end"] - ZOOM_OUT_S
+        cx, cy = [tx] * (n1 - n0), [ty] * (n1 - n0)
+        if sp.get("places") and not fixed:
+            # Clicks: the view holds on the place of each click and moves only between them (halfway in time,
+            # eased by the smoothing), never after the mouse on its way somewhere else.
+            pl = [(t_, inside(x_, y_)) for t_, x_, y_ in sp["places"]]
+            for i, n in enumerate(range(n0, n1)):
+                t = n / float(F)
+                j = 0
+                while j + 1 < len(pl) and t >= (pl[j][0] + pl[j + 1][0]) / 2.0:
+                    j += 1
+                cx[i], cy[i] = pl[j][1]
+            cx, cy = gauss_smooth(cx, ZOOM_SIGMA * F), gauss_smooth(cy, ZOOM_SIGMA * F)
+        elif not fixed:
+            ptr, last = [], (tx, ty)
+            for n in range(n0, n1):
+                last = where(n) or last
+                ptr.append(last)
+            px = gauss_smooth([q[0] for q in ptr], ZOOM_PTR_SIGMA * F)
+            py = gauss_smooth([q[1] for q in ptr], ZOOM_PTR_SIGMA * F)
+            slack = TYPE_SLACK if sp.get("typing") else ZOOM_SLACK
+            sx, sy = slack * hw, slack * hh
+            for i, n in enumerate(range(n0, n1)):
+                # The view's target moves only when the pointer leaves its middle, and only as far as it must;
+                # while zooming out it stays, and the smoothing below eases the stop.
+                if n / float(F) < out_at:
+                    if abs(px[i] - tx) > sx:
+                        tx = px[i] - math.copysign(sx, px[i] - tx)
+                    if abs(py[i] - ty) > sy:
+                        ty = py[i] - math.copysign(sy, py[i] - ty)
+                    tx, ty = inside(tx, ty)
+                cx[i], cy[i] = tx, ty
+            cx, cy = gauss_smooth(cx, ZOOM_SIGMA * F), gauss_smooth(cy, ZOOM_SIGMA * F)
+        for i, n in enumerate(range(n0, n1)):
+            t = n / float(F)
+            e = min(ease((t - sp["at"]) / ZOOM_IN_S), ease((sp["end"] - t) / ZOOM_OUT_S))
+            bx, by = inside(cx[i], cy[i])
+            z = 1 + (lvl - 1) * e
+            vw, vh = W / z, H / z
+            out[n] = (z, min(max(bx - vw / 2, 0.0), W - vw), min(max(by - vh / 2, 0.0), H - vh))
+    return out
+
+
+def zoom_map(cut_size, crop, W, H):
+    """Cut pixels to edit pixels before the zoom: frame.crop, then fill_frame's cover scale and centre cut.
+    Returns (k, cx, cy, ox, oy): edit = (cut - c) * k - o."""
+    Wc, Hc = cut_size
+    cx, cy, cw, ch = (crop["x"], crop["y"], crop["w"], crop["h"]) if crop else (0, 0, Wc, Hc)
+    k = max(W / float(cw), H / float(ch))
+    return k, cx, cy, math.floor((cw * k - W) / 2), math.floor((ch * k - H) / 2)
+
+
+def zoom_quad(view, cut_size, crop, W, H):
+    """The cut-pixel corners (x left, x right, y top, y bottom) of the source the zoomed cut frame shows, for
+    perspective (sense source): the zoom of the edit's view carried back through the crop and the scale."""
+    z, L, T = view
+    k, cx, cy, ox, oy = zoom_map(cut_size, crop, W, H)
+    Wc, Hc = cut_size
+
+    def back(D, c, o, start):
+        return c + ((((D - c) * k - o) / z + start) + o) / k
+    return back(0, cx, ox, L), back(Wc, cx, ox, L), back(0, cy, oy, T), back(Hc, cy, oy, T)
+
+
+def zoom_keys(frames, values):
+    """[(frame, v...)] keys of a run of frames: a straight line between keys is within ZOOM_TOL of every value."""
+    keys = [0]
+    i = 0
+    while i < len(frames) - 1:
+        j = i + 1
+        while j + 1 < len(frames) and j + 1 - i <= ZOOM_KEY_MAX and frames[j + 1] == frames[j] + 1:
+            ok = True
+            for m in range(i + 1, j + 1):
+                u = (m - i) / float(j + 1 - i)
+                if any(abs(values[i][d] + (values[j + 1][d] - values[i][d]) * u - values[m][d]) > ZOOM_TOL
+                       for d in range(len(values[i]))):
+                    ok = False
+                    break
+            if not ok:
+                break
+            j += 1
+        keys.append(j)
+        i = j
+    return [(frames[n],) + tuple(values[n]) for n in sorted(set(keys))]
+
+
+def zoom_filter(view, cut_size, crop, W, H, F):
+    """The perspective filter that zooms the cut (an empty string for no zoom), with the frames as runs."""
+    if not view:
+        return ""
+    ns = sorted(view)
+    runs, cur = [], [ns[0]]
+    for n in ns[1:]:
+        if n == cur[-1] + 1:
+            cur.append(n)
+        else:
+            runs.append(cur)
+            cur = [n]
+    runs.append(cur)
+    Wc, Hc = cut_size
+    ident = (0, Wc, 0, Hc)
+    pieces = [[(-1, "%d" % v)] for v in ident]  # outside the zoom (the filter is off there anyway)
+    for run in runs:
+        keys = zoom_keys(run, [zoom_quad(view[n], cut_size, crop, W, H) for n in run])
+        for (n0, *a), (n1, *b) in zip(keys, keys[1:]):
+            for d in range(4):
+                v = "%.2f" % a[d] if abs(b[d] - a[d]) < 0.01 else "(%.2f+(in-%d)*%.5f)" % (a[d], n0, (b[d] - a[d]) / (n1 - n0))
+                pieces[d].append((n0, v))
+        n_last, *v_last = keys[-1]
+        for d in range(4):
+            pieces[d] += [(n_last, "%.2f" % v_last[d]), (n_last + 1, "%d" % ident[d])]
+    xl, xr, yt, yb = (piecewise(p, "in") for p in pieces)
+    on = "+".join("between(t,%.4f,%.4f)" % ((r[0] - 0.5) / F, (r[-1] + 0.5) / F) for r in runs)
+    return ("perspective=x0='{l}':y0='{t}':x1='{r}':y1='{t}':x2='{l}':y2='{b}':x3='{r}':y3='{b}':"
+            "interpolation=cubic:eval=frame:enable='{on}',").format(l=xl, r=xr, t=yt, b=yb, on=on)
+
+
+def render_zoom(s, r, cut, files, clocks, length):
+    """The zoom of a render: (view, zooms). view {frame: (z, left, top)} as zoom_view; zooms: the spans it made,
+    for the recipe ({at, end, level, follows, why})."""
+    z = r.get("zoom") or {}
+    if not z:
+        return {}, []
+    f = r["frame"]
+    W, H, F = f["w"], f["h"], f["fps"]
+    cut_size = (clocks[0]["width"], clocks[0]["height"])
+    parts, clicks, typing, logs, at, tracks = [], [], [], {}, 0.0, []
+    for g, path, c in zip(cut, files, clocks):
+        if g["kind"] == "screen":
+            if path not in logs:
+                logs[path] = screen_log(path)
+            ev = logs[path]
+            if ev:
+                parts.append((at, at + g["len"]))
+                sc, dx, dy = pointer_fit((c["width"], c["height"]), cut_size, f.get("crop"), W, H)
+                clicks += [(at + c_["t"] - g["in"], c_["x"] * sc + dx, c_["y"] * sc + dy) for c_ in ev.get("clicks") or []
+                           if c_.get("down") and c_.get("button") in ("left", "right")
+                           and g["in"] <= c_["t"] < g["in"] + g["len"]]
+                runs = []
+                for ta, tb in ev.get("typing") or []:
+                    ta, tb = max(ta, g["in"]), min(tb, g["in"] + g["len"])
+                    if ta <= tb:
+                        typing.append((at + ta - g["in"], at + tb - g["in"]))
+                        runs.append((ta, tb))
+                tracks.append((at, g, ev, pointer_fit((c["width"], c["height"]), cut_size, f.get("crop"), W, H), path, runs))
+        at += g["len"]
+    n_frames = int(round(length * F))
+    pos = {}
+    for start, g, ev, (sc, dx, dy), path, runs in tracks:
+        n0, n1 = int(math.ceil(start * F)), int(round((start + g["len"]) * F))
+        times = [g["in"] + (n / float(F) - start) for n in range(n0, n1)]
+        for n, (x, y, _, _) in zip(range(n0, n1), pointer_track(ev, times, smooth=True)):
+            pos[n] = (x * sc + dx, y * sc + dy)
+        if z.get("auto"):
+            sw_, sh_ = ev["size"]
+            for ta, tb in runs:  # while typing, the view follows the text cursor (typing_spots), not the mouse
+                spots = typing_spots(path, ta - 0.3, tb + 0.1)  # after the last key it is the app's answer
+                if not spots:
+                    continue
+                ts = [p[0] for p in spots]
+                xs = [sorted(p[1] for p in spots[max(0, i - 2):i + 3])[len(spots[max(0, i - 2):i + 3]) // 2]
+                      for i in range(len(spots))]  # a median of 5: one stray change does not pull the view
+                ys = [sorted(p[2] for p in spots[max(0, i - 2):i + 3])[len(spots[max(0, i - 2):i + 3]) // 2]
+                      for i in range(len(spots))]
+                a = start + ta - g["in"] - ZOOM_IN_S - TYPE_EARLY
+                b = start + tb - g["in"] + TYPE_LATE + ZOOM_OUT_S
+                j = 0
+                for n in range(max(n0, int(math.ceil(a * F))), min(n1, int(b * F) + 1)):
+                    tt = g["in"] + n / float(F) - start
+                    while j + 1 < len(ts) and ts[j + 1] <= tt:
+                        j += 1
+                    pos[n] = (xs[j] * sw_ * sc + dx, ys[j] * sh_ * sc + dy)
+    spans = [dict(sp) for sp in z.get("spans") or []]
+    if z.get("auto"):
+        taken = [(sp["at"], sp["end"]) for sp in spans]
+        spans += [sp for sp in zoom_auto(parts, clicks, typing, far=W / float(z.get("level") or ZOOM_LEVEL))
+                  if not any(sp["at"] < b and a < sp["end"] for a, b in taken)]
+        spans.sort(key=lambda e: e["at"])
+    spans = [sp for sp in spans if sp["at"] < length]
+    for sp in spans:
+        sp["end"] = min(sp["end"], length)
+    view = zoom_view([sp for sp in spans if sp["end"] - sp["at"] >= ZOOM_IN_S + ZOOM_OUT_S], W, H, F, n_frames,
+                     pos.get if pos else None, float(z.get("level") or ZOOM_LEVEL), z.get("follow", True))
+    made = []
+    for sp in spans:
+        if sp["end"] - sp["at"] < ZOOM_IN_S + ZOOM_OUT_S:
+            continue
+        made.append({"at": round(sp["at"], 2), "end": round(sp["end"], 2),
+                     "level": round(float(sp.get("level") or z.get("level") or ZOOM_LEVEL)
+                                    * (TYPE_CLOSER if sp.get("typing") else 1.0), 2),
+                     "follows": sp.get("x") is None and bool(pos) and z.get("follow", True),
+                     "why": ("%s from %.1f s" % ("typing" if sp.get("typing") else "clicks", sp["click"])
+                             if "click" in sp else "your span")})
+    return view, made
+
+
+def zoom_json(view, W, H, F):
+    """_edit/<name>/zoom.json: {size, fps, frames: [[t, z, left, top]]} of each zoomed frame, cut seconds."""
+    return {"size": [W, H], "fps": F,
+            "frames": [[round(n / float(F), 4), round(v[0], 4), round(v[1], 1), round(v[2], 1)]
+                       for n, v in sorted(view.items())]}
+
+
+# ---------- shortcuts (2026-10-30) ----------
+# With the pill's ⌨ on, a screen take's cursor log has "keys": [{t, keys: "⌘K"}] (shortcuts and special
+# keys only, never typing). Recipe keys: true (only when asked: "show my shortcuts") lays a key badge at
+# the bottom middle for KEYS_SHOW_S, or until the next one. The badges are drawn by macOS (AppKit
+# through osascript), since Takes' ffmpeg has no text filter.
+
+KEYS_SHOW_S = 1.2
+KEYS_Y = 0.86  # the badge's bottom, as a share of the frame's height
+KEY_BADGE_JS = r"""ObjC.import('AppKit');
+function run(argv) {
+  const size = parseFloat(argv[0]);
+  for (let i = 1; i + 1 < argv.length; i += 2) {
+    const label = $(argv[i]), out = argv[i + 1];
+    const attrs = $.NSMutableDictionary.alloc.init;
+    attrs.setObjectForKey($.NSFont.systemFontOfSizeWeight(size, 0.3), $.NSFontAttributeName);
+    attrs.setObjectForKey($.NSColor.whiteColor, $.NSForegroundColorAttributeName);
+    const ts = label.sizeWithAttributes(attrs), padX = size * 0.6, padY = size * 0.35;
+    const w = Math.ceil(ts.width + 2 * padX), h = Math.ceil(ts.height + 2 * padY);
+    const rep = $.NSBitmapImageRep.alloc.initWithBitmapDataPlanesPixelsWidePixelsHighBitsPerSampleSamplesPerPixelHasAlphaIsPlanarColorSpaceNameBytesPerRowBitsPerPixel(
+      null, w, h, 8, 4, true, false, $.NSDeviceRGBColorSpace, 0, 0);
+    $.NSGraphicsContext.saveGraphicsState;
+    $.NSGraphicsContext.setCurrentContext($.NSGraphicsContext.graphicsContextWithBitmapImageRep(rep));
+    $.NSColor.colorWithSRGBRedGreenBlueAlpha(0.08, 0.08, 0.1, 0.78).setFill;
+    $.NSBezierPath.bezierPathWithRoundedRectXRadiusYRadius($.NSMakeRect(0, 0, w, h), h * 0.3, h * 0.3).fill;
+    label.drawAtPointWithAttributes($.NSMakePoint(padX, padY), attrs);
+    $.NSGraphicsContext.restoreGraphicsState;
+    rep.representationUsingTypeProperties($.NSBitmapImageFileTypePNG, $({})).writeToFileAtomically(out, true);
+  }
+}
+"""
+
+
+def key_events(video):
+    """A screen file's logged shortcuts, [] without."""
+    try:
+        with open(os.path.splitext(video)[0] + ".events.json") as f:
+            keys = json.load(f).get("keys")
+    except (OSError, ValueError, AttributeError):
+        return []
+    return [k for k in keys or [] if isinstance(k, dict) and isinstance(k.get("keys"), str) and k.get("t") is not None]
+
+
+def key_badges(parts, total):
+    """{label: [(a, b)]} in edit seconds: each shortcut a part shows, until KEYS_SHOW_S or the next one.
+    parts: [{start, len, in, keys}]."""
+    hits = sorted((p["start"] + k["t"] - p["in"], k["keys"]) for p in parts for k in p["keys"]
+                  if p["in"] <= k["t"] < p["in"] + p["len"])
+    out = {}
+    for i, (a, label) in enumerate(hits):
+        b = min(a + KEYS_SHOW_S, hits[i + 1][0] if i + 1 < len(hits) else total, total)
+        if b > a:
+            out.setdefault(label, []).append((round(a, 3), round(b, 3)))
+    return out
+
+
+def keys_write(badges, tmp, W, H):
+    """One PNG per label, drawn by macOS. [{png, windows}] for render_plan; [] if they cannot be drawn."""
+    if not badges:
+        return []
+    js = os.path.join(tmp, "keys.js")
+    with open(js, "w") as f:
+        f.write(KEY_BADGE_JS)
+    out, argv = [], [str(max(18, round(min(W, H) * 0.045)))]
+    for i, (label, windows) in enumerate(sorted(badges.items())):
+        png = os.path.join(tmp, "key%d.png" % i)
+        argv += [label, png]
+        out.append({"png": png, "windows": windows})
+    try:
+        subprocess.run(["osascript", "-l", "JavaScript", js] + argv, capture_output=True, timeout=120)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    return [b for b in out if os.path.exists(b["png"])]
+
+
+def keys_graph(graph, args, k, label, badges, F, total):
+    """Lays each key badge at the bottom middle in its windows."""
+    for i, b in enumerate(badges):
+        args += ["-loop", "1", "-framerate", str(F), "-t", "%.3f" % total, "-i", b["png"]]
+        on = "+".join("between(t,%.3f,%.3f)" % w for w in b["windows"])
+        graph.append("[%d:v]format=rgba[kb%d]" % (k, i))
+        graph.append("[%s][kb%d]overlay=x=(W-w)/2:y=H*%g-h:enable='%s':format=auto[kd%d]" % (label, i, KEYS_Y, on, i))
+        label, k = "kd%d" % i, k + 1
+    return label, k
+
+
+def pointer_pass(path, segs, files, clocks):
+    """cut_take and rough_cut: the clip's screen parts get their pointer drawn, in place (one more video
+    encode, the sound copied). A clip without such parts is left as it is."""
+    W0, H0, F = clocks[0]["width"], clocks[0]["height"], clocks[0]["fps"]
+    parts, at = [], 0.0
+    for g, f, c in zip(segs, files, clocks):
+        L = max(2, frames(g["out"] - g["in"], F)) / float(F)
+        ev = pointer_events(f) if g.get("kind") == "screen" else None
+        if ev:
+            parts.append({"start": at, "len": L, "in": g["in"], "ev": ev,
+                          "fit": pointer_fit((c["width"], c["height"]), (W0, H0), None, W0, H0)})
+        at += L
+    if not parts:
+        return
+    tmp = tempfile.mkdtemp(prefix="takes-pointer-")
+    try:
+        layers = pointer_write(pointer_layers(parts, F, at, {}, "pc"), tmp)
+        graph, args = [], ["-i", path]
+        label, _ = pointer_graph(graph, args, 1, "0:v", layers, F, at)
+        out = path[:-len(".mp4")] + ".pointer.mp4"
+        run_ff([need_ffmpeg(), "-nostdin", "-v", "error", "-y", "-progress", "pipe:1", "-nostats"] + args
+               + ["-filter_complex", ";".join(graph), "-map", "[%s]" % label, "-map", "0:a?", "-c:a", "copy"]
+               + video_codec(clocks[0]) + ["-r", str(F), "-movflags", "+faststart", out], at, 0.95, 1.0)
+        os.replace(out, path)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def screen_step(argv, cwd):
+    """The recipe step ["takes-screen", <screen file>, <from s>, <seconds>, <out.mp4>, <fps>?]: a cut of a
+    screen take with its pointer drawn (the split-screen effect's screen half). Paths are from the step's cwd."""
+    if len(argv) not in (4, 5):
+        raise ValueError("takes-screen <screen file> <from s> <seconds> <out.mp4> [fps]")
+    src, out = os.path.join(cwd, argv[0]), os.path.join(cwd, argv[3])
+    a, d = float(argv[1]), float(argv[2])
+    c = take_clock(src)
+    if not c:
+        raise ValueError("%s is not a video Takes can read" % argv[0])
+    F = int(argv[4]) if len(argv) == 5 else int(round(c["fps"]))
+    W, H = c["width"], c["height"]
+    args = ["-ss", "%.3f" % a, "-t", "%.3f" % d, "-i", src]
+    graph = ["[0:v]fps=%d,setsar=1,setpts=PTS-STARTPTS[v]" % F]
+    tmp = tempfile.mkdtemp(prefix="takes-pointer-")
+    try:
+        ev, label = pointer_events(src), "v"
+        if ev:
+            part = {"start": 0.0, "len": d, "in": a, "ev": ev, "fit": pointer_fit((W, H), (W, H), None, W, H)}
+            label, _ = pointer_graph(graph, args, 1, "v", pointer_write(pointer_layers([part], F, d, {}, "ps"), tmp), F, d)
+        os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
+        subprocess.run([need_ffmpeg(), "-nostdin", "-v", "error", "-y"] + args
+                       + ["-filter_complex", ";".join(graph), "-map", "[%s]" % label, "-an", "-c:v", "libx264",
+                          "-crf", "16", "-pix_fmt", "yuv420p", out], check=True, capture_output=True, timeout=1800)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def render_pointer(s, r, cut, files, clocks, lead, length, meas, tmp):
+    """meas["pointer"] for render_plan: the pointer layers of the cut and of screen takes used as layers."""
+    f = r["frame"]
+    W, H, F = f["w"], f["h"], f["fps"]
+    total = length + lead
+    opts = dict(r.get("pointer") or {})
+    if opts.get("look") not in (None,) + POINTER_LOOKS:
+        opts["look_file"] = ref_abs(s, opts["look"])
+    # The cut's pointer goes on the cut itself, in its pixels and seconds, before the zoom, frame.crop and the
+    # scale to the frame: it zooms with the screen.
+    logs, parts, at = {}, [], 0.0
+    cw0, ch0 = clocks[0]["width"], clocks[0]["height"]
+    for g, path, c in zip(cut, files, clocks):
+        if g["kind"] == "screen":
+            if path not in logs:
+                logs[path] = pointer_events(path)
+            if logs[path]:
+                parts.append({"start": at, "len": g["len"], "in": g["in"], "ev": logs[path],
+                              "fit": pointer_fit((c["width"], c["height"]), (cw0, ch0), None, cw0, ch0)})
+        at += g["len"]
+    out = {"base": pointer_write(pointer_layers(parts, F, length, opts, "pb"), tmp), "over": {}, "keys": []}
+    if r.get("keys"):
+        kp, at = [], lead
+        for g, path in zip(cut, files):
+            if g["kind"] == "screen":
+                kp.append({"start": at, "len": g["len"], "in": g["in"], "keys": key_events(path)})
+            at += g["len"]
+        out["keys"] = keys_write(key_badges(kp, total), tmp, W, H)
+    for i, o in enumerate(r.get("over") or []):
+        p = ref_abs(s, o["file"])
+        ev = pointer_events(p) if media_kind(p) == "video" else None
+        if not ev:
+            continue
+        a = o.get("in", 0.0)
+        dur = (o["out"] - a) if o.get("out") is not None else max(0.0, float((meas.get("over") or {}).get(o["file"]) or 0) - a)
+        part = {"start": o["at"] + lead, "len": dur, "in": a, "ev": ev,
+                "fit": pointer_fit(ev["size"], ev["size"], None, W, H)}
+        out["over"][i] = pointer_write(pointer_layers([part], F, total, opts, "po%d_" % i), tmp)
+    return out
 
 
 def render_plan(s, r, tmp, out, meas=None):
@@ -12368,9 +14054,17 @@ def render_plan(s, r, tmp, out, meas=None):
     base = [ff_, "-nostdin", "-v", "error", "-y", "-progress", "pipe:1", "-nostats"]
     # Picture: one pass, the only lossy video encode.
     args = ["-i", os.path.join(tmp, "cut.mov")]
-    chain = "[0:v]" + ("crop=%d:%d:%d:%d," % (f["crop"]["w"], f["crop"]["h"], f["crop"]["x"], f["crop"]["y"])
-                       if f.get("crop") else "") + fill_frame(W, H) + ",fps=%d,format=yuv420p" % F
     graph, k = [], 1
+    # The cut at its own size: the pointer of screen takes that left it out of their video (see "the pointer"),
+    # then the zoom (see "the zoom"), then frame.crop and the scale to the frame.
+    ptr = meas.get("pointer") or {}
+    src = "0:v"
+    if ptr.get("base") or meas.get("zoom"):
+        graph.append("[0:v]fps=%d[c0]" % F)
+        src, k = pointer_graph(graph, args, k, "c0", ptr.get("base") or [], F, L)
+    zoom = zoom_filter(meas.get("zoom"), tuple(meas.get("cut_size") or (W, H)), f.get("crop"), W, H, F)
+    chain = "[%s]" % src + zoom + (crop_filter(f["crop"], meas.get("follow")) if f.get("crop") else "") + \
+        fill_frame(W, H) + ",fps=%d,format=yuv420p" % F
     if cover:
         args += ["-loop", "1", "-framerate", str(F), "-t", "%.3f" % lead, "-i", ref_abs(s, cover["image"])]
         graph.append("[%d:v]%s,fps=%d,format=yuv420p,trim=duration=%.3f,setpts=PTS-STARTPTS[cv]" % (k, fill_frame(W, H), F, lead))
@@ -12380,6 +14074,7 @@ def render_plan(s, r, tmp, out, meas=None):
     else:
         graph.append(chain + "[b0]")
     cur = "b0"
+    cur, k = keys_graph(graph, args, k, cur, ptr.get("keys") or [], F, total)
     for i, o in enumerate(r.get("over") or []):
         p = ref_abs(s, o["file"])
         a = o.get("in", 0.0)
@@ -12391,13 +14086,34 @@ def render_plan(s, r, tmp, out, meas=None):
             dur = (o["out"] - a) if o.get("out") is not None else max(0.0, float((meas.get("over") or {}).get(o["file"]) or 0) - a)
             args += ["-i", p]
         at = o["at"] + lead
-        fmt = "yuva420p" if o.get("alpha") else "yuv420p"
-        graph.append("[%d:v]trim=start=%.3f:end=%.3f,setpts=PTS-STARTPTS+%.3f/TB,%s,fps=%d,format=%s[o%d]"
-                     % (k, a, a + dur, at, fill_frame(W, H), F, fmt, i))
-        graph.append("[%s][o%d]overlay=enable='between(t,%.3f,%.3f)':eof_action=pass:format=auto[b%d]"
-                     % (cur, i, at, at + dur, i + 1))
-        cur = "b%d" % (i + 1)
+        hide = o.get("hide_in_silence")
+        fmt = "yuva420p" if o.get("alpha") or hide else "yuv420p"
+        drawn = (ptr.get("over") or {}).get(i)  # a screen take as a layer: its pointer goes on the layer
+        graph.append("[%d:v]trim=start=%.3f:end=%.3f,setpts=PTS-STARTPTS+%.3f/TB,%s,fps=%d,format=%s[o%d%s]"
+                     % (k, a, a + dur, at, fill_frame(W, H), F, fmt, i, "r" if drawn else ""))
         k += 1
+        if drawn:
+            lab, k = pointer_graph(graph, args, k, "o%dr" % i, drawn, F, total)
+            graph.append("[%s]format=%s[o%d]" % (lab, fmt, i))
+        if not hide:
+            graph.append("[%s][o%d]overlay=enable='between(t,%.3f,%.3f)':eof_action=pass:format=auto[b%d]"
+                         % (cur, i, at, at + dur, i + 1))
+            cur = "b%d" % (i + 1)
+            continue
+        # One piece per stretch it shows, each with its fades, laid on one after another.
+        shown = silence_shown(meas.get("words"), at, at + dur)
+        if not shown:
+            graph.append("[o%d]nullsink" % i)
+            continue
+        graph.append("[o%d]split=%d%s" % (i, len(shown), "".join("[o%ds%d]" % (i, j) for j in range(len(shown)))))
+        for j, (p, q) in enumerate(shown):
+            fades = ("" if p <= at + 0.04 else ",fade=t=in:st=%.3f:d=%.3f:alpha=1" % (p, HIDE_FADE)) + \
+                ("" if q >= at + dur - 0.04 else ",fade=t=out:st=%.3f:d=%.3f:alpha=1" % (q - HIDE_FADE, HIDE_FADE))
+            graph.append("[o%ds%d]trim=start=%.3f:end=%.3f%s[o%df%d]" % (i, j, p, q, fades, i, j))
+            nxt = "b%dh%d" % (i + 1, j)
+            graph.append("[%s][o%df%d]overlay=enable='between(t,%.3f,%.3f)':eof_action=pass:format=auto[%s]"
+                         % (cur, i, j, p, q, nxt))
+            cur = nxt
     graph.append("[%s]trim=duration=%.3f,format=yuv420p,setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709"
                  "[vout]" % (cur, total))
     picture = base + args + ["-filter_complex", ";".join(graph), "-map", "[vout]", "-an", "-sn", "-dn",
@@ -12502,6 +14218,15 @@ def run_step(x, timeout):
     os.makedirs(x["cwd"], exist_ok=True)
     if RUN_LOG is not None:
         RUN_LOG.append(list(x["run"]))
+    if x["run"][0] == "takes-screen":
+        try:
+            screen_step(x["run"][1:], x["cwd"])
+        except (ValueError, OSError, subprocess.SubprocessError) as e:
+            say("takes-screen: %s" % e)
+            raise RenderStop("the graphics step failed")
+        if any(not os.path.exists(os.path.join(x["cwd"], m)) for m in x.get("makes") or []):
+            raise RenderStop("the graphics step failed")
+        return
     try:
         p = subprocess.Popen(x["run"], cwd=x["cwd"], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                              stderr=subprocess.STDOUT, start_new_session=True, env=job_env())
@@ -12523,12 +14248,80 @@ def run_step(x, timeout):
         raise RenderStop("the graphics step failed")
 
 
+def screen_lag(s, n, measure=True):
+    """screen_lag_measured, cached in .checks-cache/screen-lag.json per take and both files' size and mtime.
+    measure=False: only a cached value, else None."""
+    g = {t["kind"]: t for t in read_meta(s).get("takes", []) if t["number"] == int(n)}
+    if "camera" not in g or "screen" not in g:
+        return None
+    try:
+        key = [[st.st_size, int(st.st_mtime)] for st in (os.stat(os.path.join(s, g[k]["file"])) for k in ("camera", "screen"))]
+    except OSError:
+        return None
+    p = os.path.join(s, CHECKS_CACHE, "screen-lag.json")
+    try:
+        with open(p) as f:
+            cache = json.load(f)
+    except (OSError, ValueError):
+        cache = {}
+    hit = cache.get(str(n)) if isinstance(cache, dict) else None
+    if isinstance(hit, dict) and hit.get("key") == key:
+        return hit.get("lag")
+    if not measure:
+        return None
+    lag = screen_lag_measured(s, n)
+    try:
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        cache = cache if isinstance(cache, dict) else {}
+        cache[str(n)] = {"key": key, "lag": lag}
+        write_json(p, cache)
+    except OSError:
+        pass  # a read-only session measures again next time
+    return lag
+
+
+def screen_lag_measured(s, n):
+    """Seconds from a moment on take n's camera file to the same moment on its screen file. The files start
+    about a second apart (startedAt, whole seconds); both carry the mic, so the loudness of the two lines up
+    within 3 s of that to 10 ms. None when the take lacks a file."""
+    g = {t["kind"]: t for t in read_meta(s).get("takes", []) if t["number"] == int(n)}
+    if "camera" not in g or "screen" not in g:
+        return None
+    a, b = parse_iso(g["camera"].get("startedAt") or ""), parse_iso(g["screen"].get("startedAt") or "")
+    guess = (a - b).total_seconds() if a and b else 0.0
+    try:
+        ec, es = (envelope(s, os.path.join(s, g[k]["file"])) for k in ("camera", "screen"))
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return guess
+    if len(ec) < 300 or len(es) < 300:
+        return guess
+    fc, fs = percentile(ec, 0.95) - 25, percentile(es, 0.95) - 25
+    ec, es = [max(x, fc) - fc for x in ec], [max(x, fs) - fs for x in es]
+    n0 = max(0, len(ec) // 2 - 500)
+    chunk = ec[n0:n0 + 1000]
+    g0 = n0 + int(round(guess / FRAME))
+    at, corr = _ncc_search(chunk, es, g0 - 300, g0 + 300)
+    return (at - n0) * FRAME if at is not None and corr > 0.5 else guess
+
+
+def take_words(s, take, kind):
+    """(words doc, shift): the words of a cut's file. A screen file without a transcript borrows the camera
+    file's words, moved by screen_lag."""
+    doc = words_doc(os.path.join(s, voice_take(s, take, kind)["file"])) or {}
+    if is_ready(doc) or kind == "camera":
+        return doc, 0.0
+    lag = screen_lag(s, take)
+    cam = words_doc(os.path.join(s, voice_take(s, take, "camera")["file"])) or {} if lag is not None else {}
+    return (cam, lag) if is_ready(cam) else (doc, 0.0)
+
+
 def render_words(s, r, cut, lead):
     """The final edit's words, from the takes' word times, and made_from for check_edit."""
     at, ws, made = lead, [], []
     for g in cut:
-        doc = words_doc(os.path.join(s, voice_take(s, g["take"], g["kind"])["file"])) or {}
+        doc, lag = take_words(s, g["take"], g["kind"])
         for w in doc.get("words") or [] if is_ready(doc) else []:
+            w = dict(w, start=w["start"] + lag, end=w["end"] + lag)
             if w["end"] > g["in"] and w["start"] < g["in"] + g["len"]:
                 e = {"word": w["word"], "start": round(at + max(w["start"], g["in"]) - g["in"], 3),
                      "end": round(at + min(w["end"], g["in"] + g["len"]) - g["in"], 3)}
@@ -12591,6 +14384,15 @@ def render_run(job_id):
         os.makedirs(name_dir, exist_ok=True)
         write_json(os.path.join(name_dir, "words.json"), words)
         write_json(os.path.join(RENDERS, job_id + ".words.json"), words)
+        # The zoom, before the steps: a step that places things on the screen reads zoom.json.
+        view, r["zooms"] = render_zoom(s, r, cut, files, clocks, length)
+        if not r["zooms"]:
+            del r["zooms"]
+        zp = os.path.join(name_dir, "zoom.json")
+        if view:
+            write_json(zp, zoom_json(view, r["frame"]["w"], r["frame"]["h"], r["frame"]["fps"]))
+        elif os.path.exists(zp):
+            os.remove(zp)
         # 2. Steps: the commands that make the picture layers.
         for x in r.get("steps") or []:
             run_step(x, step_timeout())
@@ -12603,11 +14405,27 @@ def render_run(job_id):
                          if o.get("out") is None and media_kind(o["file"]) != "image"},
                 "music": {m["file"]: loudness_of(ref_abs(s, m["file"]))[0] for m in r.get("music") or []},
                 "voice": loudness_of(os.path.join(tmp, "voice.wav"))[0]}
+        meas["words"] = words["words"]
+        if any(o.get("hide_in_silence") for o in r.get("over") or []) and not meas["words"]:
+            meas["words"] = speech_spans(os.path.join(tmp, "voice.wav"), lead)
+        c = r["frame"].get("crop")
+        if c and c.get("follow_face"):
+            say("TAKES_STAGE " + RENDER_STAGES["face"])
+            src = os.path.join(tmp, "cut.mov")
+            size = video_size(src)
+            at, parts = 0.0, []
+            for g in cut:
+                parts.append((at, at + g["len"], g["kind"]))
+                at += g["len"]
+            if size[0]:
+                meas["follow"] = follow_keys(face_track(src, size, length), parts, c, size)
         if meas["voice"] == float("-inf"):
             meas["voice"] = -20.0
         for k, v in list(meas["music"].items()):
             if v == float("-inf"):
                 meas["music"][k] = MUSIC_LUFS
+        meas["pointer"] = render_pointer(s, r, cut, files, clocks, lead, length, meas, tmp)
+        meas["zoom"], meas["cut_size"] = view, (clocks[0]["width"], clocks[0]["height"])
         plan = render_plan(s, r, tmp, out, meas)
         say("TAKES_STAGE " + RENDER_STAGES["picture"])
         run_ff(plan["picture"], plan["total"])
@@ -13259,7 +15077,8 @@ def t_get_edit_recipe(a):
 
 def recipe_short(r):
     """get_session's form: only the fields the agent sets, the cut as a count."""
-    out = {k: r.get(k) for k in ("name", "edit", "note", "frame", "over", "music", "sfx", "steps", "cover", "loudness")}
+    out = {k: r.get(k) for k in ("name", "edit", "note", "frame", "over", "music", "sfx", "steps", "cover", "loudness",
+                                 "pointer", "keys", "zoom", "zooms")}
     out["cut"] = "%d parts" % len(r.get("cut") or [])
     out["full"] = "get_edit_recipe edit=%s" % os.path.splitext(os.path.basename(r.get("edit") or ""))[0]
     return out
@@ -13486,7 +15305,8 @@ def export_plan(s, r, clock=None, seconds=None, wav=None):
         left.append("the cover (%s): it shows %gs before the cut in the mp4; the timeline starts at the cut"
                     % (r["cover"]["image"], r["cover"]["seconds"]))
     if f.get("crop"):
-        left.append("the crop (frame.crop): the takes fill the frame from the centre; set the crop in the editor")
+        left.append("the crop (frame.crop%s): the takes fill the frame from the centre; set the crop in the editor"
+                    % (", which follows the face in the mp4" if f["crop"].get("follow_face") else ""))
     elif f.get("shape") not in (None, "source") and (W, H) != (first.get("width"), first.get("height")):
         warns.append("The takes fill the %dx%d frame from the centre, as in the mp4." % (W, H))
     if music:
@@ -13497,6 +15317,13 @@ def export_plan(s, r, clock=None, seconds=None, wav=None):
         left.append("the steps that made the picture layers: their renders are on V2 and up")
     if r.get("over"):
         warns.append("Picture layers are their rendered files (captions, motion graphics): they are not editable text.")
+    if any(o.get("hide_in_silence") for o in r.get("over") or []):
+        left.append("hide_in_silence: the layer shows the whole time here; in the mp4 it steps aside in the pauses")
+    if any(g.get("kind") == "screen" and pointer_events(os.path.join(s, voice_take(s, g["take"], "screen")["file"]))
+           for g in r.get("cut") or []):
+        left.append("the pointer: the screen takes have none here; render_edit draws it in the mp4")
+    if r.get("zoom"):
+        left.append("the zoom: the screen shows unzoomed here; render_edit zooms it in the mp4")
     for p, was in (r.get("inputs") or {}).items():
         try:
             st = os.stat(ref_abs(s, p))
@@ -13906,6 +15733,9 @@ def gate(text):
     if not text:
         raise ValueError("The draft is empty.")
     problems = lint_comment(text)
+    hits = comment_phrase_hits(text)
+    if hits:  # phrases learned from his declines and edits (learn_comment)
+        problems = ((problems + "\n") if problems else "") + "Phrases he turned down: " + "; ".join(hits)
     if problems:
         raise ValueError("The slop gate refused this draft. Rewrite it once, or drop the post.\n" + problems)
     return text
@@ -14006,6 +15836,12 @@ NEW_TARGETS = ("\"new_targets\": [{\"name\", \"url\", \"why\"}] (people who fit 
                "post often, only ones you would want to read every week),")
 
 
+def treg_cli():
+    """The treg CLI's path when it is installed (the user's Mac), else None."""
+    path = shutil.which("treg") or os.path.expanduser("~/.local/bin/treg")
+    return path if os.access(path, os.X_OK) else None
+
+
 # How many names the list scout usually reaches in one run: these count as read.
 LIST_SCOUT_REACH = 25
 
@@ -14059,14 +15895,36 @@ def scout_briefs(skip_urls, skip_authors, targets_file):
            + SCOUT_LINK + " " + SCOUT_RULES + " " + SCOUT_FRESH + " " + skip + " Also note the people whose "
            "newest own post is over 30 days old. "
            + SCOUT_OUTPUT % ("\"quiet\": [names],", 20))
-    search = ("You are the search scout for the user's LinkedIn comment copilot. " + SCOUT_BROWSER + " "
-              "For each of these terms: %s, open linkedin.com/search/results/content/?keywords=<the "
-              "term>&sortBy=%%22relevance%%22&datePosted=%%22past-24h%%22 in your tab (top posts of the "
-              "past day: sorting by latest only shows posts minutes old, with no reactions yet) and "
-              "read the first 15 or so posts, scrolling to load them. " % ", ".join('"%s"' % t for t in SEARCH_TERMS)
-              + SCOUT_LINK + " " + SCOUT_RULES + " " + SCOUT_FRESH + " Skip posts that read like "
-              "engagement bait (\"comment X and I'll send you\", lists of tools, AI-written listicles). "
-              + no_list + " " + skip + " " + SCOUT_OUTPUT % (NEW_TARGETS, 10))
+    terms = ", ".join('"%s"' % t for t in SEARCH_TERMS)
+    bait = (" Skip posts that read like engagement bait (\"comment X and I'll send you\", lists of "
+            "tools, AI-written listicles). ")
+    treg = treg_cli()
+    if treg:
+        # A week's trial from 2026-11-06 (the user OK): treg's LinkedIn post search instead of
+        # Chrome. Same terms, 10 posts each, ~$0.002 a term, no tab. Without treg: the Chrome brief.
+        search = ("You are the search scout for the user's LinkedIn comment copilot. You use no browser. "
+                  "For each of these terms: %s, run this in Bash (one call per term, all in one "
+                  "message): %s call scrapecreators.x.v1-linkedin-search-posts --query 'query=<the "
+                  "term>' --query 'date_posted=last-day' --json. Each answer is JSON: result.posts has "
+                  "url, activityUrn, datePublished, description (the whole post text with its line "
+                  "breaks: use it word for word as text), author {name, url, image, followers}, "
+                  "likeCount (reactions), commentCount and a few top comments. The post's link is "
+                  "https://www.linkedin.com/feed/update/<activityUrn>; author_photo is author.image; "
+                  "age_hours comes from datePublished; posted is that age as \"5h\". The data has no "
+                  "headline: judge the author's role from the post and its comments, write your best "
+                  "guess as headline, and skip company pages (an author url with /company/). A call "
+                  "that fails (402 means the treg balance is empty): note it in stopped and go on with "
+                  "the other terms. " % (terms, treg)
+                  + SCOUT_RULES + " " + SCOUT_FRESH + bait + no_list + " " + skip + " "
+                  + SCOUT_OUTPUT % (NEW_TARGETS, 10))
+    else:
+        search = ("You are the search scout for the user's LinkedIn comment copilot. " + SCOUT_BROWSER + " "
+                  "For each of these terms: %s, open linkedin.com/search/results/content/?keywords=<the "
+                  "term>&sortBy=%%22relevance%%22&datePosted=%%22past-24h%%22 in your tab (top posts of the "
+                  "past day: sorting by latest only shows posts minutes old, with no reactions yet) and "
+                  "read the first 15 or so posts, scrolling to load them. " % terms
+                  + SCOUT_LINK + " " + SCOUT_RULES + " " + SCOUT_FRESH + bait
+                  + no_list + " " + skip + " " + SCOUT_OUTPUT % (NEW_TARGETS, 10))
     commenters = ("You are the commenter scout for the user's LinkedIn comment copilot. " + SCOUT_BROWSER + " "
                   "Read the target list at %s. Pick 6 people from its \"Big accounts\" and \"Product "
                   "and growth\" sections, open their linkedin.com/in/<handle>/recent-activity/all/ and "
@@ -14118,13 +15976,11 @@ def t_get_comment_context(a):
     redraft = [{"id": s["id"], "post": s.get("post"), "angle": s.get("angle"), "drafts": s.get("drafts")}
                for s in sugg if s.get("status") == "redraft"]
 
-    style = linkedin_ref("comment-style-guide.md")
     open_notes = [c for c in read_comments(comments_dir())["comments"] if c.get("status") != "resolved"]
     skip_urls = sorted({norm_post_url((s.get("post") or {}).get("url")) for s in sugg} - {""})
-    return {
+    out = {
         "lessons": read_text(lessons_path()),
         "lessons_file": lessons_path(),
-        "style_guide": style if os.path.exists(style) else None,
         "targets": read_if(linkedin_ref("commenting-targets.md")),
         "past_best_comments": read_if(linkedin_ref("comment-library.md")),
         "examples": {"approved_as_is": approved, "edited_by_user": edited, "variant_picks": picks,
@@ -14145,6 +16001,8 @@ def t_get_comment_context(a):
                  "pointed question, a counterpoint or a concrete tip) and length. Study edited_by_user "
                  "most: it shows what the user changes. variant_picks shows which shape the user picks over which.",
     }
+    out.update(comment_learning_context(sugg))
+    return out
 
 
 def save_author_photo(url, sid):
@@ -14172,8 +16030,27 @@ def save_author_photo(url, sid):
         return None
 
 
+def target_photos_dir():
+    """comments/targets/<handle>.jpg: the face beside each name in the target list (2026-11-07)."""
+    return os.path.join(os.path.dirname(suggestions_dir()), "targets")
+
+
+def save_target_photo(author_url, photo_path):
+    """Keeps the target list's photo of this author current: the newest photo a draft saved.
+    Best effort, like save_author_photo."""
+    m = re.search(r"linkedin\.com/in/([^/?#]+)", author_url or "")
+    if not m:
+        return
+    try:
+        os.makedirs(target_photos_dir(), exist_ok=True)
+        shutil.copyfile(photo_path, os.path.join(target_photos_dir(), urllib.parse.unquote(m.group(1)).lower() + ".jpg"))
+    except Exception:
+        pass
+
+
 def t_add_comment_suggestion(a):
     need_rules("comments")
+    need_learned()
     url = (a.get("post_url") or "").strip()
     if not url:
         raise ValueError("post_url is required.")
@@ -14196,6 +16073,7 @@ def t_add_comment_suggestion(a):
     photo = save_author_photo(a.get("author_photo"), sid)
     if photo:
         post["photo"] = photo
+        save_target_photo(post.get("author_url"), os.path.join(suggestions_dir(), photo))
     s = {"id": sid, "created": now_iso(), "status": "review", "post": post,
          "angle": a["angle"].strip(),
          "drafts": [{"text": variants[0], "variants": variants, "at": now_iso(), "by": "agent"}]}
@@ -14205,6 +16083,7 @@ def t_add_comment_suggestion(a):
 
 def t_redraft_comment(a):
     need_rules("comments")
+    need_learned()
     s = read_suggestion(a["id"])
     if s.get("status") not in ("redraft", "review", "feedback"):
         raise ValueError("Suggestion %s is %s: only a draft in review or waiting for a redraft changes." % (s["id"], s.get("status")))
@@ -14261,9 +16140,24 @@ def t_set_comment_stats(a):
     return suggestion_view(s)
 
 
+# The learning loop's hooks. The public copy has no loop: nothing waits, no phrase is refused.
+def need_learned():
+    return None
+
+
+def comment_phrase_hits(text):
+    return []
+
+
+def comment_learning_context(sugg):
+    return {}
+
+
+
+
 S = {"type": "string"}
-SESSION = {"type": "string", "description": "Session as 'Project/folder', an absolute path, or its id (from get_session). "
-           "An old path still works after a rename or move."}
+SESSION = {"type": "string", "description": "Session: 'Project/folder', an absolute path or its id (from get_session). "
+           "Old paths still work."}
 PLATFORM = {"type": "string", "enum": list(PLATFORMS),
             "description": "Which post of the session: linkedin (default, posts/linkedin.md), x (posts/x.md), "
                            "youtube (the long wide video: title + description, posts/youtube.md) or vertical (one "
@@ -14272,9 +16166,8 @@ PLATFORM = {"type": "string", "enum": list(PLATFORMS),
                               "and an X article)." if BLOG else ".")}
 TWEETS = {"type": "array", "items": {"type": "string"},
           "description": "X only, instead of text: the tweets of a thread in order (one item = one tweet)."}
-LIBRARY = {"type": "string", "description": "A library: 'style:<Name>' for one of the user's styles (e.g. "
-           "'style:Magazine'; a new name makes a new style), a project name for that project's own additions, "
-           "or 'comments' for the comment copilot's files (lessons, target list, style guide)."}
+LIBRARY = {"type": "string", "description": "A library: 'style:<Name>' (a new name makes a new style), a project "
+           "name, or 'comments' (the comment copilot's lessons, target list and best comments)."}
 LESSON = {"type": "string", "description": "With resolve: what this comment taught. A rule id from "
           "get_rules, 'new' (then give rule), or 'one-off'."}
 MISSED = {"type": "boolean", "description": "With a rule id: true when the edit broke what that rule says (counted "
@@ -14339,7 +16232,9 @@ TOOLS = [
     ("get_session", "Get a session: its id, title, full script, and every take with file path, duration, "
      "keeper flag, name and start time (camera and screen files of one take share a number), plus every "
      "asset file (edits/, thumbnails/, stills/, assets/), the folder rules ('folders') and 'warnings' about "
-     "files in the wrong place: fix those. Each take shows edit_ready (word times are ready). Cut takes with "
+     "files in the wrong place: fix those. Each take shows edit_ready (word times are ready). A screen take "
+     "recorded since 2026-10-30 has events: its cursor log (pointer moves, clicks, app in front, in .mov pixels "
+     "and seconds). Cut takes with "
      "cut_take and rough_cut by default: they fix the audio offset and frame rate. checks: the "
      "check_edit state of each newest edit. rules: the rules for the session's next step that this chat has not seen yet; follow them.",
      {"session": SESSION}, ["session"], t_get_session),
@@ -14619,6 +16514,12 @@ TOOLS = [
       "merge_into": MERGE_INTO, "merged": MERGED,
       "check": {"type": "object", "description": "{kind, target, tolerance, max, floor}. null removes it."},
       "on": {"type": "boolean"}, "remove": {"type": "boolean"}}, [], t_set_rule),
+    ("measure_pace", "How often a video cuts: cuts a minute, the average shot and the longest hold. With style, "
+     "it keeps the numbers in that style's style.json, and check_edit then flags an edit in that style that cuts "
+     "far more or less often or holds one shot much longer. Run it on the source video of a new style.",
+     {"file": {"type": "string", "description": "The video: an absolute path, or a path in session."},
+      "session": SESSION, "style": {"type": "string", "description": "Optional style name to keep the pace in."}},
+     ["file"], t_measure_pace),
     ("check_edit", "Check each new edit before you show it. It compares the edit with its take: sound, picture, "
      "sync, cut words, undone fixes, rules with a check. Fix each failure in a new version and check that. "
      "pass null: did not run (skip says why). A failure looks wrong: tell the user its say. review: with a Gemini "
@@ -14712,7 +16613,8 @@ TOOLS = [
      "length = the shot's length, 4-15 s). For a shot, write a real-footage prompt from the shot's do and say "
      "(subject, setting, light, camera move); pass image='sketch' to use the sketch only as a composition "
      "reference with params {mode: omni_reference}, and say in the prompt that the result is real footage, not a "
-     "drawing. Change a video: video=<session file> with params {mode: video_edit} (Seedance; the takes-alter skill "
+     "drawing. A person who speaks: make the line first (voiceover), pass audio=<that wav> and write 'speaks the "
+     "line in @audio1' (the takes-ai-video skill has the method for footage that looks real). Change a video: video=<session file> with params {mode: video_edit} (Seedance; the takes-alter skill "
      "has the method: target frame, 480p draft, check, finalise), or "
      "workflow=reframe with aspect_ratio for a new shape. Default model: the one the user picked on Plugins › Higgsfield (higgsfield_status default_model); other models by id (`higgsfield model list` in Bash; `higgsfield model get <id>` for params). "
      "Each job costs the user's Higgsfield credits: one job per ask, never a batch nobody asked for. "
@@ -14723,6 +16625,8 @@ TOOLS = [
       "image": {"type": "string", "description": "A reference image: a session file, or 'sketch' for the shot's sketch."},
       "images": {"type": "array", "items": {"type": "string"},
                  "description": "More reference images (session files), after image, in @image order."},
+      "audio": {"type": "string", "description": "A voice line to speak (session file, e.g. a voiceover wav): "
+                "@audio1 in the prompt. Sets mode omni_reference."},
       "finalise": {"type": "string", "description": "A finished draft job (params draft true) of this session: make "
                    "its full-size version from the same job. Takes no prompt."},
       "cost": {"type": "boolean", "description": "Only say what it would cost (free); nothing starts."},
@@ -14791,7 +16695,8 @@ TOOLS = [
      {"session": SESSION, "project": {"type": "string", "description": "Project name, when there is no session."}},
      [], t_get_library),
     ("list_effects", "Ready-made effects for talking-head videos (text behind the head, a glass chart, a "
-     "freeze-frame sticker, a tier list...), each with a preview, a README and a HyperFrames source. Opt-in: "
+     "freeze-frame sticker, a tier list, a camera bubble that steps aside in pauses...), each with a preview, a README "
+     "and a source. Opt-in: "
      "call it only when the user names an effect or asks which effects there are, never to pick one yourself. "
      "With effect: its README and source.",
      {"effect": {"type": "string", "description": "An effect's slug or name. Empty = the list."}},
@@ -14930,13 +16835,36 @@ TOOLS = [
      {"session": SESSION, "files": {"type": "array", "items": {"type": "string"},
                                      "description": "From list_broll, e.g. '1 Desk work/2023-11 High-Angle Typing at Desk (V).mov'."}},
      ["session", "files"], t_add_broll),
-    ("list_music", "List the user's music and sound effects (_library/audio/Music, SFX, ...): file, title, "
-     "artist, genre, bpm, duration, path. New downloads in the source folder (Epidemic Sound) are copied in "
+    ("list_music", "List the user's music and sound effects (_library/audio/Music, SFX, Made, ...): file, title, "
+     "artist, genre, bpm, duration, path; songs from make_music (Made) also give their prompt. New downloads in the source folder (Epidemic Sound) are copied in "
      "first. Use for picking a song or an SFX for an edit. SFX are short effects (whoosh, pop, typing, "
      "notification). Mix songs and effects into a new version of the edit with ffmpeg, under the voice: the "
      "app plays only the file, never a song or an effect beside it. The app's Use button asks you for this.",
-     {"group": {"type": "string", "description": "Music or SFX. Omit for all."},
-      "query": {"type": "string", "description": "Words in the file name."}}, [], t_list_music),
+     {"group": {"type": "string", "description": "Music, SFX or Made. Omit for all."},
+      "query": {"type": "string", "description": "Words in the file name or a tag."},
+      "tag": {"type": "string", "description": "Only sounds with this tag (any case). 'tags' in the result lists every tag with its count."}},
+     [], t_list_music),
+    ("tag_sounds", "Add or remove tags on songs and sound effects (Education, Calm, Whoosh, ...), so they are easy to "
+     "find on the Sound pane and with list_music tag. Reuse the library's tags (list_music 'tags') before you invent one. "
+     "Tags live in _library/audio/.tags.json, not in the files.",
+     {"files": {"type": "array", "items": {"type": "string"}, "description": "The 'file' values from list_music, e.g. 'Made/Calm piano v1.mp3'."},
+      "add": {"type": "array", "items": {"type": "string"}, "description": "Tags to add (any case: the library's spelling wins)."},
+      "remove": {"type": "array", "items": {"type": "string"}, "description": "Tags to take off."},
+      "tags": {"type": "array", "items": {"type": "string"}, "description": "Replace the whole list ([] clears it)."}},
+     ["files"], t_tag_sounds),
+    ("make_music", "Make new music with ElevenLabs Music from a prompt: writes _library/audio/Made/<name> vN.mp3, "
+     "shown on the Sound pane's Made tab and usable in render_edit music like any song (pass its ref). Describe "
+     "style, instruments, tempo (BPM), mood and how it starts and ends; name no real song or artist (ElevenLabs "
+     "refuses, and Takes then retries once with its suggestion). For an edit, set seconds to the edit's length. "
+     "Instrumental by default. Costs about 900 ElevenLabs credits a minute: make one track per ask unless "
+     "asked for more, and say the credits it used.",
+     {"prompt": {"type": "string", "description": "What the music sounds like."},
+      "seconds": {"type": "number", "description": "Length, 10-300. Default 45."},
+      "variants": {"type": "integer", "description": "1-3 takes of the same prompt. Default 1."},
+      "instrumental": {"type": "boolean", "description": "Default true. false lets the music have vocals."},
+      "name": {"type": "string", "description": "Short file name. Default: the prompt's first words."},
+      "tags": {"type": "array", "items": {"type": "string"}, "description": "Tags for the new songs (see tag_sounds), e.g. ['Education']."}},
+     ["prompt"], t_make_music),
     ("trash_takes", "Move takes to the macOS Trash (recoverable). Pass take numbers, or non_keepers=true "
      "to trash every take without a star.",
      {"session": SESSION, "takes": {"type": "array", "items": {"type": "integer"}}, "non_keepers": {"type": "boolean"}},
@@ -15001,7 +16929,10 @@ TOOLS = [
      "(picture layers: alpha graphics or b-roll, with at/in/out), music and sfx (file, at, gain_db), steps (commands "
      "that make the layers, run in _edit/<name>/), cover (a thumbnail). Next version: base=<name> and changes (a JSON "
      "merge patch on the newest recipe; a list replaces the whole list; {\"name\": \"hook-vertical\"} starts a new "
-     "line). Takes uses the clean voice once and never uses a finished edit as an input. One render of a name runs "
+     "line). Only if asked: frame.crop.follow_face pans the crop with the face; over[i].hide_in_silence fades "
+     "a layer out in pauses (effect hide-in-silence); pointer {smooth, hide_idle} for the drawn screen pointer; "
+     "keys: true shows logged shortcuts. "
+     "Takes uses the clean voice once and never uses a finished edit as an input. One render of a name runs "
      "at a time: to compare two options, give the second a new name. Returns a job; then publish_edit.",
      {"session": SESSION,
       "recipe": {"type": "object", "description": "A whole recipe. For a first version, or to rebuild an edit that "
@@ -15098,6 +17029,46 @@ TOOLS = [
       "thumbnail_prompt": {"type": "string", "description": "A new thumbnail prompt: draws a new version with it."},
       "redraw": {"type": "boolean", "description": "Draw a new version of the thumbnail from its last prompt."}},
      ["id"], t_update_idea),
+    ("sfx_sounds", "Sound effects Takes can make (Plugins › Sound FX): real recordings (rec/, clicks and typing) and "
+     "earshot's bank of 215 made in code, by id "
+     "(whoosh, swish, swipe, click, tap, pop, impact, sub drop, riser, downlifter, notify, shimmer, glitch, "
+     "typing, key, bell, kalimba ...) with length, peak time, pitch and what each is, and the recipes design_sfx "
+     "can make new ones from. Call before make_sfx or design_sfx.",
+     {"query": {"type": "string", "description": "Words that must all be in the id, kind or note, e.g. whoosh, "
+                                                 "'soft click', key. Omit for all."}},
+     [], t_sfx_sounds),
+    ("make_sfx", "Make a sound effect for an edit in code, in about a second: one bank sound (sfx_sounds) "
+     "rendered to the moment, as generated/<name>-vN.wav. dur sets its exact length, apex puts a whoosh's "
+     "loudest point at that second (land it on a cut), pitch tunes a tonal one (E5, 440). takes gives "
+     "several renders that differ a little (a key per keystroke). Each file says its onset, peak and the "
+     "audit (clicks, clipping, cut tails). Use it in render_edit sfx.",
+     {"session": SESSION,
+      "sound": {"type": "string", "description": "Id from sfx_sounds, e.g. whoosh_fast/crisp or rec/click/mouse "
+                                                 "(a real recording: dur cuts it, one take)."},
+      "dur": {"type": "number", "description": "Length in seconds. Default the sound's own."},
+      "apex": {"type": "number", "description": "Seconds from the file's start to its loudest point (whooshes, risers)."},
+      "pitch": {"type": "string", "description": "A note (E5) or Hz, for tonal sounds."},
+      "takes": {"type": "integer", "description": "Renders, 1 to 12. Default 1."},
+      "seed": {"type": "integer", "description": "Render seed, to make the same take again."},
+      "name": {"type": "string", "description": "File name. Default the id."}},
+     ["session", "sound"], t_make_sfx),
+    ("design_sfx", "Design new sound effects in code when the bank has none that fits: earshot's forge "
+     "renders hundreds of candidates of a recipe (sfx_sounds lists them), scores each against the description "
+     "(and against reference recordings in like), and keeps the best different ones as generated/<name>-vN.wav. "
+     "A job: about a minute at budget 96. Read its report.md, then run again sharper if they are off.",
+     {"session": SESSION,
+      "recipe": {"type": "string", "description": "The kind of sound: whoosh, swish, swipe, click, hover, toggle, "
+                                                  "pop, popin, impact, subdrop, riser, downlifter, notify, sting, "
+                                                  "shimmer, glitch, keypress, typing, zip, pluck."},
+      "describe": {"type": "string", "description": "What it should sound like, e.g. 'a soft paper swish for a "
+                                                    "page turn'. Default the recipe's own."},
+      "not_like": {"type": "array", "items": S, "description": "What it must not sound like, e.g. 'a sword swing'."},
+      "like": {"type": "array", "items": S, "description": "Reference recordings to sound close to: list_music "
+                                                          "files (SFX/...) or session files."},
+      "budget": {"type": "integer", "description": "Candidates to score, 24 to 400. Default 96."},
+      "variants": {"type": "integer", "description": "Different sounds to keep, 1 to 6. Default 3."},
+      "name": {"type": "string", "description": "File name. Default the recipe."}},
+     ["session", "recipe"], t_design_sfx),
     ("open_in_app", "Offer the user a project, session or file (e.g. a new edit) in the Takes app. It never takes "
      "focus or plays anything: the session gets a dot and opens only on a click. Once per finished result, not "
      "for drafts or in-between steps.",
@@ -15197,7 +17168,7 @@ DESTRUCTIVE = {"trash_takes", "trash_sessions", "delete_variants", "delete_post_
                # run_job runs any shell command: clients that gate on destructiveHint must ask first.
                # The Takes chat runs with bypassPermissions, so it sees no prompt.
                "run_job", "stop_job"}
-OPEN_WORLD = {"make_image", "voices", "design_voice", "voiceover", "fix_words", "change_voice", "higgsfield",
+OPEN_WORLD = {"make_image", "make_music", "voices", "design_voice", "voiceover", "fix_words", "change_voice", "higgsfield",
               "higgsfield_status", "replicate", "replicate_model", "replicate_status", "set_storyboard"}
 
 
@@ -15338,6 +17309,9 @@ def handle(msg):
                                     "style (README style guide, tokens.json, logos, icons, motion graphics, fonts) "
                                     "lives in a style or a project library, never in a session. "
                                     "Effects (list_effects) are opt-in: use one only when the user names it or asks for one. "
+                                    "Never run `hyperframes auth login` (or `auth login --device`) and never ask the user to: "
+                                    "Takes does not use a HeyGen sign-in. Render HyperFrames locally and skip skill steps that need "
+                                    "the sign-in (cloud render, reverse, Pro templates, HeyGen voices or music); say so in one line. "
                                     "The user leaves review comments on edits (time range + frame area), images "
                                     "(area) and text (quoted selection), in sessions and libraries: when "
                                     "get_session or get_library shows open_comments, call get_comments, read each "

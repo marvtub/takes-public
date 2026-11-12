@@ -1,0 +1,13 @@
+{
+  "name": "Step aside in pauses",
+  "description": "The screen recording fills the frame and you sit in a round bubble in a corner. When you pause for a breath or longer, the bubble fades out, so the screen has the frame. It fades back just before you speak.",
+  "when": "Long screen + camera videos, mostly 16:9: demos and walkthroughs where you stop talking while you click or wait for something.",
+  "needs": [
+    "a take with a camera and a screen file",
+    "the square of the camera that fills the bubble (the face in its middle)",
+    "the corner and the size of the bubble"
+  ],
+  "kind": "Overlay",
+  "shape": "any",
+  "shipped": true
+}

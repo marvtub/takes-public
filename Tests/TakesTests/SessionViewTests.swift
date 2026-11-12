@@ -75,3 +75,20 @@ struct KeptTabsTests {
         #expect(k.on(a).isEmpty)
     }
 }
+
+// Under a full-window tab the Record column's script and takes wait a moment after a session
+// switch (2026-11-07); Record always shows them.
+struct RecordColumnTests {
+    let a = URL(fileURLWithPath: "/tmp/p/a"), b = URL(fileURLWithPath: "/tmp/p/b")
+
+    @Test func recordShowsTheColumnAtOnce() {
+        #expect(DetailView.recordColumnBuilt(covered: false, built: nil, session: a))
+        #expect(DetailView.recordColumnBuilt(covered: false, built: b, session: a))
+    }
+
+    @Test func aCoveredColumnWaitsForItsSession() {
+        #expect(!DetailView.recordColumnBuilt(covered: true, built: nil, session: a))
+        #expect(!DetailView.recordColumnBuilt(covered: true, built: b, session: a))
+        #expect(DetailView.recordColumnBuilt(covered: true, built: a, session: a))
+    }
+}

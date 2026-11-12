@@ -65,6 +65,14 @@ struct IdleTests {
         #expect(!DetailView.covers("script", previewing: false))
     }
 
+    // 2026-11-06: a launch on a covering tab built the hidden Record stage too (a third of the first
+    // frame). It comes the first time Record shows, then stays (removing it can deadlock AVFoundation).
+    @Test func recordStageMountsWhenItFirstShowsAndStays() {
+        #expect(!DetailView.mountsRecorder(cover: "broll", shown: false))
+        #expect(DetailView.mountsRecorder(cover: nil, shown: false))
+        #expect(DetailView.mountsRecorder(cover: "post", shown: true))
+    }
+
     @Test func recordingAndCountdownKeepTheCamera() {
         #expect(!AppModel.holdsCamera(idle: false, preview: true, seen: false))
         // The camera stops while a file plays over it, or when no window shows it, and runs when live.

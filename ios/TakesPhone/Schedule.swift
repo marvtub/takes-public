@@ -94,9 +94,27 @@ enum Plan {
     }
 }
 
+/// A plugin that posts for you (the Mac's AutopostHook, admin Autopost): its part of the panel,
+/// under the zone. Nil: the panel as it is.
+struct SchedulePart {
+    var block: AnyView
+    /// In place of the line under it.
+    var note: String?
+    /// In place of Set time / Save.
+    var primary: (title: String, run: () -> Void)?
+}
+
+/// The same plugin's label for the pill (the Mac's AutopostLabel).
+struct ScheduleLabel {
+    var view: AnyView
+    var accent: Bool
+    var label: String
+}
+
 /// Draft: Schedule. Ready, scheduled, posted: a pill with the plan. Either opens the panel.
 struct SchedulePill: View {
     let post: PlatformPost
+    var auto: ScheduleLabel? = nil
     let open: () -> Void
 
     private var at: Date? { post.at }
@@ -105,18 +123,29 @@ struct SchedulePill: View {
 
     var body: some View {
         Button { Brand.select(); open() } label: {
-            HStack(spacing: 6) {
-                Image(systemName: icon).font(.system(size: 12, weight: .semibold))
-                Text(label).lineLimit(1)
+            if let auto {
+                // The Mac's quiet and accent kinds.
+                auto.view
+                    .font(.inter(.footnote, .semibold))
+                    .padding(.horizontal, 12).frame(height: 32)
+                    .foregroundStyle(auto.accent ? Palette.accentInk : Palette.ink)
+                    .background(auto.accent ? Palette.accentSoft : Palette.paper, in: Capsule())
+                    .overlay { if !auto.accent { Capsule().strokeBorder(Palette.border) } }
+                    .contentShape(Capsule())
+            } else {
+                HStack(spacing: 6) {
+                    Image(systemName: icon).font(.system(size: 12, weight: .semibold))
+                    Text(label).lineLimit(1)
+                }
+                .font(.inter(.footnote, .semibold))
+                .padding(.horizontal, 12).frame(height: 32)
+                .foregroundStyle(post.status == "draft" ? Palette.paper : post.status == "posted" ? Palette.live : update ? Palette.warn : Palette.accentInk)
+                .background(post.status == "draft" ? Palette.ink : post.status == "posted" ? Palette.liveSoft : Palette.accentSoft, in: Capsule())
+                .contentShape(Capsule())
             }
-            .font(.inter(.footnote, .semibold))
-            .padding(.horizontal, 12).frame(height: 32)
-            .foregroundStyle(post.status == "draft" ? Palette.paper : post.status == "posted" ? Palette.live : update ? Palette.warn : Palette.accentInk)
-            .background(post.status == "draft" ? Palette.ink : post.status == "posted" ? Palette.liveSoft : Palette.accentSoft, in: Capsule())
-            .contentShape(Capsule())
         }
         .buttonStyle(.press)
-        .accessibilityLabel(post.status == "draft" ? "Schedule" : "When it goes out: \(label)")
+        .accessibilityLabel(post.status == "draft" ? "Schedule" : "When it goes out: \(auto?.label ?? label)")
     }
 
     private var icon: String {
@@ -141,7 +170,10 @@ struct ScheduleSheet: View {
     @EnvironmentObject var model: Model
     let sessionID: String
     let post: PlatformPost
+    /// Autopost's part (admin; the public copy's AutopostWatch has none).
+    @ObservedObject var auto: AutopostWatch = AutopostWatch()
     let close: () -> Void
+    @Environment(\.openURL) private var openURL
     @State private var date = Date()
     @State private var zoneID = TimeZone.current.identifier
     @State private var month = Date()
@@ -155,10 +187,14 @@ struct ScheduleSheet: View {
     private var place: String { post.name }
 
     var body: some View {
-        VStack(spacing: 0) {
+        let part = auto.part(model, post: post, date: date, zone: zone, open: openURL, close: close)
+        return VStack(spacing: 0) {
             SheetBar(title: post.status == "posted" ? "Posted" : "When does it go out?", close: close) {
-                Button(busy ? "Saving…" : saved == nil ? "Set time" : "Save") { send(["action": "set", "at": Self.iso(date, zone), "tz": zoneID]) }
-                    .buttonStyle(.pill(.ink, small: true)).disabled(busy)
+                // Autopost's own button is too long for the bar: it sits under its note.
+                if part?.primary == nil {
+                    Button(busy ? "Saving…" : saved == nil ? "Set time" : "Save") { send(["action": "set", "at": Self.iso(date, zone), "tz": zoneID]) }
+                        .buttonStyle(.pill(.ink, small: true)).disabled(busy)
+                }
             }
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
@@ -169,11 +205,16 @@ struct ScheduleSheet: View {
                         if zone.identifier != TimeZone.current.identifier {
                             Text("That is \(Plan.label(date, .current)) here.").font(.inter(.footnote)).foregroundStyle(Palette.muted)
                         }
-                        Text(post.status == "scheduled"
+                        if let part { part.block.padding(.vertical, 4) }
+                        Text(part?.note ?? (post.status == "scheduled"
                              ? "It is on \(place) for \(saved.map { Plan.label($0, savedZone) } ?? "a time"). A new time here: ask Takes to move it."
-                             : "Then tell Takes \"schedule my posts\". It schedules the post on \(place) for this time and marks it scheduled here.")
+                             : "Then tell Takes \"schedule my posts\". It schedules the post on \(place) for this time and marks it scheduled here."))
                             .font(.inter(.footnote)).foregroundStyle(Palette.muted).fixedSize(horizontal: false, vertical: true)
                         if let failed { Text(failed).font(.inter(.footnote, .medium)).foregroundStyle(Palette.danger) }
+                        if let primary = part?.primary {
+                            Button(primary.title) { Brand.select(); primary.run() }
+                                .buttonStyle(.pill(.primary, wide: true)).disabled(busy).padding(.top, 8)
+                        }
                     }
                     .arrive(3)
                     more.arrive(4)
@@ -182,6 +223,7 @@ struct ScheduleSheet: View {
             }
         }
         .background(Palette.paper.ignoresSafeArea())
+        .task { await auto.load(model, sessionID, post) }
         .onAppear {
             zoneID = savedZone.identifier
             date = saved ?? Plan.nextMorning(in: savedZone)

@@ -79,6 +79,40 @@ struct CopilotTests {
         #expect(store.declined.count == 1)
     }
 
+    /// 2026-11-01: the decline keeps the variant on screen, so the learner knows which draft he turned down.
+    @Test func declineKeepsTheVariant() throws {
+        let (root, store) = try library(["a": "2026-10-02T16:00:00Z", "b": "2026-10-02T16:01:00Z"])
+        var d = try raw(root, "a")
+        d["drafts"] = [["text": "one", "variants": ["one", "two?", "three."], "by": "agent"]]
+        try JSONSerialization.data(withJSONObject: d).write(to: CopilotStore.suggestions(root).appending(path: "a.json"))
+        store.scan(root)
+        store.decline(store.review[0], wrongPost: false, reason: .soundsAI, variant: 2)
+        store.decline(store.review[0], wrongPost: false, reason: .soundsAI, variant: 2)  // b has one draft: no variant
+        #expect((try raw(root, "a")["decision"] as? [String: Any])?["variant"] as? Int == 2)
+        #expect((try raw(root, "b")["decision"] as? [String: Any])?["variant"] == nil)
+    }
+
+    /// comments/eval.json as the server's comment_eval writes it.
+    @Test func readsTheLearningNumbers() throws {
+        let (root, _) = try library()
+        let json = """
+        {"updated": "2026-11-01T12:00:00Z", "waiting": 2, "learned": 108,
+         "weeks": [{"week": "2026-10-05", "decided": 30, "approved": 11, "edited": 5, "bad_comment": 1, "wrong_post": 13,
+                    "expired": 0, "as_is": 0.688, "bad": 0.033, "kept": 0.865, "learn_hours": null},
+                   {"week": "2026-10-26", "decided": 17, "approved": 0, "edited": 10, "bad_comment": 6, "wrong_post": 1,
+                    "expired": 0, "as_is": 0.0, "bad": 0.353, "kept": 0.74, "learn_hours": 3.5}],
+         "gate": {"phrases": 6, "bad_drafts": 49, "caught": 5, "his_blocked": 0},
+         "outcomes": {"rule": 70, "phrase": 6, "no-change": 32},
+         "recent": [{"at": "2026-11-01T12:00:00Z", "outcome": "phrase", "kind": "bad_comment", "text": "everyone skips", "why": "x"}],
+         "judge": {"version": "ab", "agree": 36, "of": 60, "good": 30, "bad": 30, "kappa": 0.2, "trusted": false, "disagree": []}}
+        """
+        try json.write(to: CommentEval.url(root), atomically: true, encoding: .utf8)
+        let e = try #require(CommentEval.load(root))
+        #expect(e.weeks.count == 2 && e.weeks[1].badComment == 6 && e.weeks[1].asIs == 0)
+        #expect(e.asIsNow?.week == "2026-10-26" && e.asIsBefore?.week == "2026-10-05")
+        #expect(e.gate?.hisBlocked == 0 && e.judge?.kappa == 0.2 && e.recent.first?.text == "everyone skips")
+    }
+
     @Test func feedbackGoesOnTheNewestDraft() throws {
         let (root, store) = try library(["a": "2026-10-02T16:00:00Z"])
         var asked: [String] = []
@@ -233,5 +267,12 @@ struct CommentScoutTests {
         #expect(CommentScout.due(now: at(15, 0), lastDay: "2026-10-09", calendar: cal))
         #expect(!CommentScout.due(now: at(15, 0), lastDay: "2026-10-10", calendar: cal))
         #expect(CommentScout.due(now: at(9, 0, day: 11), lastDay: "2026-10-10", calendar: cal))
+    }
+
+    // 2026-11-07: 21 cards expired unread in a week of 10-a-day runs. The run only tops the line up.
+    @Test func topsUpTheLineOnly() {
+        #expect(CommentScout.count(waiting: 0) == 5)
+        #expect(CommentScout.count(waiting: 3) == 2)
+        #expect(CommentScout.count(waiting: 9) == 0)
     }
 }

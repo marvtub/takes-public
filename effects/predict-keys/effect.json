@@ -1,0 +1,15 @@
+{
+  "name": "Predict keys",
+  "description": "A phone keyboard pops up over the shot and types a word letter by letter. Each tapped key pops up, the three suggestions change with every letter, and the last tap picks a suggestion: the word lands in gold and the suggestions guess the next word. Then the keyboard drops away.",
+  "when": "When you name a thing, a tool or the next topic: the keyboard types it, and the next-word guesses can tease what comes next.",
+  "needs": [
+    "the word to type, and the text before it",
+    "the suggestions after each letter",
+    "the three next-word guesses",
+    "the cut time where it starts"
+  ],
+  "kind": "Full frame",
+  "length_s": 4,
+  "shape": "any",
+  "shipped": true
+}

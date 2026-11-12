@@ -9,7 +9,7 @@ import Foundation
 /// server and the skill folders it ships. In the background, once per launch.
 /// Since 2026-10-13 each copied skill carries Takes' marker (so Plugins › Skills shows it as
 /// Takes'), a skill the user switched off there stays off, and the HyperFrames pack is downloaded
-/// once, unless the user has it already or switched it off.
+/// unless the user has it already or switched it off; since 2026-11-04 again once a day.
 enum AgentSetup {
     static func run() {
         let resources = Bundle.main.bundleURL.appending(path: "Contents/Resources")
@@ -27,9 +27,21 @@ enum AgentSetup {
         }
     }
 
-    /// The packs to download at launch: not switched off, and not on this Mac in any form.
-    nonisolated static func packsToFetch(_ packs: [SkillPack], off: Set<String>, home: URL = SkillShelf.home) -> [SkillPack] {
-        packs.filter { !off.contains($0.id) && SkillShelf.status(of: $0, in: home) == .missing }
+    /// The packs to download at launch: not switched off, and either not on this Mac in any form or
+    /// installed by Takes more than a day ago, so the skills follow the repo (2026-11-04: the pack was
+    /// 4 weeks old and pointed at skills HyperFrames had removed). The user's own copy stays theirs.
+    /// A pack that starts off (Raea) comes only once the user switched it on.
+    nonisolated static func packsToFetch(_ packs: [SkillPack], off: Set<String>, home: URL = SkillShelf.home,
+                                         fetched: (SkillPack) -> Date? = { UserDefaults.standard.object(forKey: SkillShelf.fetchedKey($0)) as? Date },
+                                         now: Date = Date()) -> [SkillPack] {
+        packs.filter { p in
+            guard !off.contains(p.id) else { return false }
+            switch SkillShelf.status(of: p, in: home) {
+            case .missing: return !p.startsOff
+            case .installed: return fetched(p).map { now.timeIntervalSince($0) > 86_400 } ?? true
+            default: return false
+            }
+        }
     }
 
     /// Copies each shipped skill folder over the user's copy of the same name, with Takes' marker.

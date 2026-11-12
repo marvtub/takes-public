@@ -29,6 +29,20 @@ struct ChatMCPTests {
         #expect(ChatMCP.servers(claudeJSON: Data("{\"mcpServers\":".utf8), folder: "/w", mcpJSON: nil) == nil)
     }
 
+    /// A remote server's call stops after 4 minutes (2026-11-05: nimo calls hung 436 s and 940 s). The stdio takes server
+    /// keeps the default, and a time limit the user set stays.
+    @Test func remoteServersGetATimeLimit() throws {
+        let c = Data(#"""
+        {"mcpServers":{"takes":{"type":"stdio","command":"python3"},"nimo":{"type":"http","url":"https://n.x.test/mcp"},
+                       "old":{"type":"sse","url":"https://o.x.test/sse"},"slow":{"type":"http","url":"https://s.x.test","timeout":600000}}}
+        """#.utf8)
+        let s = try #require(ChatMCP.servers(claudeJSON: c, folder: "/w", mcpJSON: nil))
+        func timeout(_ k: String) -> Int? { (s[k] as? [String: Any])?["timeout"] as? Int }
+        #expect(timeout("nimo") == 240_000 && timeout("old") == 240_000)
+        #expect(timeout("takes") == nil)
+        #expect(timeout("slow") == 600_000)
+    }
+
     @Test func argumentsAddTheStrictConfig() {
         var t = ChatTurn(context: "c", model: "m", conversation: "id", thread: nil, started: false, access: "acceptEdits", board: nil)
         #expect(!ClaudeAdapter().chatArguments(t).contains("--strict-mcp-config"))

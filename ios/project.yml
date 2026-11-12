@@ -34,11 +34,25 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: de.marvinaziz.takes.phone.uitests
         GENERATE_INFOPLIST_FILE: YES
         TEST_TARGET_NAME: TakesPhone
+  TakesPhoneTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources: [TakesPhoneTests]
+    dependencies:
+      - target: TakesPhone
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: de.marvinaziz.takes.phone.tests
+        GENERATE_INFOPLIST_FILE: YES
+        # The app's PRODUCT_NAME is Takes, so it builds Takes.app; XcodeGen's default host
+        # path uses the target name (TakesPhone.app) and the test bundle finds no host.
+        TEST_HOST: $(BUILT_PRODUCTS_DIR)/Takes.app/Takes
 schemes:
   TakesPhone:
     build:
       targets:
         TakesPhone: all
         TakesPhoneUITests: [test]
+        TakesPhoneTests: [test]
     test:
-      targets: [TakesPhoneUITests]
+      targets: [TakesPhoneTests, TakesPhoneUITests]

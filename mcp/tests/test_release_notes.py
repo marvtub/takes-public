@@ -47,6 +47,25 @@ class ReleaseNotes(unittest.TestCase):
         bad = self.check("### Help\n![For Product Hunt](media/help.webp)\n- Takes Help opens a guide", ["help.webp"])
         self.assertTrue(any("Internal work" in b for b in bad), bad)
 
+    # 2026-10-30: "A browser extension for Microsoft Edge" (T-49, an Edge Add-ons listing) went out in
+    # v2026.10.29. Work for a Climb ticket or in gtm/ is growth work, not news, even when it ships code.
+    def test_ticket_and_gtm_work_is_internal(self):
+        self.assertTrue(self.e.internal("Record in Takes: browser extension for Edge", "Listing text for Edge Add-ons (T-49).", ["extension/manifest.json"]))
+        self.assertTrue(self.e.internal("Judge page cases on their words only (T-38)", "", ["Sources/Takes/Evals.swift"]))
+        self.assertTrue(self.e.internal("Takes: a new link", "", ["Sources/Takes/AppModel.swift", "gtm/listings.md"]))
+        self.assertFalse(self.e.internal("Carousels: Desk look", "Made on a T-shirt day.", ["Sources/Takes/CarouselSlides.swift"]))
+
+    def test_the_edge_extension_stays_out_of_the_draft(self):
+        try:
+            draft = self.e.notes("6a28f33^")
+        except Exception as err:  # a clone without that commit
+            self.skipTest(str(err))
+        self.assertNotIn("Edge", draft)
+
+    def test_a_ticket_in_the_notes_is_refused(self):
+        bad = self.check("### Fixes\n- The store listing for T-49")
+        self.assertTrue(any("Internal work" in b for b in bad), bad)
+
 
 if __name__ == "__main__":
     unittest.main()

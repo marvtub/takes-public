@@ -134,10 +134,13 @@ struct WeekGame: Equatable {
             videos[id] = v
         }
         // The queue: posted and scheduled posts count as out on their day; ready ones as step 3.
+        // A post the autopost plugin could not send is not out: it waits for a retry, like a ready one.
+        let failed = Plugins.builtAutopost?.failed
         for p in PostQueue.read(root) {
             let id = p.project + "/" + p.session.lastPathComponent
             guard var v = videos[id] else { continue }
-            let c = p.content
+            var c = p.content
+            if c.status == .scheduled, failed?(c) == true { c.status = .ready }
             switch c.status {
             case .posted, .scheduled:
                 if let at = c.at, !v.out.contains(where: { $0.platform.lowercased() == p.platform.name.lowercased() }) {

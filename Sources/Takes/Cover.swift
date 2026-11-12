@@ -331,9 +331,17 @@ struct CoverPicker: View {
         current = Cover.current(session, platform)
         let s = session, v = video
         choices = await Task.detached(priority: .userInitiated) { Cover.candidates(in: s, for: v) }.value
-        for u in choices + [current].compactMap({ $0 }) where images[u] == nil {
-            let a = Asset(url: u, group: "", name: u.lastPathComponent, size: 0, modified: Store.modified(u) ?? .distantPast)
-            images[u] = await Thumbs.shared.image(a)
+        var todo: [Asset] = []
+        for u in choices + [current].compactMap({ $0 }) where images[u] == nil && !todo.contains(where: { $0.url == u }) {
+            todo.append(Asset(url: u, group: "", name: u.lastPathComponent, size: 0, modified: Store.modified(u) ?? .distantPast))
+        }
+        // Each thumbnail is its own file read: 4 at a time, not one after another.
+        await withTaskGroup(of: (URL, NSImage?).self) { group in
+            for (i, a) in todo.enumerated() {
+                if i >= 4, let (u, img) = await group.next() { images[u] = img }
+                group.addTask { (a.url, await Thumbs.shared.image(a)) }
+            }
+            for await (u, img) in group { images[u] = img }
         }
     }
 

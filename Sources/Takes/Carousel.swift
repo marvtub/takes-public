@@ -726,6 +726,17 @@ enum CarouselExport {
         return place.folder
     }
 
+    /// Slide `i` as `place` shows it, for a comment's frame PNG.
+    @MainActor
+    static func picture(_ c: CarouselFile, _ i: Int, place: CarouselPlace, session: URL, name: String) -> CGImage? {
+        guard c.slides.indices.contains(i) else { return nil }
+        let r = ImageRenderer(content: CarouselSlideView(slide: c.slides[i], index: i, total: c.slides.count, place: place,
+                                                         name: name, width: place.size.width, style: c.style,
+                                                         session: session, exporting: true))
+        r.scale = 1
+        return r.cgImage
+    }
+
     @MainActor
     static func png(_ v: some View, to url: URL) throws {
         let r = ImageRenderer(content: v)
@@ -1058,6 +1069,22 @@ extension CarouselFile {
     }
 }
 
+/// Comments on areas of the slides, in the Post tab (2026-10-30): the same pins and composer as a
+/// still. The comment button on a slide starts one; drag over the area, or click for the whole slide.
+struct SlideNotes {
+    /// The post's comments on slides, each with its number in the post's comment list.
+    var pins: [(number: Int, comment: Comment)] = []
+    var focused: String?
+    /// Marking an area on the slide on show.
+    var marking = false
+    /// The area of the comment being written, and its slide (from 0).
+    var draft: (slide: Int, rect: CGRect?)?
+    var pick: (String) -> Void = { _ in }
+    var start: (Int) -> Void = { _ in }
+    /// The slide (from 0), the area (nil: the whole slide) and the place it was marked on.
+    var marked: (Int, CGRect?, CarouselPlace) -> Void = { _, _, _ in }
+}
+
 /// The slides where the post's video would be: full width, a page tag, a thin progress line.
 /// Click the left or right half to flip. LinkedIn's document post; Instagram's carousel.
 struct CarouselPager: View {
@@ -1073,7 +1100,9 @@ struct CarouselPager: View {
     var edit: ((Int, CarouselSlide) -> Void)? = nil
     /// Files dropped on the slide at an index.
     var drop: ((Int, [URL]) -> Void)? = nil
+    var notes: SlideNotes? = nil
     @State private var hoverEdge: Int?
+    @State private var hovering = false
 
     var body: some View {
         let total = slides.count
@@ -1115,6 +1144,67 @@ struct CarouselPager: View {
                 if i < total - 1 { edge(1, i) }
             }
         }
+        .overlay { if let notes { noteLayer(notes, i) } }
+        .onHover { hovering = $0 }
+    }
+
+    @ViewBuilder private func noteLayer(_ n: SlideNotes, _ i: Int) -> some View {
+        let f = CGRect(x: 0, y: 0, width: width, height: width / place.ratio)
+        ZStack(alignment: .topLeading) {
+            if n.draft == nil && !n.marking {
+                let shown = n.pins.filter { $0.comment.slide == i + 1 && ($0.comment.open || n.focused == $0.comment.id) }
+                ForEach(shown.filter { $0.comment.area != nil }, id: \.comment.id) { p in
+                    ReviewPlayer.areaBox(p.comment.area!, in: f, number: p.number, strong: n.focused == p.comment.id)
+                        .onTapGesture { n.pick(p.comment.id) }
+                        .help(p.comment.text)
+                }
+                // Whole-slide comments: their numbers beside the comment button.
+                HStack(spacing: 4) {
+                    ForEach(shown.filter { $0.comment.area == nil }, id: \.comment.id) { p in
+                        Button { n.pick(p.comment.id) } label: {
+                            Text("\(p.number)").font(Theme.mono(10, .bold)).foregroundStyle(.white)
+                                .frame(minWidth: 18, minHeight: 18)
+                                .background(Theme.accent.opacity(n.focused == p.comment.id ? 1 : 0.8),
+                                            in: RoundedRectangle(cornerRadius: 4))
+                        }
+                        .buttonStyle(.plain).help(p.comment.text)
+                    }
+                }
+                .padding(.leading, 42).padding(.top, 14)
+            }
+            if let d = n.draft, d.slide == i, let a = d.rect {
+                ReviewPlayer.areaBox(a, in: f, number: nil, strong: true).allowsHitTesting(false)
+            }
+            if n.marking { markLayer(n, i, f) }
+        }
+        .frame(width: f.width, height: f.height, alignment: .topLeading)
+        .overlay(alignment: .topLeading) {
+            if !n.marking && n.draft == nil {
+                Button { n.start(i) } label: {
+                    Image(systemName: "text.bubble").font(.system(size: 11, weight: .semibold)).foregroundStyle(.white)
+                        .frame(width: 26, height: 26)
+                        .background(Theme.accent, in: Circle())
+                        .shadow(color: .black.opacity(0.2), radius: 2, y: 1)
+                }
+                .buttonStyle(.plain).padding(10)
+                .opacity(hovering ? 1 : 0)
+                .help("Comment on this slide, for Takes")
+            }
+        }
+    }
+
+    private func markLayer(_ n: SlideNotes, _ i: Int, _ f: CGRect) -> some View {
+        Color.black.opacity(0.18)
+            .overlay(alignment: .top) {
+                StagePill(text: "Drag over the area · click for the whole slide · Esc", icon: "viewfinder", accent: true)
+                    .padding(.top, 14).allowsHitTesting(false)
+            }
+            .contentShape(Rectangle())
+            .gesture(DragGesture(minimumDistance: 0).onEnded { g in
+                let r = ReviewPlayer.normal(g.startLocation, g.location, in: f)
+                n.marked(i, (r.width < 0.015 && r.height < 0.015) ? nil : r, place)
+            })
+            .onHover { inside in if inside { NSCursor.crosshair.push() } else { NSCursor.pop() } }
     }
 
     private func edge(_ by: Int, _ i: Int) -> some View {
@@ -1156,6 +1246,7 @@ struct CarouselPhotosPhone: View {
     var flipped: (Int) -> Void = { _ in }
     var edit: ((Int, CarouselSlide) -> Void)? = nil
     var drop: ((Int, [URL]) -> Void)? = nil
+    var notes: SlideNotes? = nil
 
     private var width: CGFloat { (height * 9 / 19.5).rounded() }
     private var handle: String { name.lowercased().replacingOccurrences(of: " ", with: "") }
@@ -1189,7 +1280,7 @@ struct CarouselPhotosPhone: View {
 
     private func pager(_ p: CarouselPlace) -> CarouselPager {
         CarouselPager(slides: slides, place: p, name: name, index: $index, width: width, style: style, session: session,
-                      flipped: flipped, edit: edit, drop: drop)
+                      flipped: flipped, edit: edit, drop: drop, notes: notes)
     }
 
     private var instagram: some View {

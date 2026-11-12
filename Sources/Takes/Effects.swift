@@ -61,10 +61,18 @@ enum EffectLib {
     static func makeAsk(_ example: String, root: URL) -> String {
         """
         Make a new effect from this example: \(example)
+        Measure the move first, don't guess it: find where the example cuts, then read its frames one by one \
+        through the move's entrance and exit (ffmpeg): which way it moves, for how many frames, what the \
+        letters or shapes are made of (solid, gradient, glass, outline, glow), and their colours from the \
+        pixels. A thing fully there on a frame is set on that frame, not faded in.
         Build it like the shipped ones (list_effects, then list_effects <the closest one> for its files): \
         effect.json ("shape": "any"), README.md, src/ (HyperFrames) that lays itself out for any frame \
         (9:16, 4:5, 1:1, 16:9) and a 9:16 preview.mp4 + preview.png, in \
-        \(own(root: root).path)/<short-name>/. It shows on the Effects tab when its preview is there.
+        \(own(root: root).path)/<short-name>/. Give the composition's root an opaque background, so a fade \
+        never shows white.
+        Compare once: a strip of the example's frames through the move beside the same frames of your preview \
+        (ffmpeg hstack). Fix what differs (timing, direction, size, colour), render once more, then stop. It \
+        shows on the Effects tab when its preview is there.
         """
     }
 }

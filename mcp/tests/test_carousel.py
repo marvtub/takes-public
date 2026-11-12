@@ -141,3 +141,18 @@ class CarouselTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+    def test_a_comment_on_a_slide_shows_the_slide(self):
+        t.t_set_carousel({"session": self.s, "on": {"linkedin": True},
+                          "slides": [{"title": "Hook"}, {"title": "Too much work"}]})
+        t.write_comments(self.s, {"comments": [
+            {"id": "c1", "file": "posts/carousel.json", "slide": 2, "rect": [0.1, 0.2, 0.5, 0.3],
+             "text": "Bigger photos", "status": "open", "by": "user", "at": "x", "frame": "comments/c1.png"},
+            {"id": "c2", "file": "posts/carousel.json", "slide": 1, "text": "Darker", "status": "open",
+             "by": "user", "at": "x"}]})
+        a, b = t.t_get_comments({"session": self.s})["comments"]
+        self.assertEqual(a["when"], "carousel slide 2")
+        self.assertEqual(a["slide_now"]["title"], "Too much work")
+        self.assertEqual(a["area"], "x 10%-60%, y 20%-50% of the slide (from top left)")
+        self.assertEqual(b["area"], "whole slide")
+

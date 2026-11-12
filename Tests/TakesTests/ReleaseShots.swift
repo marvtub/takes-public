@@ -1,4 +1,6 @@
 import AppKit
+import AVFoundation
+import ObjectiveC
 import SwiftUI
 import Testing
 @testable import Takes
@@ -82,30 +84,160 @@ let releaseMediaDir = ProcessInfo.processInfo.environment["TAKES_RELEASE_MEDIA"]
     @Test(.enabled(if: releaseMediaDir != nil)) func thisRelease() async throws {
         Self.setUp()
         defer { Look.shared.reset() }
-        let app = AppModel()
-
-        // Search (v2026.10.29): the results page's preview, one kind after another, each file in its own shape.
-        let root = FileManager.default.temporaryDirectory.appending(path: "release-search-\(UUID().uuidString)")
-        defer { try? FileManager.default.removeItem(at: root) }
-        let project = root.appending(path: "Phone filming")
-        let s = project.appending(path: "2026-10-20-how-i-film")
-        try FileManager.default.createDirectory(at: s.appending(path: "stills"), withIntermediateDirectories: true)
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory.appending(path: "release-shots-\(UUID().uuidString)")
+        defer { try? fm.removeItem(at: root) }
         // The demo people (made up); the public copy has no scripts/public, so release-media.sh names the folder.
         let demo = ProcessInfo.processInfo.environment["TAKES_DEMO_MEDIA"].map { URL(fileURLWithPath: $0) }
             ?? Self.repo.appending(path: "scripts/public/demo-media")
-        try FileManager.default.copyItem(at: demo.appending(path: "maya/creator-tall.jpg"), to: s.appending(path: "stills/kitchen-vertical.jpg"))
-        try FileManager.default.copyItem(at: demo.appending(path: "lin/creator-wide.jpg"), to: s.appending(path: "stills/desk-wide.jpg"))
-        try Data("# How I film on my phone\n\nFace the window. The light does most of the work.\n\nLock the exposure on your face, then clip the mic on and look at the lens.\n\nOne take a day, for a month. That is the whole trick.".utf8)
-            .write(to: s.appending(path: "script.md"))
-        try Store.encoder.encode(SessionMeta(title: "How I film on my phone", createdAt: Date())).write(to: s.appending(path: "session.json"))
-        let hits = [MediaSearch.Hit(path: s.appending(path: "stills/kitchen-vertical.jpg"), kind: "image", start: 0),
-                    MediaSearch.Hit(path: s.appending(path: "stills/desk-wide.jpg"), kind: "image", start: 0),
-                    MediaSearch.Hit(path: s.appending(path: "script.md"), kind: "script", start: 0, text: "Lock the exposure"),
-                    MediaSearch.Hit(path: s, kind: "session", start: 0, text: "Phone filming", title: "How I film on my phone")]
-        let pick = SearchPick()
-        let preview = SearchPickView(pick: pick, hits: hits, root: root).environment(app).tint(Theme.accent).font(Theme.body)
-        try await film("search", preview, size: CGSize(width: 900, height: 640), seconds: 10,
-                       beats: [(2.5, { pick.at = 1 }), (5, { pick.at = 2 }), (7.5, { pick.at = 3 })])
+        // The app's own pictures (the mascot) come from its bundle, which a test run does not have:
+        // point the test runner's resources at the repo's brand files for these scenes.
+        let resources = root.appending(path: "Resources")
+        try fm.createDirectory(at: resources.appending(path: "Brand"), withIntermediateDirectories: true)
+        try fm.copyItem(at: Self.repo.appending(path: "assets/brand/mascot.png"), to: resources.appending(path: "Brand/mascot.png"))
+        ReleaseBundle.use(resources)
+        defer { ReleaseBundle.use(nil) }
+
+        // A made-up session to open: Maya's launch video.
+        let session = root.appending(path: "Launches/2026-11-10-launch-video")
+        try fm.createDirectory(at: session, withIntermediateDirectories: true)
+        try Data(#"{"title":"Launch video","createdAt":"2026-11-10T10:00:00Z","named":true,"takes":[]}"#.utf8)
+            .write(to: session.appending(path: "session.json"))
+        let app = AppModel()
+        app.library.setRoot(root)
+        app.library.select(session)
+
+        // Start (v2026.11): the mascot, one line, Record in the middle, the last session at the foot.
+        await still("start", StartPanel(last: "How I film on my phone", lastPath: session.path).environment(app),
+                    size: CGSize(width: 900, height: 620))
+
+        // Effects: the Effects page of the Styles board with the 35 effects. The test runner has no
+        // app bundle, so the effects go in as the library's own (same cards, same board).
+        let own = EffectLib.own(root: root)
+        try fm.createDirectory(at: own, withIntermediateDirectories: true)
+        for d in try fm.contentsOfDirectory(at: Self.repo.appending(path: "effects"), includingPropertiesForKeys: nil)
+        where fm.fileExists(atPath: d.appending(path: "effect.json").path) {
+            let to = own.appending(path: d.lastPathComponent)
+            try fm.createDirectory(at: to, withIntermediateDirectories: true)
+            // The poster, not the video: a playing video does not show in an off-screen picture.
+            for f in ["effect.json", "preview.png", "README.md"] where fm.fileExists(atPath: d.appending(path: f).path) {
+                try fm.copyItem(at: d.appending(path: f), to: to.appending(path: f))
+            }
+        }
+        let suite = "release-shots-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        defaults.set("effects", forKey: "stylesPage")
+        await still("effects", StylesBoard(root: root).environment(app).defaultAppStorage(defaults).tint(Theme.accent), size: CGSize(width: 1100, height: 1010), wait: 3)
+
+        // Sound: the Made tab with three songs made with ElevenLabs Music, tagged, and the tag row.
+        let audio = SoundLib.dir(root: root)
+        let songs = [("Music/Chasing the Light.m4a", 148.0), ("SFX/Whoosh to hit.m4a", 2.0), ("SFX/Mouse click 2.m4a", 1.0),
+                     ("Made/Moonlight piano over soft D&B v1.m4a", 94.0), ("Made/Heroic strings, slow build v2.m4a", 121.0),
+                     ("Made/Lo-fi desk beat for a screen demo v1.m4a", 63.0)]
+        for (f, seconds) in songs { try ReleaseAudio.silence(audio.appending(path: f), seconds: seconds) }
+        SoundTags.save(["Made/Moonlight piano over soft D&B v1.m4a": ["Calm", "Education"],
+                        "Made/Heroic strings, slow build v2.m4a": ["Launch", "Upbeat"],
+                        "Made/Lo-fi desk beat for a screen demo v1.m4a": ["Calm", "Screen demo"]], to: audio)
+        let doc = SessionDoc(url: session)
+        await still("sound", SoundsPane(doc: doc, wide: true, startOn: "Made").environment(app), size: CGSize(width: 1000, height: 470), wait: 2.5)
+
+        // Carousels: the How I built it template in the Desk look, with a Screen card per step.
+        let cs = root.appending(path: "Carousels/2026-11-09-viral-carousels")
+        try fm.createDirectory(at: cs, withIntermediateDirectories: true)
+        var takes: [[String: Any]] = []
+        for (i, name) in ["find what works", "talk it out", "build every slide"].enumerated() {
+            let file = String(format: "take-%02d-screen.jpg", i + 1)
+            try fm.copyItem(at: demo.appending(path: "screen-wide.jpg"), to: cs.appending(path: file))
+            takes.append(["number": i + 1, "kind": "screen", "file": file, "startedAt": "2026-11-09T10:0\(i):00Z", "name": name, "keeper": false])
+        }
+        try JSONSerialization.data(withJSONObject: ["title": "Viral carousels", "createdAt": "2026-11-09T10:00:00Z", "named": true, "takes": takes])
+            .write(to: cs.appending(path: "session.json"))
+        var built = CarouselTemplate.built.slides(cs, title: "carousels that get saved")
+        built[2].title = "1) *find out what already works*\nTakes reads my best posts and the ones that went viral."
+        built[2].body = "(the top 10 are the plan)"
+        built[3].title = "2) *talk it out*\nI send a voice note, it writes every slide."
+        built[3].body = "(and I change anything)"
+        await SlidePictures.shared.preload(built.flatMap { $0.loads(cs) })
+        let shown = Array(built.prefix(4))
+        let row = HStack(spacing: 18) {
+            ForEach(Array(shown.enumerated()), id: \.offset) { i, sl in
+                CarouselSlideView(slide: sl, index: i, total: built.count, place: .instagram, name: "Maya Chen", width: 270,
+                                  style: SlideStyle(.desk), session: cs, exporting: true)
+                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            }
+        }
+        .padding(28).frame(maxWidth: .infinity, maxHeight: .infinity)
+        await still("carousels", row, size: CGSize(width: 1210, height: 400), wait: 2)
+
+        // Screen takes: the eight cursor looks, as the cursor-looks effect draws them: the first
+        // two seconds of each look (a move onto Export and the click), from the effect's own preview.
+        let gen = AVAssetImageGenerator(asset: AVURLAsset(url: Self.repo.appending(path: "effects/cursor-looks/preview-16x9.mp4")))
+        gen.requestedTimeToleranceBefore = .zero
+        gen.requestedTimeToleranceAfter = .zero
+        var frames: [NSImage] = []
+        let fps = 12.0, each = 2.0
+        for look in 0..<8 {
+            for k in 0..<Int(each * fps) {
+                let t = Double(look) * 4.2 + 0.2 + Double(k) / fps
+                let cg = try await gen.image(at: CMTime(seconds: t, preferredTimescale: 600)).image
+                frames.append(NSImage(cgImage: cg, size: NSSize(width: cg.width, height: cg.height)))
+            }
+        }
+        let pick = FramePick()
+        try await film("screen-cursor", FramePickView(pick: pick, frames: frames), size: CGSize(width: 960, height: 540),
+                       seconds: Double(frames.count) / fps,
+                       beats: (1..<frames.count).map { i in (Double(i) / fps, { pick.at = i }) })
+    }
+}
+
+/// A film made of pictures: which one shows.
+@MainActor @Observable final class FramePick {
+    var at = 0
+}
+
+struct FramePickView: View {
+    let pick: FramePick
+    let frames: [NSImage]
+    var body: some View {
+        Image(nsImage: frames[pick.at]).resizable().interpolation(.high).aspectRatio(contentMode: .fill)
+    }
+}
+
+/// Points the test runner's Bundle.main resources at a folder (the mascot), then back.
+enum ReleaseBundle {
+    nonisolated(unsafe) static var folder: URL?
+    nonisolated(unsafe) static var swapped = false
+    static func use(_ url: URL?) {
+        folder = url
+        let want = url != nil
+        guard want != swapped,
+              let a = class_getInstanceMethod(Bundle.self, #selector(getter: Bundle.resourceURL)),
+              let b = class_getInstanceMethod(Bundle.self, #selector(getter: Bundle.releaseShotsResourceURL)) else { return }
+        method_exchangeImplementations(a, b)
+        swapped = want
+    }
+}
+
+extension Bundle {
+    @objc dynamic var releaseShotsResourceURL: URL? {
+        // After the swap this name calls the original getter.
+        if self === Bundle.main, let f = ReleaseBundle.folder { return f }
+        return releaseShotsResourceURL
+    }
+}
+
+/// Silent songs of a real length, so the rows show their times.
+enum ReleaseAudio {
+    static func silence(_ url: URL, seconds: Double) throws {
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let file = try AVAudioFile(forWriting: url, settings: [AVFormatIDKey: kAudioFormatMPEG4AAC, AVSampleRateKey: 22050,
+                                                               AVNumberOfChannelsKey: 1])
+        let n = AVAudioFrameCount(22050 * seconds)
+        let buf = AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: n)!
+        buf.frameLength = n
+        buf.floatChannelData![0].update(repeating: 0, count: Int(n))
+        try file.write(from: buf)
     }
 }
 

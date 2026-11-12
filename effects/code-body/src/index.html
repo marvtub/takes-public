@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <!-- Code body: a wipe comes down from the top and turns the shot into code. The speaker is made of monospace
+         letters coloured by the footage, bright and clear; the room around them is faint green code. The letters
+         start big and blocky and get finer in steps, so the face resolves out of the code. A wipe going up brings
+         the shot back. The letters are this file's own source.
+         Inputs next to this file: footage.mp4 (the moment, at the frame size), person.webm (its cutout) and grid.js
+         (from `python3 grid.py <this folder>`: the colour of every letter cell, per frame).
+         Full frame: render it as mp4 and lay it over the cut. The frame size is data-width / data-height on #root.
+         Edit LOOK and AT below. -->
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+    <script src="grid.js"></script>
+    <style>
+      @font-face { font-family: "Plex Mono"; src: url("fonts/IBMPlexMono-Medium.ttf"); font-weight: 500; }
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
+      #root { position: relative; width: 100%; height: 100%; overflow: hidden; background: #000; }
+      #root video, #code { position: absolute; inset: 0; width: 100%; height: 100%; }
+      #root video { object-fit: cover; }
+      #edge { position: absolute; left: 0; top: 0; width: 100%; height: 2px; background: #9fe0b0; box-shadow: 0 0 12px #9fe0b0; opacity: 0; }
+    </style>
+  </head>
+  <body>
+    <div id="root" data-composition-id="main" data-start="0" data-duration="3.4" data-width="1080" data-height="1920">
+      <video id="footage" class="clip" src="footage.mp4" muted playsinline data-start="0" data-track-index="0"></video>
+      <canvas id="code"></canvas>
+      <div id="edge"></div>
+    </div>
+    <script>
+      // Look. room / bg = the colour of the room's code and behind it. lift = how much brighter the speaker's
+      // letters are than the footage. steps = the cell sizes the face resolves through (1 = the finest grid in
+      // grid.js), each shown for `hold` seconds.
+      const LOOK = { bg: "#0d1a13", room: "#5f9a73", roomAlpha: 0.28, lift: 1.15, block: 165, steps: [4, 3, 2, 1], hold: 0.16 };
+      // When (seconds): the wipe down, how long it takes, the wipe back up.
+      const AT = { in: 0.3, wipe: 0.32, out: 2.75 };
+
+      const root = document.getElementById("root");
+      const FRAME = { w: Number(root.dataset.width), h: Number(root.dataset.height) };
+      const cv = document.getElementById("code"), ctx = cv.getContext("2d");
+      cv.width = FRAME.w; cv.height = FRAME.h;
+      const G = window.GRID, bytes = Uint8Array.from(atob(G.data), (c) => c.charCodeAt(0));
+      // The text the letters come from. Any code or words work; it is read left to right, row by row.
+      const SOURCE = `const tl = gsap.timeline({ paused: true }); for (const take of session.takes) { if (take.keeper) cut(take); }
+        render_edit({ base: "talk-v3", over: [{ file: "code-body.mp4", at: 12.4 }] }); export function grade(frame) {
+        return frame.lift(0.08).contrast(1.12).warm(0.04); } const words = transcript.words.filter((w) => w.end - w.start > 0.05);
+        def find_cuts(clip): return [s for s in scenes(clip) if s.score > 0.4] # keep the jump cuts inside one take
+        await publish_edit(session, "edits/talk-v4.mp4"); captions.style = { font: "Inter", weight: 800, size: 64 };`;
+      const CODE = SOURCE.replace(/\s+/g, "·");
+      const cw = FRAME.w / G.cols, ch = FRAME.h / G.rows;
+      const S = { top: 0, band: 0 }; // the visible band of code, as parts of the height
+      function cellAt(f, r, c) { const i = ((f * G.rows + r) * G.cols + c) * 4; return [bytes[i], bytes[i + 1], bytes[i + 2], bytes[i + 3]]; }
+      function draw() {
+        const t = tl.time();
+        ctx.clearRect(0, 0, FRAME.w, FRAME.h);
+        if (S.band - S.top <= 0.001) return;
+        const y0 = S.top * FRAME.h, y1 = S.band * FRAME.h;
+        ctx.save(); ctx.beginPath(); ctx.rect(0, y0, FRAME.w, y1 - y0); ctx.clip();
+        ctx.fillStyle = LOOK.bg; ctx.fillRect(0, 0, FRAME.w, FRAME.h);
+        const f = Math.min(G.frames - 1, Math.max(0, Math.floor(t * G.fps)));
+        const k = LOOK.steps[Math.min(LOOK.steps.length - 1, Math.max(0, Math.floor((t - AT.in) / LOOK.hold)))];
+        const sw = cw * k, sh = ch * k;
+        ctx.font = `500 ${sh * 1.05}px "Plex Mono", monospace`;
+        ctx.textBaseline = "top";
+        // Auto levels on the speaker: the brightest tenth of their cells maps to near white, so any skin and
+        // any light reads clearly.
+        const lums = [];
+        for (let i = 0; i < G.rows * G.cols; i += 3) { const q = (f * G.rows * G.cols + i) * 4; if (bytes[q + 3] > 128) lums.push(0.3 * bytes[q] + 0.59 * bytes[q + 1] + 0.11 * bytes[q + 2]); }
+        lums.sort((a, b) => a - b);
+        const p90 = lums.length ? lums[Math.floor(lums.length * 0.9)] : 200, gain = Math.min(3, 235 / Math.max(40, p90));
+        let n = (f * 7) % CODE.length; // the text creeps each frame, like a live terminal
+        for (let r = 0; r < G.rows; r += k) for (let c = 0; c < G.cols; c += k) {
+          const y = r * ch; if (y + sh < y0 || y > y1) { n++; continue; }
+          // average the block for coarse steps
+          let R = 0, Gc = 0, B = 0, A = 0, m = 0;
+          for (let rr = r; rr < Math.min(r + k, G.rows); rr++) for (let cc = c; cc < Math.min(c + k, G.cols); cc++) { const p = cellAt(f, rr, cc); R += p[0]; Gc += p[1]; B += p[2]; A += p[3]; m++; }
+          R /= m; Gc /= m; B /= m; A /= m * 255;
+          const chr = CODE[n++ % CODE.length];
+          let lum = 0.3 * R + 0.59 * Gc + 0.11 * B;
+          if (A > 0.5) { R *= gain; Gc *= gain; B *= gain; lum *= gain;
+            // The speaker: the colour of the footage, lifted. Bright cells become a solid block with a dark letter
+            // (the highlights), the rest are bright letters.
+            const L = LOOK.lift * (1 + (1 - Math.min(1, lum / 255)) * 0.5);
+            const col = `rgb(${Math.min(255, R * L)},${Math.min(255, Gc * L)},${Math.min(255, B * L)})`;
+            if (lum > LOOK.block) { ctx.fillStyle = col; ctx.fillRect(c * cw, y, sw, sh); ctx.fillStyle = LOOK.bg; }
+            else ctx.fillStyle = col;
+          } else {
+            ctx.fillStyle = LOOK.room; ctx.globalAlpha = LOOK.roomAlpha * (0.35 + 0.65 * (lum / 255));
+          }
+          ctx.fillText(chr, c * cw + sw * 0.08, y);
+          ctx.globalAlpha = 1;
+        }
+        ctx.restore();
+      }
+      const edge = document.getElementById("edge");
+      window.__timelines = window.__timelines || {};
+      const tl = gsap.timeline({ paused: true, onUpdate: draw });
+      // Wipe down: the code band grows from the top.
+      tl.to(S, { band: 1, duration: AT.wipe, ease: "power2.inOut" }, AT.in);
+      tl.set(edge, { opacity: 1 }, AT.in);
+      tl.fromTo(edge, { y: 0 }, { y: FRAME.h, duration: AT.wipe, ease: "power2.inOut", immediateRender: false }, AT.in);
+      tl.set(edge, { opacity: 0 }, AT.in + AT.wipe);
+      // Wipe up: the shot comes back from the bottom.
+      tl.to(S, { band: 0, duration: AT.wipe, ease: "power2.inOut" }, AT.out);
+      tl.set(edge, { opacity: 1 }, AT.out);
+      tl.fromTo(edge, { y: FRAME.h }, { y: 0, duration: AT.wipe, ease: "power2.inOut", immediateRender: false }, AT.out);
+      tl.set(edge, { opacity: 0 }, AT.out + AT.wipe);
+      tl.set({}, {}, Number(root.dataset.duration));
+      window.__timelines["main"] = tl;
+      draw(); tl.seek(0);
+    </script>
+  </body>
+</html>

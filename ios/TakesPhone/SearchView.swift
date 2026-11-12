@@ -39,7 +39,7 @@ struct SearchView: View {
     @State private var query = ""
     @State private var filter = "all"
     @State private var project: String?
-    @State private var result: SearchResult?
+    @State private var requestState = SearchRequestState<SearchResult>()
     @State private var picking = false
     /// The results page, as the Mac's ⌘K ⏎ (2026-10-28): a sort, date groups, and a preview.
     @State private var sort = "best"
@@ -52,6 +52,7 @@ struct SearchView: View {
     private static let sorts = [("best", "Best match"), ("newest", "Newest first"), ("oldest", "Oldest first")]
     private static let filters = [("all", "All"), ("takes", "Takes"), ("edits", "Edits"), ("broll", "B-roll"), ("stills", "Stills"), ("scripts", "Scripts")]
     private var projects: [String] { model.projects.isEmpty ? Array(Set(model.sessions.map(\.project))).sorted() : model.projects }
+    private var currentRequest: SearchRequest { SearchRequest(query: query, filter: filter, project: project, sort: sort) }
 
     var body: some View {
         NavigationStack(path: $path) {
@@ -66,7 +67,7 @@ struct SearchView: View {
             .toolbar(.hidden, for: .navigationBar)
             .navigationDestination(for: Session.self) { SessionView(session: $0) }
             .navigationDestination(item: $previewing) { h in
-                SearchPreviewScreen(hit: h, moments: (result?.hits ?? []).filter { $0.path == h.path && $0.title == nil }) { showing = $0 }
+                SearchPreviewScreen(hit: h, moments: (requestState.value(for: currentRequest)?.hits ?? []).filter { $0.path == h.path && $0.title == nil }) { showing = $0 }
             }
             .overlay {
                 if picking {
@@ -136,12 +137,15 @@ struct SearchView: View {
     }
 
     @ViewBuilder private var results: some View {
+        let request = currentRequest
+        let result = requestState.value(for: request)
+        let failed = requestState.didFail(request)
         let hits = result?.hits ?? []
         ScrollView {
             if hits.isEmpty {
-                Text(query.isEmpty ? (result?.status ?? "") : result == nil ? " " : filter != "all" || project != nil
+                Text(failed ? "The Mac didn't answer. Try again." : query.isEmpty ? (result?.status ?? "") : result == nil ? " " : filter != "all" || project != nil
                      ? "Nothing found here. Pick All or All projects to search everything." : "Nothing found.")
-                    .font(.inter(.subheadline)).foregroundStyle(Palette.muted)
+                    .font(.inter(.subheadline)).foregroundStyle(failed ? Palette.danger : Palette.muted)
                     .frame(maxWidth: .infinity, alignment: .leading).padding(16)
             } else {
                 LazyVStack(alignment: .leading, spacing: 2) {
@@ -179,15 +183,22 @@ struct SearchView: View {
             }
         }
         .scrollDismissesKeyboard(.interactively)
-        .task(id: "\(query)|\(filter)|\(project ?? "")|\(sort)") {
+        .task(id: request) {
+            requestState.begin(request)
             // As on the Mac: wait a moment while typing, then ask once.
-            try? await Task.sleep(for: .milliseconds(query.isEmpty ? 0 : 220))
-            guard !Task.isCancelled else { return }
-            var q = ["q": query, "filter": filter, "sort": sort, "limit": "200"]
-            if let project { q["project"] = project }
-            guard let d = try? await model.act("/api/search", q, nil, method: "GET"),
-                  let r = try? API.decoder.decode(SearchResult.self, from: d), !Task.isCancelled else { return }
-            withAnimation(.smooth(duration: 0.28)) { result = r }
+            do {
+                try await Task.sleep(for: .milliseconds(request.query.isEmpty ? 0 : 220))
+                guard !Task.isCancelled else { return }
+                var q = ["q": request.query, "filter": request.filter, "sort": request.sort, "limit": "200"]
+                if let project = request.project { q["project"] = project }
+                let d = try await model.act("/api/search", q, nil, method: "GET")
+                let result = try API.decoder.decode(SearchResult.self, from: d)
+                guard !Task.isCancelled else { return }
+                withAnimation(.smooth(duration: 0.28)) { requestState.succeed(result, for: request) }
+            } catch {
+                guard !Task.isCancelled else { return }
+                withAnimation(.smooth(duration: 0.28)) { requestState.fail(request) }
+            }
         }
     }
 

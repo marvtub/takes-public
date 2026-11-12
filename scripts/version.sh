@@ -5,4 +5,6 @@
 # Outside a git checkout (the phone's refresh mirror) it prints nothing, and the defaults stay.
 cd "$(dirname "$0")/.." || exit 0
 git rev-parse --git-dir >/dev/null 2>&1 || exit 0
-echo "$(TZ=America/Los_Angeles git log -1 --date=format-local:'%Y.%-m.%-d' --format=%cd) $(git rev-list --count HEAD)"
+version="$(TZ=America/Los_Angeles git log -1 --date=format-local:'%Y.%-m.%-d' --format=%cd)" || exit 0
+build="$(git rev-list --count HEAD)" || exit 0
+printf '%s %s\n' "$version" "$build"

@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <!-- Comment drop: a call to action. A big keyword drops in letter by letter over an empty comment box, then the
+         letters fall into the box and type themselves, the Post button wakes up, and it posts: the box becomes
+         your pinned comment ("KEYWORD to get ..."). A viewer's reply with just the keyword drops in under it,
+         hearts fill and the like count ticks up. Sticker captions stack up near the speaker's hands
+         ("Comment KEYWORD / to get ... / + more"). Then it all lifts away.
+         Inputs next to this file: footage.mp4 (the moment, at the frame size) and avatar.png (your round photo).
+         Full frame: render it as mp4 and lay it over the cut. The frame size is data-width / data-height on #root.
+         Edit CTA, CAPTIONS, PLACE, LOOK and AT below. -->
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+    <style>
+      @font-face { font-family: "Inter"; src: url("fonts/InterVariable.ttf"); font-weight: 100 900; }
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
+      #root { position: relative; width: 100%; height: 100%; overflow: hidden; background: #000; font-family: "Inter", sans-serif; }
+      #root video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+      .abs { position: absolute; }
+      #big { display: flex; justify-content: center; color: var(--cream); font-weight: 850; letter-spacing: -0.02em; line-height: 0.8; }
+      #big span { display: inline-block; opacity: 0; text-shadow: 0 calc(var(--u) * 6px) calc(var(--u) * 26px) rgba(0,0,0,.4), 0 0 calc(var(--u) * 2px) rgba(0,0,0,.25); }
+      .card { background: #fff; border-radius: calc(var(--u) * 34px); box-shadow: 0 calc(var(--u) * 10px) calc(var(--u) * 30px) rgba(0,0,0,.35);
+              display: flex; align-items: flex-start; gap: calc(var(--u) * 20px); padding: calc(var(--u) * 22px) calc(var(--u) * 26px); color: #161616; }
+      .av { flex: none; border-radius: 50%; background-size: cover; background-position: center; }
+      .grow { flex: 1; min-width: 0; }
+      .meta { font-size: calc(var(--u) * 26px); color: #6d6d6d; }
+      .meta b { color: #161616; font-weight: 650; }
+      .txt { font-size: calc(var(--u) * 33px); line-height: 1.22; font-weight: 480; }
+      .txt b { color: var(--green); font-weight: 800; }
+      .heart { flex: none; display: flex; flex-direction: column; align-items: center; gap: calc(var(--u) * 2px); font-size: calc(var(--u) * 22px); color: #666; }
+      .heart svg { width: calc(var(--u) * 38px); height: calc(var(--u) * 38px); }
+      #input { align-items: center; }
+      #field { flex: 1; font-size: calc(var(--u) * 33px); color: #8a8a8a; display: flex; align-items: center; white-space: pre; }
+      #field .t { color: #161616; font-weight: 800; }
+      #field .caret { width: calc(var(--u) * 3px); height: 1.1em; background: #222; margin-right: 1px; }
+      #post { flex: none; font-weight: 650; font-size: calc(var(--u) * 30px); padding: calc(var(--u) * 14px) calc(var(--u) * 28px);
+              border-radius: 999px; background: #ebe7dd; color: #4a463e; }
+      .cap { position: absolute; background: #fff; color: #111; font-weight: 800; white-space: nowrap; border-radius: calc(var(--u) * 12px);
+             padding: calc(var(--u) * 6px) calc(var(--u) * 18px); font-size: calc(var(--u) * 44px); letter-spacing: -0.01em; opacity: 0; }
+    </style>
+  </head>
+  <body>
+    <div id="root" data-composition-id="main" data-start="0" data-duration="4.4" data-width="1080" data-height="1920">
+      <div id="shot" class="abs" style="inset:0">
+        <video id="footage" class="clip" src="footage.mp4" muted playsinline data-start="0" data-track-index="0"></video>
+        <video id="mirror" class="clip" src="footage.mp4" muted playsinline data-start="0" data-track-index="1" style="top:-100%;transform:scaleY(-1)"></video>
+      </div>
+      <div id="big" class="abs"></div>
+      <div id="stack" class="abs">
+        <div id="input" class="card"><div class="av"></div><div id="field"><span class="caret"></span><span class="t"></span><span class="ph">Add a comment...</span></div><div id="post">Post</div></div>
+        <div id="pinned" class="card" style="display:none"><div class="av"></div><div class="grow"><div class="meta"><b class="who"></b> · now</div><div class="txt"></div></div><div class="heart"><span class="h"></span><span class="n"></span></div></div>
+      </div>
+      <div id="reply" class="card abs" style="opacity:0"><div class="av" id="you"></div><div class="grow"><div class="meta"><b>you</b> · now</div><div class="txt"><b class="kw"></b></div></div><div class="heart"><span class="h"></span><span class="n"></span></div></div>
+    </div>
+    <script>
+      // The keyword, your handle, the rest of your pinned comment, and how many likes it ticks up to.
+      const CTA = { word: "EDIT", handle: "alexrivera", rest: "to get access to these + 40 more", likes: 9 };
+      // Sticker captions: [text, when it shows (seconds)]. Use the keyword in the first one.
+      const CAPTIONS = [["Comment EDIT", 1.3], ["to get access to these", 1.9], ["+ 40 more effects", 3.1]];
+      // Where things sit, as parts of the frame: the comment stack (centred: its top and width), the captions
+      // (centred: their top), the gap between the two comments (px at 1080) and how far the shot moves down to make room above the head (0 = not at all; the
+      // gap at the top is filled with the top of the shot, mirrored). Square and wide frames put the comments top left by themselves (SIDE below).
+      const PLACE = { y: 0.14, w: 0.8, capTop: 0.68, down: 0.1, gap: 14 };
+      const LOOK = { green: "#1d3a2b", cream: "#efe9dc", red: "#d94a4a", big: 160 };
+      // When (seconds): letters drop, letters fall into the box, it posts, the reply drops, it all leaves.
+      const AT = { drop: 0.25, fall: 0.85, post: 1.4, reply: 1.75, out: 3.85 };
+
+      const root = document.getElementById("root");
+      const FRAME = { w: Number(root.dataset.width), h: Number(root.dataset.height) };
+      const U = Math.min(FRAME.w, FRAME.h) / 1080;
+      root.style.setProperty("--u", U); root.style.setProperty("--green", LOOK.green); root.style.setProperty("--cream", LOOK.cream);
+      document.querySelectorAll(".av").forEach((a) => { const s = 78 * U * (FRAME.w >= FRAME.h * 0.9 && FRAME.w <= FRAME.h * 1.2 ? 0.78 : 1); Object.assign(a.style, { width: s + "px", height: s + "px", backgroundImage: "url(avatar.png)" }); });
+      const you = document.getElementById("you");
+      you.style.backgroundImage = "none"; you.style.background = "#5e8a6c";
+      you.innerHTML = `<svg viewBox="0 0 40 40" width="100%" height="100%"><circle cx="20" cy="15" r="7" fill="#f0ece2"/><path d="M7 34c2-8 8-11 13-11s11 3 13 11" fill="#f0ece2"/></svg>`;
+      // Square and wide frames: the comments go top left, beside the head, and the shot stays where it is.
+      const SIDE = FRAME.w >= FRAME.h * 0.9;
+      const WIDE = FRAME.w > FRAME.h * 1.2, CK = SIDE && !WIDE ? 0.78 : 1;   // cards a little smaller in a square
+      if (SIDE) { PLACE.down = 0; PLACE.w = WIDE ? 0.36 : 0.34; PLACE.y = Math.max(PLACE.y, (LOOK.big * U * 0.95) / FRAME.h + 0.09); }
+      for (const id of ["stack", "reply"]) document.getElementById(id).style.setProperty("--u", U * CK);
+      document.getElementById("shot").style.transform = "translateY(" + PLACE.down * FRAME.h + "px)";
+      const stack = document.getElementById("stack"), W = PLACE.w * FRAME.w, X = SIDE ? 0.04 * FRAME.w : (FRAME.w - W) / 2;
+      Object.assign(stack.style, { left: X + "px", top: PLACE.y * FRAME.h + "px", width: W + "px" });
+      const reply = document.getElementById("reply");
+      Object.assign(reply.style, { left: X + W * 0.12 + "px", width: W * 0.88 + "px", top: PLACE.y * FRAME.h + document.getElementById("input").offsetHeight + PLACE.gap * U + "px" });
+      reply.querySelector(".kw").textContent = CTA.word;
+      const pinned = document.getElementById("pinned");
+      pinned.querySelector(".who").textContent = CTA.handle;
+      pinned.querySelector(".txt").innerHTML = `<b>${CTA.word}</b> ${CTA.rest}`;
+      const heart = (fill) => `<svg viewBox="0 0 24 24"><path d="M12 21s-7.5-4.6-9.6-9.2C.9 8.4 3 4.5 6.8 4.5c2.1 0 3.7 1.2 5.2 3 1.5-1.8 3.1-3 5.2-3 3.8 0 5.9 3.9 4.4 7.3C19.5 16.4 12 21 12 21z" fill="${fill}" stroke="${fill === "none" ? "#777" : fill}" stroke-width="1.6"/></svg>`;
+      // The big letters.
+      const big = document.getElementById("big");
+      big.style.fontSize = LOOK.big * U + "px";
+      Object.assign(big.style, { left: X + "px", width: W + "px", top: PLACE.y * FRAME.h - LOOK.big * U * 0.95 + "px" });
+      const L = [...CTA.word].map((c) => { const s = document.createElement("span"); s.textContent = c; big.appendChild(s); return s; });
+      // Captions, centred, stacked.
+      const caps = CAPTIONS.map(([t], i) => { const d = document.createElement("div"); d.className = "cap"; d.textContent = t; root.appendChild(d);
+        Object.assign(d.style, { left: "50%", top: PLACE.capTop * FRAME.h + i * 62 * U + "px" }); return d; });
+      // Words in the first caption that match the keyword turn green.
+      caps[0].innerHTML = CAPTIONS[0][0].replace(CTA.word, `<span style="color:${LOOK.green}">${CTA.word}</span>`);
+
+      const field = document.querySelector("#field .t"), ph = document.querySelector("#field .ph"), post = document.getElementById("post");
+      const input = document.getElementById("input");
+      const hearts = [pinned.querySelector(".heart"), reply.querySelector(".heart")];
+      function draw() {
+        const t = tl.time();
+        // Typed letters: each lands in the box as its big letter arrives.
+        const n = L.filter((_, i) => t >= AT.fall + i * 0.09 + 0.12).length;
+        field.textContent = CTA.word.slice(0, n); ph.style.display = n ? "none" : "";
+        const posted = t >= AT.post;
+        input.style.display = posted ? "none" : ""; pinned.style.display = posted ? "" : "none";
+        post.style.background = n === L.length ? LOOK.green : "#ebe7dd"; post.style.color = n === L.length ? "#fff" : "#4a463e";
+        // Likes tick up after the reply lands.
+        const k = Math.max(0, Math.min(CTA.likes, Math.floor((t - AT.reply - 0.15) / ((AT.out - AT.reply - 0.4) / CTA.likes)) + 1));
+        hearts[0].querySelector(".h").innerHTML = heart(k > 0 ? LOOK.red : "none");
+        hearts[0].querySelector(".n").textContent = k > 0 ? k : "";
+        const r = t >= AT.reply + 1.0 ? 1 : 0;
+        hearts[1].querySelector(".h").innerHTML = heart(r ? LOOK.red : "none");
+        hearts[1].querySelector(".n").textContent = r ? 1 : "";
+      }
+      window.__timelines = window.__timelines || {};
+      const tl = gsap.timeline({ paused: true, onUpdate: draw });
+      tl.fromTo(stack, { y: -40 * U, opacity: 0 }, { y: 0, opacity: 1, duration: 0.25, ease: "power3.out" }, AT.drop - 0.1);
+      // Big letters drop in from above, bouncy, one after another.
+      L.forEach((s, i) => tl.fromTo(s, { y: -260 * U, opacity: 1 }, { y: 0, opacity: 1, duration: 0.32, ease: "bounce.out", immediateRender: false }, AT.drop + i * 0.08));
+      // Then they fall into the box, shrinking, one after another.
+      L.forEach((s, i) => {
+        tl.to(s, { y: 150 * U, scale: 0.2, opacity: 0, duration: 0.14, ease: "power2.in" }, AT.fall + i * 0.09);
+      });
+      tl.fromTo(input, { scale: 1 }, { scale: 1.03, duration: 0.07, yoyo: true, repeat: 1 }, AT.fall + L.length * 0.09);
+      tl.fromTo(post, { scale: 1 }, { scale: 0.9, duration: 0.06, yoyo: true, repeat: 1 }, AT.post - 0.12);
+      tl.fromTo(pinned, { scale: 0.96 }, { scale: 1, duration: 0.2, ease: "back.out(2)", immediateRender: false }, AT.post);
+      tl.fromTo(reply, { y: -60 * U, opacity: 0 }, { y: 0, opacity: 1, duration: 0.28, ease: "back.out(1.6)" }, AT.reply);
+      hearts.forEach((h, i) => tl.fromTo(h, { scale: 1 }, { scale: 1.35, duration: 0.08, yoyo: true, repeat: 1, immediateRender: false }, AT.reply + (i ? 1.0 : 0.15)));
+      CAPTIONS.forEach(([, at], i) => tl.fromTo(caps[i], { opacity: 0, scale: 0.6, xPercent: -50, transformOrigin: "50% 50%" }, { opacity: 1, scale: 1, xPercent: -50, duration: 0.18, ease: "back.out(2.4)" }, at));
+      tl.to([stack, reply], { y: -50 * U, opacity: 0, duration: 0.22, ease: "power2.in" }, AT.out);
+      tl.to(caps, { opacity: 0, scale: 0.85, duration: 0.18, ease: "power2.in" }, AT.out + 0.05);
+      tl.set({}, {}, Number(root.dataset.duration));
+      window.__timelines["main"] = tl;
+      draw(); tl.seek(0);
+    </script>
+  </body>
+</html>

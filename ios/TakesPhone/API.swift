@@ -367,6 +367,8 @@ struct Comment: Codable, Identifiable, Hashable {
     var start: Double?
     var end: Double?
     var rect: [Double]?
+    /// A comment on a carousel slide: its number, from 1 (file is posts/carousel.json).
+    var slide: Int?
     var open: Bool { status != "resolved" }
     var area: CGRect? {
         guard let r = rect, r.count == 4 else { return nil }
@@ -374,6 +376,7 @@ struct Comment: Codable, Identifiable, Hashable {
     }
     /// "0:03.2–0:06.0 · area", as the Mac shows it. nil for a comment on text.
     var place: String? {
+        if let slide { return "slide \(slide) · " + (rect == nil ? "whole slide" : "area") }
         guard start != nil || rect != nil else { return nil }
         var parts: [String] = []
         if let start { parts.append(Comment.label(start, end)) }
@@ -523,12 +526,6 @@ struct AppUpdate: Decodable, Equatable {
     var renew: String?
 }
 
-struct APIError: LocalizedError {
-    let status: Int
-    let message: String
-    var errorDescription: String? { message }
-}
-
 /// Made once: a formatter per date was the cost of every decode.
 enum Dates {
     nonisolated(unsafe) static let plain = ISO8601DateFormatter()
@@ -610,7 +607,7 @@ struct API {
         let c = URLSessionConfiguration.default
         c.timeoutIntervalForRequest = 150
         let s = URLSession(configuration: c)
-        return try await send(r, as: [String: String].self, session: s)["token"] ?? ""
+        return try await send(r, as: PairResponse.self, session: s).token
     }
 
     func sessions() async throws -> [Session] { try await send(request("/api/sessions")) }

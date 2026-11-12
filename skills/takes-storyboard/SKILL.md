@@ -114,7 +114,9 @@ shot as it is now) and `frame` (the sketch). To fix one:
 - A generated clip for a shot ("make this shot", the ✦ button): call the `higgsfield` tool with
   `shot`. Write a real-footage prompt from the shot's `do` and `say`; `image: "sketch"` with
   `params: {mode: omni_reference}` keeps the sketch's framing. The clip lands on the shot by
-  itself. One job per ask: each one costs the user's Higgsfield credits.
+  itself. One job per ask: each one costs the user's Higgsfield credits. A person, a line to
+  speak, or more than one generated shot: follow the `takes-ai-video` skill (place still,
+  character sheet, voice line first), so the clips look real and match each other.
 - An image (a thumbnail, a still, a changed frame): `make_image`, never `higgsfield` (direct costs much
   less). Flare for a new image, Sunburst for a change, `nano-banana-2.1` when cheap matters most.
 - A shot shows an error (no key, quota): tell the user the reason in one line.

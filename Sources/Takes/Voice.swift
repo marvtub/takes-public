@@ -209,6 +209,9 @@ final class VoiceMix: ObservableObject {
         let src = AVURLAsset(url: session.appending(path: take.file))
         let cleanAsset = AVURLAsset(url: Voice.clean(session, key))
         let dryAsset = AVURLAsset(url: Voice.dry(session, key))
+        // The two voice files open while the take does: none needs another.
+        async let cleanVoice = Self.voiceTrack(cleanAsset)
+        async let dryVoice = Self.voiceTrack(dryAsset)
         do {
             let comp = AVMutableComposition()
             let duration = try await src.load(.duration)
@@ -227,20 +230,26 @@ final class VoiceMix: ObservableObject {
                 if let t { orig.append(t) }
             }
             let at = Voice.insertTime(clock: Voice.read(session, key)?["clock"] as? String, audioStart: audioStart)
-            func voice(_ asset: AVURLAsset) async throws -> AVAssetTrack? {
-                guard let a = try await asset.loadTracks(withMediaType: .audio).first else { return nil }
-                let d = min(try await asset.load(.duration), duration - at)
+            func voice(_ loaded: (AVAssetTrack, CMTime)?) throws -> AVAssetTrack? {
+                guard let (a, length) = loaded else { return nil }
+                let d = min(length, duration - at)
                 let t = comp.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid)
                 try t?.insertTimeRange(CMTimeRange(start: .zero, duration: d), of: a, at: at)
                 return t
             }
-            guard let c = try await voice(cleanAsset), let d = try await voice(dryAsset) else { return }
+            guard let c = try voice(await cleanVoice), let d = try voice(await dryVoice) else { return }
             tracks = (orig, c, d)
             clock.swap(AVPlayerItem(asset: comp))
             apply()
         } catch {
             self.error = "Could not play the clean voice: \(error.localizedDescription)"
         }
+    }
+
+    /// A voice file's audio track and length, or nil when it has no audio.
+    nonisolated private static func voiceTrack(_ asset: AVURLAsset) async throws -> (AVAssetTrack, CMTime)? {
+        guard let a = try await asset.loadTracks(withMediaType: .audio).first else { return nil }
+        return (a, try await asset.load(.duration))
     }
 
     /// Hear the settings now, without saving (while the slider moves).

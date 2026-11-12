@@ -194,6 +194,9 @@ struct PerfWatchTests {
         #expect(PerfBoard.matters(["/m/Takes/Acme/2026-10-01-a"], root: root)) // a session.json
         #expect(PerfBoard.matters(["/m/Takes"], root: root))
         #expect(!PerfBoard.matters(["/m/Takes/Acme/2026-10-01-a/edits"], root: root))
+        // Other boards' files under _library (Site work tickets, comments, rules): social.json is not there.
+        #expect(!PerfBoard.matters(["/m/Takes/_library/work"], root: root))
+        #expect(!PerfBoard.matters(["/m/Takes/_library/comments/suggestions"], root: root))
         #expect(!PerfBoard.matters(["/other/_library"], root: root))
     }
 }

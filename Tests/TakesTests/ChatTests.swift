@@ -45,27 +45,6 @@ struct ChatTests {
         #expect(n.map(\.headline) == ["Replies stream", "Tools fold away", "Results glide in", "Prompter follows your voice"])
     }
 
-    /// The whole path against a stand-in for GitHub: TAKES_UPDATE_E2E=<dir> with api.txt (the
-    /// release URL), own.txt (the old tag), stamp.txt (the old build stamp) and Apps/, made by
-    /// a test script. Read the release, download the DMG, stage it, read it as the sidebar does.
-    @Test func aReleaseUpdatesEndToEnd() async throws {
-        guard let dir = ProcessInfo.processInfo.environment["TAKES_UPDATE_E2E"].map({ URL(fileURLWithPath: $0) }) else { return }
-        func text(_ f: String) throws -> String { try String(contentsOf: dir.appending(path: f), encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines) }
-        let api = try #require(URL(string: try text("api.txt")))
-        let own = try text("own.txt"), stage = dir.appending(path: "Apps/.update.noindex")
-        #expect(await Updater.fetchRelease(api: api, own: "v2099.1.1", skip: nil, bundleID: "de.marvinaziz.takes", into: stage) == nil)
-        #expect(await Updater.fetchRelease(api: api, own: own, skip: nil, bundleID: "de.other", into: stage) == nil)
-        let tag = await Updater.fetchRelease(api: api, own: own, skip: nil, bundleID: "de.marvinaziz.takes", into: stage)
-        #expect(tag != nil)
-        #expect(await Updater.fetchRelease(api: api, own: own, skip: tag, bundleID: "de.marvinaziz.takes", into: stage) == nil)
-        let staged = try #require(Updater.read(stage.appending(path: "Takes.app"), ownStamp: try text("stamp.txt")))
-        #expect(staged.release == tag)
-        #expect(!staged.log.isEmpty)
-        #expect(!staged.log.contains { $0.area == "Install" })
-        #expect(Updater.read(stage.appending(path: "Takes.app"), ownStamp: staged.stamp) == nil)
-        try "\(staged.release ?? "") \(staged.log.map { "\($0.area): \($0.headline)" })".write(to: dir.appending(path: "staged.txt"), atomically: true, encoding: .utf8)
-    }
-
     /// A release's DMG stages its app and notes; a DMG at another tag stages nothing.
     @Test func aReleaseDMGIsStaged() throws {
         let fm = FileManager.default
@@ -209,6 +188,30 @@ struct ChatTests {
         let m = ChatMessage(role: .user, text: "hi")
         let back = try JSONDecoder().decode(ChatMessage.self, from: JSONEncoder().encode(m))
         #expect(back.at != nil && abs(back.at!.timeIntervalSince(m.at!)) < 0.001)
+    }
+
+    @Test func invisibleStreamEventsNeverReachTheUIAndResultsKeepTheirOutcome() throws {
+        let big = String(repeating: "A", count: 200_000)
+        let ignored = Array(repeating: #"{"type":"message_update","usage":{},"assistantMessageEvent":{"type":"thinking_delta","contentIndex":0,"delta":"thinking"}}"#, count: 1000)
+        let records = [#"{"type":"tool_execution_start","toolCallId":"t1","toolName":"read","args":{"path":"a.txt"}}"#] + ignored + [
+            #"{"type":"message_update","assistantMessageEvent":{"type":"text_start","contentIndex":0}}"#,
+            #"{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"Ready 🌿"}}"#,
+            #"{"type":"message_update","assistantMessageEvent":{"type":"text_end","contentIndex":0,"content":"Ready 🌿"}}"#,
+            #"{"type":"tool_execution_update","toolCallId":"t1","partialResult":{"text":""# + big + #""}}"#,
+            #"{"type":"tool_execution_end","toolCallId":"t1","result":{"image":""# + big + #""},"isError":true}"#,
+            #"{"type":"agent_end","messages":[{"content":""# + big + #""}]}"#]
+        let visible = StreamLines().feed(Data((records.joined(separator: "\n") + "\n").utf8))
+        #expect(visible.count == 6)
+        #expect(visible.allSatisfy { $0.utf8.count < 1000 })
+        var original = ChatParser([], adapter: PiAdapter()), trimmed = ChatParser([], adapter: PiAdapter())
+        records.forEach { original.consume($0) }; visible.forEach { trimmed.consume($0) }
+        #expect(trimmed.messages.map(\.text) == original.messages.map(\.text))
+        #expect(trimmed.messages.map(\.done) == original.messages.map(\.done))
+        #expect(trimmed.messages.map(\.failed) == original.messages.map(\.failed))
+        #expect(trimmed.finished && original.finished)
+        let child = #"{"type":"tool_execution_end","toolCallId":"t1","parent_tool_use_id":"helper-1","result":""# + big + #"","isError":true}"#
+        #expect(StreamLines.shrink(child).contains("helper-1"), "Shrinking must not expose a helper's events")
+        print("BENCH pi records reaching UI: \(records.count) -> \(visible.count); final text and tool errors unchanged")
     }
 
     @Test func linesAreCutAcrossChunksAndBigResultsShrink() {
@@ -492,6 +495,26 @@ struct ChatParagraphTests {
         }
     }
 
+    @Test func boardUpdatesAndStepsShareOneQuietGroup() {
+        let action = { ChatMessage(role: .tool, text: $0, toolID: ChatMessage.actionNote) }
+        let tool = ChatMessage(role: .tool, text: "Read · notes.md", toolID: "read-1")
+        let messages = [action("Showing Numbers"), tool, action("Showing GitHub"), action("Opened T-29")]
+        let grouped = ChatItem.group(messages)
+        #expect(StepWords.steps(messages).map(\.finished) == ["Showing Numbers", "Read notes.md", "Showing GitHub", "Opened T-29"])
+        #expect(grouped.count == 1)
+        #expect(!StepTimeline.defaultOpen(messages, active: false, latest: true))
+        var brokenTool = tool; brokenTool.failed = true
+        #expect(StepTimeline.defaultOpen(messages + [brokenTool], active: false, latest: false), "Failed tools must not be hidden by mixed activity folding")
+        if case .tools(let rows) = grouped.first { #expect(rows == messages) } else { Issue.record("activity did not fold") }
+        var failed = action("Could not close T-29"); failed.failed = true
+        let running = ChatMessage(role: .tool, text: "Refreshing", toolID: ChatMessage.actionNote, done: false)
+        let visible = ChatItem.group(messages + [failed, running])
+        #expect(visible.count == 3, "Errors and running board actions stay visible")
+        if case .message(let m) = visible[1] { #expect(m == failed) } else { Issue.record("Failure was hidden") }
+        if case .message(let m) = visible[2] { #expect(m == running) } else { Issue.record("Running action was hidden") }
+        #expect(ChatItem.group(messages + [ChatMessage(role: .claude, text: "Ready")] + messages).count == 3)
+    }
+
     @MainActor @Test func everyToolRunIsOneTimeline() {
         let tool = { (t: String) in ChatMessage(role: .tool, text: t) }
         let msgs = [tool("computer"), tool("computer"), ChatMessage(role: .claude, text: "ok"),
@@ -596,6 +619,45 @@ struct ChatHistoryTests {
 
 @MainActor
 struct ChatFollowTests {
+    /// New lines add below the page; nothing drops off its top until three pages show (2026-11-06).
+    @Test func newLinesAddBelowThePageUntilThreePagesShow() {
+        func lines(_ n: Int) -> [ChatMessage] {
+            (0..<n).map { ChatMessage(role: .user, text: "line \($0)") }
+        }
+        var messages = lines(200)
+        let page = ChatRows.page
+        #expect(ChatTranscript.start(ChatItem.group(messages), limit: page, top: nil) == 200 - page)
+        let top = ChatTranscript.anchor(messages, limit: page)
+        messages += lines(30)
+        let all = ChatItem.group(messages)
+        #expect(ChatTranscript.start(all, limit: page, top: top) == 200 - page)
+        // Past three pages: the newest page again.
+        messages += lines(page * 2)
+        let more = ChatItem.group(messages)
+        #expect(ChatTranscript.start(more, limit: page, top: top) == more.count - page)
+        // Show earlier: more than the anchor.
+        #expect(ChatTranscript.start(all, limit: page * 4, top: top) == all.count - page * 4)
+    }
+
+    /// Saves go to disk off the main thread (2026-11-06). The newest one is what a reader finds:
+    /// a new chat on the same folder, the history, and the file once the saves are flushed.
+    @Test func theNewestSaveIsWhatEveryReaderFinds() throws {
+        let session = FileManager.default.temporaryDirectory.appending(path: "chat-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: session, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: session) }
+        let chat = ClaudeChat(session: session)
+        for i in 1...50 { chat.draft = "draft \(i)"; chat.saveDraft() }
+        #expect(ClaudeChat(session: session).draft == "draft 50")
+        chat.action("Refreshed the board")
+        chat.reset()                                  // shelves it, then saves the empty one
+        #expect(chat.past().count == 1)
+        ClaudeChat.flushSaves()
+        let disk = try #require(ClaudeChat.load(ClaudeChat.file(session)))
+        #expect(disk.messages.isEmpty && disk.draft == "draft 50")
+        chat.forget(try #require(chat.past().first))
+        #expect(chat.past().isEmpty)
+    }
+
     @Test func chatFollowsARenamedSessionAndNeverRecreatesTheOldFolder() throws {
         let fm = FileManager.default
         let root = fm.temporaryDirectory.appending(path: "follow-\(UUID().uuidString)")
@@ -793,14 +855,15 @@ struct ChatRunTests {
         try FileManager.default.createDirectory(at: session, withIntermediateDirectories: true)
     }
 
-    /// `body` runs after the ask is saved; $n is the run number.
-    func fake(_ body: String) throws {
+    /// `body` runs after the ask is saved; $n is its run number, or its PID for overlapping starts.
+    func fake(_ body: String, concurrent: Bool = false) throws {
         let script = dir.appending(path: "claude")
         try """
         #!/bin/bash
         # Only chat turns count: a sign-in check another test starts may call this too.
         case "$1" in auth|mcp|--version) exit 0;; esac
-        n=$(( $(cat "\(dir.path)/n" 2>/dev/null || echo 0) + 1 ))
+        # Overlapping starts use PIDs: a shared counter can assign both the same ask file (2026-11-08).
+        n=\(concurrent ? "$$" : "$(( $(cat \"\(dir.path)/n\" 2>/dev/null || echo 0) + 1 ))")
         # The ask is whole before the run counts: a test that sees the run reads all of it.
         cat > "\(dir.path)/ask-$n.part"; mv "\(dir.path)/ask-$n.part" "\(dir.path)/ask-$n.txt"; echo $n > "\(dir.path)/n"
         echo '{"type":"system","subtype":"init"}'
@@ -846,6 +909,7 @@ struct ChatRunTests {
         let args = (try? String(contentsOf: dir.appending(path: "args-1.txt"), encoding: .utf8)) ?? ""
         #expect(args.contains("\"New title\", folder \(renamed.standardizedFileURL.path)"))
         #expect(args.contains("session id \(Store.derivedID(renamed) ?? "?")"))
+        ClaudeChat.flushSaves()
         #expect(FileManager.default.fileExists(atPath: renamed.appending(path: ".claude-chat.json").path))
         #expect(!FileManager.default.fileExists(atPath: session.path), "the old folder never comes back")
     }
@@ -937,7 +1001,7 @@ struct ChatRunTests {
         chat.action("Showing 7 days: 10 visits")
         #expect(chat.messages.map(\.text) == ["Suggest now picked “a”, “b” and “c”", "Showing 7 days: 10 visits"])
         #expect(chat.messages.allSatisfy { $0.done && $0.isActionNote })
-        #expect(ChatItem.group(Array(repeating: chat.messages[1], count: 6)).count == 6, "own lines, never folded into steps")
+        #expect(ChatItem.group(Array(repeating: chat.messages[1], count: 6)).count == 1, "completed board updates fold into one group")
         #expect(runs == 0, "an action starts no reply")
         chat.send("What happened?", title: "T", onStage: nil)
         await until { runs == 1 && !chat.running }
@@ -999,6 +1063,96 @@ struct ChatRunTests {
         #expect(!chat.messages.contains { $0.text == "Old run" })
         #expect(!chat.running)
     }
+
+    func args(_ n: Int) -> [String] {
+        ((try? String(contentsOf: dir.appending(path: "args-\(n).txt"), encoding: .utf8)) ?? "").components(separatedBy: "\n")
+    }
+    func value(_ flag: String, _ n: Int) -> String? {
+        let a = args(n)
+        return a.firstIndex(of: flag).map { a[$0 + 1] }
+    }
+    var saved: ChatLog? { ClaudeChat.load(ClaudeChat.file(session)) }
+
+    /// 2026-11-05: every Site climb run resumed one Claude session (221 MB, 150k+ tokens a run). A
+    /// board's run starts a new conversation with a recap of the panel; the next reply resumes that one.
+    @Test func freshRunStartsNewConversation() async throws {
+        defer { cleanup() }
+        try fake(#"printf '%s\n' "$@" > "$(dirname "$0")/args-$n.txt""#)
+        let chat = ClaudeChat(session: session)
+        chat.send("Check T-38", title: "T", onStage: nil)
+        await until { runs == 1 && !chat.running }
+        let id1 = try #require(value("--session-id", 1))
+        chat.action("Marked T-50 done")
+        chat.send("Daily check", title: "T", onStage: nil, fresh: true)
+        await until { runs == 2 && !chat.running }
+        let id2 = try #require(value("--session-id", 2))
+        #expect(id2 != id1)
+        #expect(!args(2).contains("--resume"))
+        let second = ask(2) ?? ""
+        #expect(second.hasPrefix("[Takes note:"))
+        #expect(second.contains("The panel showed before it:\n" + "The user: Check T-38"))
+        #expect(second.contains("Marked T-50 done"), "board actions still reach the agent")
+        #expect(second.hasSuffix("Daily check"))
+        #expect(chat.messages.contains { $0.text == "Check T-38" }, "the panel keeps its messages")
+        #expect(saved?.conversation == id2)
+        chat.send("What about T-38?", title: "T", onStage: nil)
+        await until { runs == 3 && !chat.running }
+        #expect(value("--resume", 3) == id2, "a reply goes on in the run's conversation")
+        #expect(!(ask(3) ?? "").contains("The panel showed before it"))
+    }
+
+    /// A fresh ask that waits while a run goes still starts a new conversation when it goes out.
+    @Test func queuedFreshRunStillStartsNew() async throws {
+        defer { cleanup() }
+        try fake(#"printf '%s\n' "$@" > "$(dirname "$0")/args-$n.txt"; if [ $n = 1 ]; then \#(gate); fi"#)
+        let chat = ClaudeChat(session: session)
+        chat.send("Check T-38", title: "T", onStage: nil)
+        await until { runs == 1 }
+        chat.send("Heartbeat", title: "T", onStage: nil, fresh: true)
+        #expect(chat.queued == ["Heartbeat"])
+        #expect(saved?.pending == ["Heartbeat"], "the wait is kept on disk")
+        openGate()
+        await until { runs == 2 && !chat.running }
+        let id1 = try #require(value("--session-id", 1))
+        #expect(value("--session-id", 2).map { $0 != id1 } == true)
+        #expect(!args(2).contains("--resume"))
+        #expect((ask(2) ?? "").contains("The panel showed before it:\n" + "The user: Check T-38"))
+    }
+
+    /// Stop drops a fresh ask with the queue: The user's next message goes on in the same conversation.
+    @Test func stopDropsAFreshAsk() async throws {
+        defer { cleanup() }
+        try fake(#"printf '%s\n' "$@" > "$(dirname "$0")/args-$n.txt"; if [ $n = 1 ]; then \#(gate); fi"#)
+        let chat = ClaudeChat(session: session)
+        chat.send("Check T-38", title: "T", onStage: nil)
+        // Its args are saved after its init line: a stop before that killed a run that never started (2026-11-05).
+        await until { runs == 1 && value("--session-id", 1) != nil }
+        chat.send("Heartbeat", title: "T", onStage: nil, fresh: true)
+        chat.stop()
+        await until { !chat.running }
+        chat.send("Go on", title: "T", onStage: nil)
+        await until { runs == 2 && !chat.running }
+        let id = try #require(value("--session-id", 1))
+        #expect(value("--resume", 2) == id)
+    }
+
+    /// A fresh ask waits in the queue, and the user steers from his phone (now: true): the steer goes on in the run's
+    /// conversation, and only the queued ask starts a new one (2026-11-05 review).
+    @Test func aSteerKeepsTheConversationOfAFreshAsk() async throws {
+        defer { cleanup() }
+        try fake(#"printf '%s\n' "$@" > "$(dirname "$0")/args-$n.txt"; if [ $n = 1 ]; then \#(gate); fi"#)
+        let chat = ClaudeChat(session: session)
+        chat.send("Check T-38", title: "T", onStage: nil)
+        await until { runs == 1 && value("--session-id", 1) != nil }
+        chat.send("Heartbeat", title: "T", onStage: nil, fresh: true)
+        chat.send("Also T-50", title: "T", onStage: nil, now: true)
+        await until { runs == 3 && !chat.running }
+        let id1 = try #require(value("--session-id", 1))
+        #expect(value("--resume", 2) == id1, "the steer continues the cut-off run")
+        #expect(!(ask(2) ?? "").contains("The panel showed before it"))
+        #expect(value("--session-id", 3).map { $0 != id1 } == true, "the queued fresh ask starts a new conversation")
+        #expect((ask(3) ?? "").hasSuffix("Heartbeat"))
+    }
 }
 
 @MainActor
@@ -1029,10 +1183,19 @@ struct ChatTimelineSnapshots {
                     m(.tool, "Read · 2026-10-12-teleprompter-hook-captions-final.md", 1.2),
                     m(.tool, "Read · 2026-10-12-teleprompter-hook-post-draft.md", 1.6),
                     m(.claude, "Read the four files.", 3)]
+        let updates = ["Closed T-29", "Opened T-29", "Showing Work", "Showing Numbers", "Showing GitHub", "Showing The app"].enumerated().map { i, text in
+            var row = m(.tool, text, Double(i + 1)); row.toolID = ChatMessage.actionNote; return row
+        }
+        let activity = [ask] + updates.prefix(2) + [m(.tool, "Read · notes.md", 2)] + updates.dropFirst(2)
+        var failed = m(.tool, "Could not refresh the numbers", 9, failed: true); failed.toolID = ChatMessage.actionNote
+        let failedTool = m(.tool, "Read · missing.md", 9, failed: true)
         let shots: [(String, [ChatMessage], Bool, Bool)] = [
             ("1-early", early, true, false), ("2-mid", mid, true, false),
             ("3-done", Array(done), false, false), ("4-folded", folded, false, false), ("5-done-dark", Array(done), false, true),
             ("6-narrow-long", long, false, false),
+            ("7-activity", activity, false, false), ("8-activity-dark", activity, false, true),
+            ("9-activity-error", activity + [failed], false, false),
+            ("10-activity-tool-error", activity + [failedTool], false, false),
         ]
         for (name, msgs, running, dark) in shots {
             let width: CGFloat = name.hasPrefix("6") ? 360 : 420

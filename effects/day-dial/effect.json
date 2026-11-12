@@ -1,0 +1,15 @@
+{
+  "name": "Day dial",
+  "description": "A clock hand sweeps once round the speaker's head and wipes the room away to warm paper. A clock face draws on behind the head as the hand passes, with serif numbers and a word in every hour. Then the hand sweeps back and the room returns.",
+  "when": "When you talk about time: a day, a routine, 'every hour', 'in one day'.",
+  "needs": [
+    "the place of the speaker's head",
+    "the word for every hour and the word on the hand",
+    "the cut time where it starts",
+    "a cutout of the speaker (made in the steps)"
+  ],
+  "kind": "Cut-out",
+  "length_s": 3,
+  "shape": "any",
+  "shipped": true
+}

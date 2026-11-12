@@ -8,7 +8,7 @@ struct SessionView: View {
     @EnvironmentObject var model: Model
     let session: Session
     @State private var detail: SessionDetail?
-    @State private var tab = Tab.chat
+    @State private var tab: Tab
     @State private var recording: RecordMode?
     @State private var showing: RemoteFile?
     @State private var failed: String?
@@ -23,9 +23,16 @@ struct SessionView: View {
     @State private var memory = false
     @State private var chatTools = false
     @State private var pastChats = false
+    @State private var refreshes = LatestRefresh()
     @Environment(\.dismiss) private var dismiss
 
     enum Tab: String, CaseIterable { case chat = "Chat", files = "Files", script = "Script", board = "Board", post = "Post" }
+
+    /// `start`: the tab it opens on (Plan's Edit opens the Post tab, 2026-10-30).
+    init(session: Session, start: Tab = .chat) {
+        self.session = session
+        _tab = State(initialValue: start)
+    }
     enum RecordMode: String, Identifiable { case prompter, camera; var id: String { rawValue } }
 
     /// The Mac's meta line: project · takes.
@@ -71,7 +78,7 @@ struct SessionView: View {
             Group {
                 if let detail {
                     switch tab {
-                    case .chat: ChatView(session: session, detail: detail, show: { showing = $0 }, record: { recording = .prompter })
+                    case .chat: ChatView(uploads: model.uploads, session: session, detail: detail, show: { showing = $0 }, record: { recording = .prompter })
                     case .files: FilesView(detail: detail, show: { showing = $0 }, reload: { await reload() })
                     case .script: ScriptView(sessionID: session.id, detail: detail, reload: { await reload() })
                     case .board: BoardView(sessionID: session.id, detail: detail, show: { showing = $0 },
@@ -138,8 +145,9 @@ struct SessionView: View {
                                  close: { recording = nil }, toChat: { recording = nil; tab = .chat })
             case .camera:
                 CameraPicker { url in
-                    recording = nil
-                    if let url { model.outbox.take(url, name: "phone-take." + url.pathExtension.lowercased(), session: session.id, asTake: true, shot: nil) }
+                    guard let url else { recording = nil; return }
+                    let kept = model.outbox.take(url, name: "phone-take." + url.pathExtension.lowercased(), session: session.id, asTake: true, shot: nil)
+                    if OutboxAcknowledgement.dismissRecording(kept: kept) { recording = nil }
                 }
                 .ignoresSafeArea()
             }
@@ -170,19 +178,22 @@ struct SessionView: View {
     /// Fetches the session again. Only the first load marks the chat read; the rest (polls,
     /// closing a file) change nothing when nothing changed.
     func reload(read: Bool = false) async {
+        let request = refreshes.begin()
         let key = "session-" + session.id
         do {
             guard model.connected else { throw URLError(.notConnectedToInternet) }
             let raw = try await model.api.detail(session.id)
+            guard refreshes.accepts(request) else { return }
             if failed != nil { failed = nil }
-            Task.detached(priority: .utility) { Cache.save(raw, key) }
             let d = model.patch(raw)
             model.open(session.id, chat: d.chat, read: read)
-            guard d != detail else { return }
-            detail = d
+            if d != detail { detail = d }
+            await CacheWrites.shared.save(raw, key, generation: request)
         } catch {
+            guard refreshes.accepts(request) else { return }
             // Offline: the phone's copy, with the changes that wait on top.
             if let raw = await Task.detached(operation: { Cache.load(SessionDetail.self, key) }).value {
+                guard refreshes.accepts(request) else { return }
                 let d = model.patch(raw)
                 if model.chatID == session.id || model.chatID == nil { model.open(session.id, chat: d.chat, read: false) }
                 if d != detail { detail = d }
@@ -286,6 +297,7 @@ struct ChatTranscript<Content: View>: View {
 struct ChatView: View {
     @EnvironmentObject var model: Model
     @EnvironmentObject var live: LiveChat
+    @ObservedObject var uploads: Uploads
     let session: Session
     let detail: SessionDetail
     let show: (RemoteFile) -> Void
@@ -295,8 +307,6 @@ struct ChatView: View {
     /// Some of the draft was dictated.
     @State private var spoke = false
     @State private var voice = VoiceNote()
-    @State private var attached: [String] = []
-    @State private var waiting: Set<Int> = []
     @State private var picks: [PhotosPickerItem] = []
     @State private var importing = false
     @State private var choosingPhotos = false
@@ -307,8 +317,14 @@ struct ChatView: View {
     @State private var adding = false
     @State private var browsing = false
     @State private var refs: [String] = []
+    /// The Mac's styles, effects and skills for the @ list, read each time it opens (as the Mac's),
+    /// and the ones picked into the box: the Mac adds what each is for to the message (ChatMentions).
+    @State private var mentionable: [MentionItem] = []
+    @State private var mentioned: [MentionItem] = []
 
     private var chat: Chat { live.id == session.id ? (live.chat ?? detail.chat) : detail.chat }
+    private var attached: [String] { uploads.chat.attachments(in: session.id) }
+    private var waiting: Set<Int> { uploads.chat.waiting(in: session.id) }
 
     /// "@comments" in the box sends the open comments with the message, as on the Mac (2026-10-04):
     /// delete it to leave them out. An empty box starts with it while comments are open.
@@ -352,18 +368,13 @@ struct ChatView: View {
             for u in urls {
                 let ok = u.startAccessingSecurityScopedResource()
                 defer { if ok { u.stopAccessingSecurityScopedResource() } }
-                if let id = model.uploads.send(u, name: u.lastPathComponent, to: session.id, asTake: false) { waiting.insert(id) }
+                if let id = uploads.send(u, name: u.lastPathComponent, to: session.id, asTake: false) { uploads.beginChatFile(id, in: session.id) }
             }
         }
         .onAppear {
             if draft.isEmpty, let kept = UserDefaults.standard.string(forKey: draftKey) { draft = kept }
             offerComments()
             if empty { typing = true }
-            model.uploads.finished = { item in
-                guard waiting.contains(item.id), let p = item.path else { return }
-                waiting.remove(item.id)
-                attached.append(p)
-            }
         }
     }
 
@@ -382,37 +393,76 @@ struct ChatView: View {
         }
     }
 
-    /// "@" and what follows it at the end of the box, while typing a reference.
-    private var atQuery: String? {
-        guard let r = draft.range(of: #"(?:^|\s)@([\w.-]*)$"#, options: .regularExpression) else { return nil }
-        return String(draft[r]).trimmingCharacters(in: .whitespaces).dropFirst().description
+    /// "@" and what follows it at the end of the box, while typing a reference: the Mac's
+    /// Mentions.query. Nil for an @ inside a word, a line break after it, or a name already picked.
+    private var atQuery: String? { Self.atQuery(draft, picked: ["comments"] + mentioned.map(\.name)) }
+
+    static func atQuery(_ draft: String, picked: [String]) -> String? {
+        guard let at = draft.lastIndex(of: "@") else { return nil }
+        if at > draft.startIndex, !draft[draft.index(before: at)].isWhitespace { return nil }
+        let text = String(draft[draft.index(after: at)...])
+        guard text.count <= 40, !text.contains("\n"), text.first != " " else { return nil }
+        if picked.contains(where: { text.hasPrefix($0) }) { return nil }
+        return text
     }
 
-    /// What an @ can name: the open comments, the storyboard's shots, the session's files.
-    private var suggestions: [(id: String, icon: String, title: String, pick: () -> Void)] {
+    private struct Suggestion: Identifiable {
+        let id: String
+        /// The Mac's group: Styles, Effects, Skills, Files. Nil: the open comments and the shots, first.
+        var group: String?
+        let icon: String
+        let title: String
+        var detail: String?
+        var thumb: URL?
+        let pick: () -> Void
+    }
+
+    /// What an @ can name: the open comments and the storyboard's shots, then the Mac's styles,
+    /// effects and skills in its order (names that start with the words first), then the files.
+    private var suggestions: [Suggestion] {
         guard let q = atQuery else { return [] }
-        var out: [(String, String, String, () -> Void)] = []
-        if detail.openComments > 0, q.isEmpty || "comments".hasPrefix(q.lowercased()) {
-            out.append(("comments", "text.bubble", "comments · \(detail.openComments) open", { replaceAt(Self.commentsToken + " ") }))
+        let low = q.trimmingCharacters(in: .whitespaces).lowercased()
+        var out: [Suggestion] = []
+        if detail.openComments > 0, low.isEmpty || "comments".hasPrefix(low) {
+            out.append(Suggestion(id: "comments", icon: "text.bubble", title: "comments · \(detail.openComments) open") { replaceAt(Self.commentsToken + " ") })
         }
-        for (i, shot) in (detail.storyboard ?? []).enumerated() where q.isEmpty || "shot\(i + 1)".hasPrefix(q.lowercased()) || shot.say.localizedCaseInsensitiveContains(q) {
+        for (i, shot) in (detail.storyboard ?? []).enumerated() where low.isEmpty || "shot\(i + 1)".hasPrefix(low) || shot.say.localizedCaseInsensitiveContains(q) {
             let say = shot.say.split(separator: "\n").first.map(String.init) ?? ""
-            out.append(("shot-\(shot.id)", "rectangle.split.3x1", "Shot \(i + 1)\(say.isEmpty ? "" : ": \(say)")", {
+            out.append(Suggestion(id: "shot-\(shot.id)", icon: "rectangle.split.3x1", title: "Shot \(i + 1)\(say.isEmpty ? "" : ": \(say)")") {
                 replaceAt("storyboard shot \(shot.id)\(say.isEmpty ? "" : " (“\(say)”)") ")
-            }))
+            })
         }
-        for f in detail.files where q.isEmpty || f.name.localizedCaseInsensitiveContains(q) {
-            out.append((f.path, f.isVideo ? "film" : f.isImage ? "photo" : f.isAudio ? "waveform" : "doc", f.name, {
+        let icons = ["Styles": "square.grid.2x2", "Effects": "sparkles", "Skills": "wand.and.stars"]
+        for kind in ["Styles", "Effects", "Skills"] {
+            let hits = mentionable.filter { $0.kind == kind && (low.isEmpty || $0.name.lowercased().contains(low) || kind.lowercased().hasPrefix(low)) }
+            let first = hits.filter { $0.name.lowercased().hasPrefix(low) }
+            for m in first + hits.filter({ !first.contains($0) }) {
+                let thumb = m.effect.map { model.api.effectFile($0, "preview.png") } ?? m.image.map { model.api.thumb($0, width: 80) }
+                out.append(Suggestion(id: m.id, group: kind, icon: icons[kind] ?? "at", title: m.name, detail: m.detail, thumb: thumb) {
+                    replaceAt(m.token + " ")
+                    if !mentioned.contains(m) { mentioned.append(m) }
+                })
+            }
+        }
+        for f in detail.files.filter({ low.isEmpty || $0.name.localizedCaseInsensitiveContains(q) }).prefix(12) {
+            out.append(Suggestion(id: f.path, group: "Files", icon: f.isVideo ? "film" : f.isImage ? "photo" : f.isAudio ? "waveform" : "doc", title: f.name) {
                 replaceAt("")
                 if !refs.contains(f.path) { refs.append(f.path) }
-            }))
+            })
         }
-        return Array(out.prefix(6)).map { (id: $0.0, icon: $0.1, title: $0.2, pick: $0.3) }
+        return out
     }
 
+    /// The typed "@words" become the pick.
     private func replaceAt(_ with: String) {
         Brand.select()
-        if let r = draft.range(of: #"@[\w.-]*$"#, options: .regularExpression) { draft.replaceSubrange(r, with: with) }
+        guard atQuery != nil, let at = draft.lastIndex(of: "@") else { return }
+        draft.replaceSubrange(at..., with: with)
+    }
+
+    /// The Mac's list, read when the @ list opens: a new style or effect shows at once.
+    private func loadMentions() async {
+        if let fresh = try? await model.api.mentions(session.id), fresh != mentionable { mentionable = fresh }
     }
 
     private var addPanel: some View {
@@ -442,14 +492,51 @@ struct ChatView: View {
         .transition(.opacity.combined(with: .offset(y: 6)))
     }
 
+    /// The list over the box, as the Mac's: paper, a hairline, a label over each group, rows with a
+    /// small picture and the detail on the right ("In use", the effect's kind).
     private var suggestionList: some View {
-        VStack(alignment: .leading, spacing: 1) {
-            ForEach(suggestions, id: \.id) { s in PanelRow(icon: s.icon, title: s.title, action: s.pick) }
+        let rows = suggestions
+        return ScrollView {
+            VStack(alignment: .leading, spacing: 1) {
+                ForEach(rows.indices, id: \.self) { i in
+                    let s = rows[i]
+                    if let g = s.group, i == 0 || rows[i - 1].group != g {
+                        Text(g).font(.inter(.caption, .medium)).foregroundStyle(Palette.faint)
+                            .padding(.horizontal, 10).padding(.top, i == 0 ? 2 : 8).padding(.bottom, 2)
+                    }
+                    if let thumb = s.thumb {
+                        Button { Brand.select(); s.pick() } label: {
+                            HStack(spacing: 11) {
+                                RemoteImage(url: thumb, maxPixels: 120) { $0.resizable().scaledToFill() } placeholder: {
+                                    Image(systemName: s.icon).font(.system(size: 12, weight: .medium)).foregroundStyle(Palette.muted)
+                                }
+                                .frame(width: 22, height: 22)
+                                .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+                                .overlay(RoundedRectangle(cornerRadius: 5, style: .continuous).strokeBorder(Palette.ink.opacity(0.12), lineWidth: 0.5))
+                                Text(s.title).font(.inter(.callout)).foregroundStyle(Palette.ink).lineLimit(1).truncationMode(.middle)
+                                Spacer(minLength: 0)
+                                if let d = s.detail { Text(d).font(.inter(.footnote)).foregroundStyle(Palette.faint).lineLimit(1) }
+                            }
+                            .padding(.horizontal, 10).frame(height: 42)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(RowPress())
+                        .accessibilityLabel(s.title)
+                    } else {
+                        PanelRow(icon: s.icon, title: s.title, detail: s.detail, action: s.pick)
+                    }
+                }
+            }
+            .padding(6)
         }
-        .padding(6)
+        .scrollIndicators(.never)
+        .scrollBounceBehavior(.basedOnSize)
+        .frame(maxHeight: 300)
+        .fixedSize(horizontal: false, vertical: rows.count < 7)
         .background(Palette.paper, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(Palette.border, lineWidth: 0.5))
         .transition(.opacity.combined(with: .offset(y: 6)))
+        .accessibilityIdentifier("mention-list")
     }
 
     private var composer: some View {
@@ -491,7 +578,7 @@ struct ChatView: View {
                             HStack(spacing: 5) {
                                 Image(systemName: "paperclip")
                                 Text((p as NSString).lastPathComponent).lineLimit(1)
-                                Button { withAnimation(Brand.quick) { attached.removeAll { $0 == p } } } label: { Image(systemName: "xmark.circle.fill") }
+                                Button { withAnimation(Brand.quick) { uploads.removeChatFile(p, from: session.id) } } label: { Image(systemName: "xmark.circle.fill") }
                                     .buttonStyle(.press)
                             }
                             .font(.inter(.caption, .medium)).foregroundStyle(Palette.accent)
@@ -564,6 +651,7 @@ struct ChatView: View {
         .animation(Brand.quick, value: attached)
         .animation(Brand.quick, value: refs)
         .animation(Brand.quick, value: atQuery)
+        .onChange(of: atQuery == nil) { _, closed in if !closed { Task { await loadMentions() } } }
         .onDisappear { voice.cancel() }
         .onChange(of: draft) {
             if draft.isEmpty && attached.isEmpty { spoke = false }
@@ -607,7 +695,8 @@ struct ChatView: View {
     }
 
     private var canSend: Bool {
-        voice.recording || (waiting.isEmpty && (!Self.withoutToken(draft).isEmpty || !attached.isEmpty || !refs.isEmpty))
+        // Files still uploading never hold the message back: they follow it (Uploads.follow).
+        voice.recording || !Self.withoutToken(draft).isEmpty || !attached.isEmpty || !refs.isEmpty
     }
 
     /// The arrow while recording stops, adds the words and sends in one tap.
@@ -625,23 +714,28 @@ struct ChatView: View {
         if !attached.isEmpty {
             text += (text.isEmpty ? "I sent you these from my phone:" : "\n\nFrom my phone:") + "\n" + attached.joined(separator: "\n")
         }
-        let before = (draft, attached, spoke)
-        let named = refs
+        let dictated = spoke
+        // The names still in the message, once each (the Mac's Mentions.used).
+        let used = mentioned.filter { text.contains($0.token) }.map(\.id)
         latestRequest += 1
         draft = ""
-        attached = []
         refs = []
+        mentioned = []
+        uploads.sentChatDraft(in: session.id)
         adding = false
         offerComments()
         Task {
-            if !(await model.say(text, in: session.id, from: "Chat", voice: before.2, tokens: true)) { draft = before.0; attached = before.1; spoke = before.2; refs = named }
+            if !(await model.say(text, in: session.id, from: "Chat", voice: dictated, tokens: true, mentions: used)) {
+                draft = text
+                spoke = dictated
+            }
         }
     }
 
     private func upload(_ item: PhotosPickerItem) async {
         let isVideo = item.supportedContentTypes.contains { $0.conforms(to: .movie) }
         if isVideo, let movie = try? await item.loadTransferable(type: PickedMovie.self) {
-            if let id = model.uploads.send(movie.url, name: movie.url.lastPathComponent, to: session.id, asTake: false) { waiting.insert(id) }
+            if let id = uploads.send(movie.url, name: movie.url.lastPathComponent, to: session.id, asTake: false) { uploads.beginChatFile(id, in: session.id) }
         } else if let data = try? await item.loadTransferable(type: Data.self) {
             let type = item.supportedContentTypes.first
             let ext = type?.preferredFilenameExtension ?? "jpg"
@@ -649,7 +743,7 @@ struct ChatView: View {
             let tmp = FileManager.default.temporaryDirectory.appending(path: "outbox/photo-\(stamp)-\(UUID().uuidString.prefix(4)).\(ext)")
             try? FileManager.default.createDirectory(at: tmp.deletingLastPathComponent(), withIntermediateDirectories: true)
             guard (try? data.write(to: tmp)) != nil else { return }
-            if let id = model.uploads.send(tmp, name: tmp.lastPathComponent, to: session.id, asTake: false) { waiting.insert(id) }
+            if let id = uploads.send(tmp, name: tmp.lastPathComponent, to: session.id, asTake: false) { uploads.beginChatFile(id, in: session.id) }
         }
     }
 }
@@ -880,7 +974,12 @@ struct FilesView: View {
             }
             .padding(16)
         }
-        .refreshable { await reload(); await loadComments() }
+        // The session and its comments at once: two waits become one.
+        .refreshable {
+            async let comments: Void = loadComments()
+            await reload()
+            await comments
+        }
         .task(id: detail.files.count) { await loadComments() }
     }
 
@@ -1381,6 +1480,21 @@ struct PostView: View {
     @State private var failed: String?
     /// The slide on show when the post shows slides.
     @State private var slide = 0
+    /// Comments on the slides (2026-10-31), as on the Mac: marking a slide, and the one being written.
+    @State private var slideComments: [Comment] = []
+    @State private var markingSlide = false
+    @State private var slideDraft: SlideDraft?
+    @State private var focusedSlide: String?
+    @State private var showResolvedSlides = false
+
+    struct SlideDraft: Identifiable {
+        var index: Int
+        var rect: CGRect?
+        var place: SlidePlace
+        var id: String { "\(index)-\(rect.map { "\($0)" } ?? "")" }
+    }
+    /// Autopost (admin): its label on the pill and its part of the schedule panel.
+    @StateObject private var auto = AutopostWatch()
 
     private var name: String { profile?.name ?? "You" }
     private func slidesOn(_ p: String) -> Bool { carousel?.isOn(p) == true }
@@ -1425,16 +1539,24 @@ struct PostView: View {
         // The app's own page, light or dark: a fixed beige page put light text (chips, status,
         // Cover) on beige in dark mode (2026-10-08). The LinkedIn card stays white, as in the feed.
         .background(Palette.canvas)
-        .refreshable { await reload() }
+        // The post and its slide comments at once.
+        .refreshable {
+            async let comments: Void = loadSlideComments()
+            await reload()
+            await comments
+        }
+        .task(id: sessionID) { await loadSlideComments() }
+        .sheet(item: $slideDraft) { slideSheet($0) }
         .onChange(of: variants.map(\.slug)) { old, slugs in
             if made, let new = slugs.first(where: { !old.contains($0) }) { draft = new; made = false }
             if draft != "main" && !slugs.contains(draft) { draft = "main" }
         }
-        .onChange(of: platform) { draft = "main"; made = false; slide = 0 }
+        .onChange(of: platform) { draft = "main"; made = false; slide = 0; markingSlide = false }
         .asks(confirm: $confirm, name: $ask)
         .sheet(isPresented: $scheduling) {
-            if let planned { ScheduleSheet(sessionID: sessionID, post: planned) { scheduling = false; Task { await reload() } } }
+            if let planned { ScheduleSheet(sessionID: sessionID, post: planned, auto: auto) { scheduling = false; Task { await reload() } } }
         }
+        .task(id: planned) { await auto.load(model, sessionID, planned, reload: reload) }
         .onChange(of: others.map(\.platform) + sideIDs.map(\.id), initial: true) { _, have in if platform != "linkedin" && !have.contains(platform) { platform = "linkedin" } }
         .sheet(isPresented: $history) { historySheet }
         .sheet(isPresented: $editing) {
@@ -1488,7 +1610,7 @@ struct PostView: View {
     private func statusRow(_ status: String?, count: Int?, limit: Int, write: Bool) -> some View {
         HStack {
             if let planned, status != nil {
-                SchedulePill(post: planned) { scheduling = true }
+                SchedulePill(post: planned, auto: auto.label(planned)) { scheduling = true }
             } else {
                 let posted = status == "posted"
                 Text((status ?? "No post").capitalized).font(.inter(.caption, .semibold))
@@ -1535,7 +1657,8 @@ struct PostView: View {
             if vertical { CarouselSwitch(sessionID: sessionID, platform: "vertical", on: photos, reload: reload) }
             VStack(alignment: .leading, spacing: 10) {
                 if photos, let carousel {
-                    CarouselPager(sessionID: sessionID, carousel: carousel, place: (p.places ?? ["tiktok"]).contains("tiktok") ? .tiktok : .instagram, index: $slide)
+                    let place: SlidePlace = (p.places ?? ["tiktok"]).contains("tiktok") ? .tiktok : .instagram
+                    CarouselPager(sessionID: sessionID, carousel: carousel, place: place, index: $slide, notes: slideNotes(place))
                         .frame(maxWidth: 260).clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
                         .frame(maxWidth: .infinity)
                 } else if let picture {
@@ -1565,6 +1688,7 @@ struct PostView: View {
                 CarouselTools(sessionID: sessionID, carousel: carousel, index: $slide,
                               tiktok: (p.places ?? ["tiktok"]).contains("tiktok"), shorts: (p.places ?? []).contains("shorts"),
                               reload: reload)
+                slideList
             }
             if vertical, let places = p.places, !places.isEmpty {
                 HStack(spacing: 6) {
@@ -1650,6 +1774,7 @@ struct PostView: View {
                     .id(draft)
                     if slidesOn("linkedin"), let carousel {
                         CarouselTools(sessionID: sessionID, carousel: carousel, index: $slide, reload: reload)
+                        slideList
                     }
                     if !hooks.isEmpty { hookList }
                 } else {
@@ -1734,6 +1859,64 @@ struct PostView: View {
         }
     }
 
+    // MARK: Slide comments
+
+    private func slideNotes(_ place: SlidePlace) -> SlideNotes {
+        SlideNotes(pins: slideComments.filter(\.open).enumerated().map { ($0.offset + 1, $0.element) },
+                   focused: focusedSlide, marking: markingSlide,
+                   draft: slideDraft.map { ($0.index, $0.rect) },
+                   start: { Brand.select(); focusedSlide = nil; withAnimation(Brand.quick) { markingSlide = true } },
+                   marked: { n, r in markingSlide = false; slideDraft = SlideDraft(index: n, rect: r, place: place) },
+                   cancel: { withAnimation(Brand.quick) { markingSlide = false } },
+                   pick: { c in withAnimation(.snappy) { focusedSlide = c.id } })
+    }
+
+    /// The slide comments under the slide tools, as the Mac adds them to the post's Comments list.
+    /// A tap shows the comment's slide.
+    @ViewBuilder private var slideList: some View {
+        let open = slideComments.filter(\.open)
+        if !slideComments.isEmpty {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack {
+                    Text("Comments on the slides").font(.nunito(.headline))
+                    Text("\(open.count) open").font(.inter(.caption)).foregroundStyle(Palette.muted)
+                    Spacer()
+                    if slideComments.count > open.count {
+                        Button(showResolvedSlides ? "Hide resolved" : "Show resolved") { withAnimation(Brand.quick) { showResolvedSlides.toggle() } }
+                            .font(.inter(.caption, .semibold)).foregroundStyle(Palette.accent).buttonStyle(.press)
+                    }
+                }
+                ForEach(slideComments.filter { $0.open || showResolvedSlides }) { c in
+                    CommentCard(comment: c, sessionID: sessionID) { await loadSlideComments() }
+                        .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).stroke(Palette.accent, lineWidth: focusedSlide == c.id ? 2 : 0))
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            if let n = c.slide { withAnimation(.snappy) { slide = n - 1 } }
+                            withAnimation(.snappy) { focusedSlide = c.id }
+                        }
+                }
+            }
+            .padding(.top, 6)
+        } else {
+            Text("Tap the comment button on a slide to say what should change.").font(.inter(.caption)).foregroundStyle(Palette.faint)
+        }
+    }
+
+    private func loadSlideComments() async {
+        if let c = await model.comments(sessionID) { slideComments = c.filter { $0.slide != nil } }
+    }
+
+    private func slideSheet(_ d: SlideDraft) -> some View {
+        NewComment(quote: nil, what: "slide", place: "slide \(d.index + 1) · " + (d.rect == nil ? "whole slide" : "area"),
+                   more: d.rect == nil ? [("Mark an area", "viewfinder", { slide = d.index; markingSlide = true })] : []) { text in
+            guard let c = await model.comment(sessionID, slide: d.index + 1, rect: d.rect, place: d.place, text: text) else { return false }
+            slideComments.append(c)
+            focusedSlide = c.id
+            return true
+        }
+        .presentationDetents([.medium, .large])
+    }
+
     private func card(_ post: Post, text: AnyView) -> some View {
         VStack(alignment: .leading, spacing: 0) {
             LinkedInHeader(name: name, headline: profile?.headline ?? "", photo: profile?.photo ?? false, when: post.status == "posted" ? "Posted" : "Now")
@@ -1741,7 +1924,7 @@ struct PostView: View {
             FeedText(text: self.text, expanded: $expanded) { text }
                 .padding(.horizontal, 12).padding(.top, 10).padding(.bottom, 10)
             if slidesOn("linkedin"), let carousel {
-                CarouselPager(sessionID: sessionID, carousel: carousel, place: .linkedin, index: $slide)
+                CarouselPager(sessionID: sessionID, carousel: carousel, place: .linkedin, index: $slide, notes: slideNotes(.linkedin))
             } else if let m = post.media { media(files.first { $0.path == m } ?? Bubble.guess(m)) }
             Rectangle().fill(LinkedIn.line).frame(height: 1).padding(.horizontal, 12).padding(.top, 8)
             LinkedInActions().padding(.horizontal, 4)
@@ -1976,9 +2159,13 @@ struct Viewer: View {
                 if let n = file.take {
                     let on = starred ?? (file.keeper == true)
                     Button {
-                        starred = !on
+                        let next = !on
+                        starred = next
                         Brand.tap(.medium)
-                        Task { await model.keeper(sessionID, take: n) }
+                        Task {
+                            let sent = await model.keeper(sessionID, take: n)
+                            if starred == next { starred = OutboxAcknowledgement.keeper(sent: sent, previous: on, optimistic: next) }
+                        }
                     } label: {
                         dark(on ? "star.fill" : "star", on ? "Remove the star" : "Star as keeper", tint: on ? .yellow : .white)
                     }

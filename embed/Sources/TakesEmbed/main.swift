@@ -23,16 +23,12 @@ import EmbeddingGemma2
 import Foundation
 import ImageIO
 import MLX
+import TakesEmbedCLI
 
-let segment = 8.0
-let maxFrames = 450                   // one hour of footage per file
-let videoExts: Set<String> = ["mov", "mp4", "m4v"]
-let imageExts: Set<String> = ["png", "jpg", "jpeg", "heic", "webp"]
-let skipDirs: Set<String> = ["storyboard", "history", "comments", "posts", "variants", "voice", "node_modules"]
+// segment, maxFrames, the file kinds and outLock are in Globals.swift.
 
 // MARK: - Output
 
-let outLock = NSLock()
 func emit(_ obj: [String: Any]) {
     guard var data = try? JSONSerialization.data(withJSONObject: obj) else { return }
     data.append(0x0A)
@@ -41,6 +37,11 @@ func emit(_ obj: [String: Any]) {
 func fail(_ message: String) -> Never {
     FileHandle.standardError.write(Data((message + "\n").utf8))
     exit(1)
+}
+
+func indexSaveFailure(id: Any?, indexed: Int, files: Int, error: Error) -> [String: Any] {
+    ["id": id ?? NSNull(), "ok": false, "indexed": indexed, "files": files,
+     "error": "Could not save the search index: \(error.localizedDescription)"]
 }
 
 // MARK: - Index file
@@ -231,8 +232,11 @@ func loadImage(_ url: URL) throws -> RGBImage {
 // MARK: - Engine
 
 actor Engine {
+    typealias EmbedOperation = @Sendable (Source) async throws -> (String, [Item])
+
     let root: URL
     let models: URL
+    let embedOperation: EmbedOperation?
     var encoder: TextEncoder?
     var visionOn = false
     var index = IndexFile()
@@ -248,9 +252,10 @@ actor Engine {
     var lastUse = Date()
     static let idleUnload: TimeInterval = 60
 
-    init(root: URL, models: URL) {
+    init(root: URL, models: URL, embedOperation: EmbedOperation? = nil) {
         self.root = root
         self.models = models
+        self.embedOperation = embedOperation
         if let d = try? Data(contentsOf: Self.indexURL(root)), let f = try? JSONDecoder().decode(IndexFile.self, from: d) {
             index = f
         }
@@ -284,11 +289,12 @@ actor Engine {
         Memory.clearCache()
     }
 
-    func save() {
+    func save() throws {
         guard dirty else { return }
         let url = Self.indexURL(root)
-        try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-        if let d = try? JSONEncoder().encode(index) { try? d.write(to: url, options: .atomic) }
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let data = try JSONEncoder().encode(index)
+        try data.write(to: url, options: .atomic)
         dirty = false
     }
 
@@ -300,8 +306,9 @@ actor Engine {
 
     // MARK: Index
 
-    func runIndex(id: Any?) async {
-        guard !indexing else { emit(["id": id ?? NSNull(), "ok": false, "error": "Already indexing"]); return }
+    @discardableResult
+    func runIndex(id: Any?) async -> Bool {
+        guard !indexing else { emit(["id": id ?? NSNull(), "ok": false, "error": "Already indexing"]); return false }
         indexing = true; stopRequested = false
         defer { indexing = false }
         let all = sources(root: root)
@@ -312,7 +319,7 @@ actor Engine {
             let key = s.kind == "words" ? (videoFor(words: s.rel, root: root) ?? "") + "#words" : s.rel
             if s.kind == "words" && key == "#words" { return false }
             guard let e = index.files[key] else { return true }
-            return e.mtime != s.mtime || e.size != s.size
+            return e.items.isEmpty || e.mtime != s.mtime || e.size != s.size
         }
         // Text first (fast), then stills, then video.
         let order = ["script": 0, "about": 0, "words": 1, "image": 2, "video": 3]
@@ -322,22 +329,38 @@ actor Engine {
         for s in queue {
             if stopRequested { break }
             do {
-                let (key, items) = try await embed(s)
+                let result: (String, [Item])
+                if let embedOperation { result = try await embedOperation(s) }
+                else { result = try await embed(s) }
+                let (key, items) = result
+                guard !items.isEmpty else { throw EmbeddingError.invalid("No embeddings") }
                 index.files[key] = Entry(mtime: s.mtime, size: s.size, items: items)
                 dirty = true; matrixStale = true
             } catch {
-                // An unreadable file gets an empty entry, so it is not tried again until it changes.
-                let key = s.kind == "words" ? (videoFor(words: s.rel, root: root) ?? s.rel) + "#words" : s.rel
-                index.files[key] = Entry(mtime: s.mtime, size: s.size, items: [])
-                dirty = true
+                // Keep the previous result and retry unchanged files after transient failures.
+                emit(["event": "error", "file": s.rel, "error": "\(error)"])
             }
             done += 1
             emit(["event": "progress", "done": done, "total": queue.count, "file": s.rel])
-            if Date().timeIntervalSince(lastSave) > 30 { save(); lastSave = Date() }
+            if Date().timeIntervalSince(lastSave) > 30 {
+                do {
+                    try save()
+                    lastSave = Date()
+                } catch {
+                    emit(indexSaveFailure(id: id, indexed: done, files: index.files.count, error: error))
+                    return false
+                }
+            }
             Memory.clearCache()
         }
-        save()
+        do {
+            try save()
+        } catch {
+            emit(indexSaveFailure(id: id, indexed: done, files: index.files.count, error: error))
+            return false
+        }
         emit(["id": id ?? NSNull(), "ok": true, "indexed": done, "stopped": stopRequested, "files": index.files.count])
+        return true
     }
 
     func embed(_ s: Source) async throws -> (String, [Item]) {
@@ -440,6 +463,7 @@ actor Engine {
     }
 
     func search(_ query: String, limit: Int, kinds: Set<String>?) async throws -> [[String: Any]] {
+        guard limit >= 0 else { throw SearchError.invalidLimit }
         rebuild()
         guard !rows.isEmpty else { return [] }
         let q = try await textEncoder().encode([query], task: .search)[0]
@@ -480,6 +504,12 @@ actor Engine {
     }
 }
 
+enum SearchError: LocalizedError {
+    case invalidLimit
+
+    var errorDescription: String? { "Search limit must be zero or greater" }
+}
+
 // MARK: - Main
 
 func arg(_ name: String) -> String? {
@@ -507,7 +537,9 @@ case "search":
     let query = words.joined(separator: " ")
     guard !query.isEmpty else { fail("No query") }
     let kinds = arg("--kind").map { Set($0.split(separator: ",").map(String.init)) }
-    let limit = Int(arg("--limit") ?? "") ?? 20
+    guard let limit = parseSearchLimit(arg("--limit")) else {
+        fail("--limit must be zero or greater")
+    }
     let done = DispatchSemaphore(value: 0)
     Task {
         do { emit(["results": try await engine.search(query, limit: limit, kinds: kinds), "status": await engine.status()]) }
@@ -517,7 +549,10 @@ case "search":
     done.wait()
 case "index":
     let done = DispatchSemaphore(value: 0)
-    Task { await engine.runIndex(id: nil); done.signal() }
+    Task {
+        if !(await engine.runIndex(id: nil)) { exit(1) }
+        done.signal()
+    }
     done.wait()
 case "serve":
     emit(["event": "ready"])
@@ -542,7 +577,10 @@ case "serve":
             Task { var s = await engine.status(); s["id"] = id ?? NSNull(); emit(s) }
         case "search":
             let query = msg["query"] as? String ?? ""
-            let limit = msg["limit"] as? Int ?? 40
+            guard let limit = parseServeSearchLimit(msg["limit"]) else {
+                emit(["id": id ?? NSNull(), "error": "Search limit must be zero or greater"])
+                continue
+            }
             let kinds = (msg["kinds"] as? [String]).map(Set.init)
             Task {
                 do { emit(["id": id ?? NSNull(), "results": try await engine.search(query, limit: limit, kinds: kinds)]) }
@@ -554,7 +592,15 @@ case "serve":
     }
     // stdin closed: Takes quit. Save what is done and stop.
     let done = DispatchSemaphore(value: 0)
-    Task { await engine.stop(); await engine.save(); done.signal() }
+    Task {
+        await engine.stop()
+        do {
+            try await engine.save()
+        } catch {
+            FileHandle.standardError.write(Data(("Could not save the search index: \(error.localizedDescription)\n").utf8))
+        }
+        done.signal()
+    }
     done.wait()
 default:
     fail("Unknown command \(argv[1])")

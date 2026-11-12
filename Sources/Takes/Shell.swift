@@ -189,11 +189,11 @@ struct NavLabel<Trailing: View>: View {
     var body: some View {
         HStack(spacing: 9) {
             Image(systemName: icon).font(.system(size: 12.5)).foregroundStyle(active ? Theme.accent : Theme.muted).frame(width: 16)
-            Text(title).font(Theme.sans(13, .medium)).foregroundStyle(hover || active ? Theme.ink : Theme.muted)
+            Text(title).nativeText(font: Theme.sans(13, .medium), color: hover || active ? Theme.ink : Theme.muted)
             Spacer(minLength: 4)
             trailing
             if let key {
-                Text(key).font(Theme.sans(11.5)).foregroundStyle(Theme.faint).opacity(hover ? 1 : 0)
+                Text(key).nativeText(font: Theme.sans(11.5), color: Theme.faint).opacity(hover ? 1 : 0)
             }
         }
         .onHover { h in withAnimation(Theme.motion) { hover = h } }
@@ -238,7 +238,7 @@ struct BrandMenu: View {
                 // The logo is back beside the name (2026-10-11).
                 Image(nsImage: NSApp.applicationIconImage).resizable().interpolation(.high)
                     .frame(width: 22, height: 22)
-                Text("Takes").font(Theme.sans(17, .semibold)).foregroundStyle(Theme.ink)
+                Text("Takes").nativeText(font: Theme.sans(17, .semibold), color: Theme.ink)
                 // Beside the name, as in Codex (2026-10-11).
                 Image(systemName: "chevron.down").font(.system(size: 9, weight: .bold))
                     .foregroundStyle(Theme.faint)

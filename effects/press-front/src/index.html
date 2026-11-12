@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <!-- Press front: a hard cut to the front page of a newspaper. Masthead, date line, a big headline and an
+         italic deck, columns of small text, and in the middle the speaker as a live halftone photo (round ink dots,
+         still talking) with a caption. A pull quote and a box sit under it. The page creeps in slowly, like a
+         camera over a print. Then it cuts back (or tears away: use the Paper tear effect after it).
+         Inputs next to this file: footage.mp4 (the moment, at the frame size), person.webm (its cutout) and lum.js
+         (from `python3 halftone.py <this folder>`: the photo's brightness per dot, per frame).
+         Full frame: render it as mp4 and lay it over the cut. Made for tall frames; in wide frames the page stands
+         in the middle on a dark ground. Edit PAGE, PORTRAIT, LOOK and AT below. -->
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+    <script src="lum.js"></script>
+    <style>
+      @font-face { font-family: "Old Standard"; src: url("fonts/OldStandard-Regular.ttf"); font-weight: 400; }
+      @font-face { font-family: "Old Standard"; src: url("fonts/OldStandard-Italic.ttf"); font-weight: 400; font-style: italic; }
+      @font-face { font-family: "Garamond"; src: url("fonts/EBGaramond.ttf"); font-weight: 400 800; }
+      @font-face { font-family: "Garamond"; src: url("fonts/EBGaramond-Italic.ttf"); font-weight: 400 800; font-style: italic; }
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
+      #root { position: relative; width: 100%; height: 100%; overflow: hidden; background: #111; }
+      #root > video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+      #page { position: absolute; opacity: 0; background: var(--paper); color: var(--ink); font-family: "Garamond", serif; overflow: hidden; }
+      #inner { position: absolute; left: 0; top: 0; width: 1080px; height: 1920px; transform-origin: 0 0; padding: 70px 54px; }
+      .row { display: flex; align-items: center; justify-content: space-between; }
+      .ear { width: 190px; border: 1.5px solid var(--ink); text-align: center; padding: 8px 6px; font-size: 21px; line-height: 1.2; }
+      .ear b { display: block; font-family: "Old Standard", serif; font-weight: 400; font-size: 27px; }
+      .mast { font-family: "Old Standard", serif; font-size: 96px; white-space: nowrap; letter-spacing: -0.02em; line-height: 1; }
+      .rule { border-top: 2px solid var(--ink); border-bottom: 1px solid var(--ink); height: 6px; margin: 14px 0 10px; }
+      .dateline { font-size: 21px; letter-spacing: 0.14em; text-transform: uppercase; }
+      .head { font-family: "Old Standard", serif; text-align: center; font-size: 132px; line-height: 1; letter-spacing: -0.04em; margin-top: 22px; white-space: nowrap; transform-origin: 50% 50%; }
+      .deck { font-family: "Old Standard", serif; font-style: italic; text-align: center; font-size: 72px; line-height: 1.1; margin-top: 4px; white-space: nowrap; }
+      .thin { border-top: 1.5px solid var(--ink); margin: 26px 0 0; }
+      .cols { display: grid; grid-template-columns: 230px 1fr 230px; gap: 18px; margin-top: 18px; height: 930px; }
+      .col { font-size: 22px; line-height: 1.32; text-align: justify; hyphens: auto; overflow: hidden; }
+      .col h4 { font-family: "Old Standard", serif; font-weight: 400; font-size: 34px; text-align: center; line-height: 1.1; margin: 6px 0 4px; }
+      .col .by { font-size: 15px; letter-spacing: 0.12em; text-align: center; margin-bottom: 8px; }
+      .col i { font-style: italic; }
+      .photo { border: 1.5px solid var(--ink); position: relative; display: flex; flex-direction: column; }
+      .photo canvas { flex: 1; width: 100%; display: block; }
+      .cap { font-style: italic; font-size: 22px; text-align: center; padding: 8px 0 4px; }
+      .bottom { display: grid; grid-template-columns: 230px 1fr 230px; gap: 18px; margin-top: 18px; border-top: 1.5px solid var(--ink); padding-top: 14px; }
+      .quote { font-family: "Old Standard", serif; font-style: italic; font-size: 50px; line-height: 1.12; text-align: center; padding: 0 10px; }
+      .toc { font-size: 22px; line-height: 1.55; }
+      .toc div { display: flex; justify-content: space-between; border-bottom: 1px dotted var(--ink); }
+    </style>
+  </head>
+  <body>
+    <div id="root" data-composition-id="main" data-start="0" data-duration="3.0" data-width="1080" data-height="1920">
+      <video id="footage" class="clip" src="footage.mp4" muted playsinline data-start="0" data-track-index="0"></video>
+      <div id="page"><div id="inner">
+        <div class="row"><div class="ear"><b>Final Edition</b><span id="earL"></span></div><div class="mast" id="mast"></div><div class="ear"><b>Late News</b><span id="earR"></span></div></div>
+        <div class="rule"></div>
+        <div class="row dateline"><span id="dl1"></span><span id="dl2"></span><span id="dl3"></span></div>
+        <div class="head" id="head"></div>
+        <div class="deck" id="deck"></div>
+        <div class="thin"></div>
+        <div class="cols">
+          <div class="col" id="left"></div>
+          <div class="photo"><canvas id="dots"></canvas><div class="cap" id="cap"></div></div>
+          <div class="col" id="right"></div>
+        </div>
+        <div class="bottom"><div class="toc" id="toc"></div><div class="quote" id="quote"></div><div class="col" id="box"></div></div>
+      </div></div>
+    </div>
+    <script>
+      // The page. Columns take [heading, byline or "", text]. Keep it to what fits; extra text is cut off.
+      const PAGE = {
+        masthead: "The Daily Take", ears: ["This page is on sale for 1.3 seconds", "Comment TAKES to get the app"],
+        dateline: ["GETTAKES.APP", "SATURDAY, NOVEMBER 7, 2026", "SET BY TAKES"],
+        headline: "21 VIDEO EFFECTS", deck: "in 26 seconds, built by Takes.",
+        caption: "Alex Rivera, reading the list, at home.",
+        left: [["The List", "BY ALEX RIVERA", "<i>Live cursor.</i> A cursor named Takes moves the speaker. <i>Clone row.</i> Eight more, all talking. <i>Day dial.</i> The head is the hub, the room a printed clock face. <i>Predict keys.</i> A keyboard types the name. <i>Orbit ring.</i> Type goes round the head, behind it and in front. <i>Code body.</i> The code that made this video."]],
+        right: [["The ask", "", "Comment TAKES to get the app and every effect on this page."], ["The rest", "", "<i>Layer explode.</i> The frame in its real sheets. <i>Sketch words.</i> One word drawn in pencil. <i>Blade slice.</i> One white hairline, two halves slide apart. <i>Head stack.</i> Tags pile on a moving head. <i>Rack focus.</i> The room goes soft. <i>Banknote.</i> A live engraved portrait."]],
+        quote: "“Comment TAKES to get access to these, plus every effect after.”",
+        toc: [["Live cursor", "0:00"], ["Day dial", "0:02"], ["Comment drop", "0:09"], ["Layer explode", "0:12"], ["Blade slice", "0:15"], ["Banknote", "0:18"], ["Press front", "0:22"]],
+        box: [["Colophon", "", "Read aloud by Alex Rivera. Set, cut and printed by Takes, one frame at a time, in one ink."]],
+      };
+      // The part of the footage that becomes the photo: centre x, centre y, width, height (parts of the frame).
+      // halftone.py reads this line: keep it on one line.
+      const PORTRAIT = { x: 0.5, y: 0.31, w: 0.5, h: 0.44 };
+      const LOOK = { paper: "#ece6d6", ink: "#1b1915", dot: 1.0, creep: 1.04 };
+      // When (seconds): cut to the page, cut back.
+      const AT = { in: 0.25, out: 2.75 };
+
+      const root = document.getElementById("root");
+      const FRAME = { w: Number(root.dataset.width), h: Number(root.dataset.height) };
+      root.style.setProperty("--paper", LOOK.paper); root.style.setProperty("--ink", LOOK.ink);
+      const PW = Math.min(FRAME.w, FRAME.h * 9 / 16), PH = PW * 16 / 9, k = PW / 1080;
+      const page = document.getElementById("page"), inner = document.getElementById("inner");
+      Object.assign(page.style, { width: PW + "px", height: PH + "px", left: (FRAME.w - PW) / 2 + "px", top: (FRAME.h - PH) / 2 + "px" });
+      const $ = (id) => document.getElementById(id);
+      $("mast").textContent = PAGE.masthead; $("earL").textContent = PAGE.ears[0]; $("earR").textContent = PAGE.ears[1];
+      ["dl1", "dl2", "dl3"].forEach((id, i) => ($(id).textContent = PAGE.dateline[i]));
+      $("head").textContent = PAGE.headline;
+      // Fit the headline and deck to the page width (measured once, before the timeline).
+      for (const id of ["head", "deck", "mast"]) { const e = $(id), w = e.scrollWidth, max = id === "mast" ? 600 : 972; if (w > max) e.style.fontSize = parseFloat(getComputedStyle(e).fontSize) * max / w + "px"; } $("deck").textContent = PAGE.deck; $("cap").textContent = PAGE.caption; $("quote").textContent = PAGE.quote;
+      const col = (el, items) => (el.innerHTML = items.map(([h, by, t]) => `<h4>${h}</h4>${by ? `<div class="by">${by}</div>` : ""}<p>${t}</p>`).join(""));
+      col($("left"), PAGE.left); col($("right"), PAGE.right); col($("box"), PAGE.box);
+      $("toc").innerHTML = `<h4 style="font-family:'Old Standard';font-weight:400;font-size:30px;text-align:center">In This Video</h4>` + PAGE.toc.map(([a, b]) => `<div><span>${a}</span><span>${b}</span></div>`).join("");
+      // Halftone canvas: 560 x 870 page px.
+      const cv = $("dots"), ctx = cv.getContext("2d"); const CW = 560, CH = 870; cv.width = CW; cv.height = CH;
+      const G = window.LUM, bytes = G ? Uint8Array.from(atob(G.data), (c) => c.charCodeAt(0)) : null;
+      function dots(f) {
+        ctx.fillStyle = LOOK.paper; ctx.fillRect(0, 0, CW, CH);
+        if (!G) return;
+        ctx.fillStyle = LOOK.ink;
+        // A 45 degree dot screen: sample the grid, draw a dot whose area follows the darkness.
+        const step = CW / G.cols * 1.0, ang = Math.PI / 4, ca = Math.cos(ang), sa = Math.sin(ang);
+        const R = Math.hypot(CW, CH);
+        for (let u = -R / 2; u < R / 2; u += step) for (let v = -R / 2; v < R / 2; v += step) {
+          const x = CW / 2 + u * ca - v * sa, y = CH / 2 + u * sa + v * ca;
+          if (x < 0 || y < 0 || x >= CW || y >= CH) continue;
+          const c = Math.min(G.cols - 1, Math.floor(x / CW * G.cols)), r = Math.min(G.lines - 1, Math.floor(y / CH * G.lines));
+          const val = bytes[(f * G.lines + r) * G.cols + c] / 255;
+          const rad = Math.sqrt(1 - val) * step * 0.62 * LOOK.dot;
+          if (rad < 0.3) continue;
+          ctx.beginPath(); ctx.arc(x, y, rad, 0, Math.PI * 2); ctx.fill();
+        }
+      }
+      const S = { z: 1 };
+      function draw() {
+        const t = tl.time();
+        const f = G ? Math.min(G.frames - 1, Math.max(0, Math.floor(t * G.fps))) : 0;
+        dots(f);
+        inner.style.transform = `translate(${PW / 2}px, ${PH * 0.42}px) scale(${k * S.z}) translate(-540px, -806px)`;
+      }
+      window.__timelines = window.__timelines || {};
+      const tl = gsap.timeline({ paused: true, onUpdate: draw });
+      tl.set(page, { opacity: 1 }, AT.in);
+      tl.to(S, { z: LOOK.creep, duration: AT.out - AT.in, ease: "none" }, AT.in);
+      tl.set(page, { opacity: 0 }, AT.out);
+      tl.set({}, {}, Number(root.dataset.duration));
+      window.__timelines["main"] = tl;
+      draw(); tl.seek(0);
+    </script>
+  </body>
+</html>

@@ -112,6 +112,22 @@ struct CarouselSwitch: View {
     }
 }
 
+/// Comments on the slides (2026-10-31), as the Mac's slide notes: a comment button at each slide's top
+/// left, the open comments as numbered pins, and while marking a drag over the slide for an area or a
+/// tap for the whole slide.
+struct SlideNotes {
+    /// The open slide comments, numbered as the list under the post.
+    var pins: [(number: Int, comment: Comment)]
+    var focused: String?
+    var marking: Bool
+    /// The comment being written: its slide (from 0) and area.
+    var draft: (slide: Int, rect: CGRect?)?
+    let start: () -> Void
+    let marked: (Int, CGRect?) -> Void
+    let cancel: () -> Void
+    let pick: (Comment) -> Void
+}
+
 /// The slides where the video would be, swiped one at a time, with the app's page tag. Each slide is
 /// the Mac's picture of it (2026-10-29), so every layout and look shows as it exports.
 struct CarouselPager: View {
@@ -120,22 +136,29 @@ struct CarouselPager: View {
     let carousel: Carousel
     let place: SlidePlace
     @Binding var index: Int
+    var notes: SlideNotes? = nil
+    @State private var drawing: CGRect?
 
     private var slides: [CarouselSlide] { carousel.slides }
     private var linkedin: Bool { place == .linkedin }
 
     var body: some View {
         GeometryReader { g in
+            let box = CGRect(origin: .zero, size: CGSize(width: g.size.width, height: g.size.width / place.ratio))
             ScrollView(.horizontal, showsIndicators: false) {
                 LazyHStack(spacing: 0) {
                     ForEach(slides.indices, id: \.self) { n in
-                        SlidePicture(sessionID: sessionID, carousel: carousel, n: n, place: place, width: g.size.width).id(n)
+                        SlidePicture(sessionID: sessionID, carousel: carousel, n: n, place: place, width: g.size.width)
+                            .overlay(alignment: .topLeading) { if let notes { noteLayer(notes, n, box) } }
+                            .id(n)
                     }
                 }
                 .scrollTargetLayout()
             }
             .scrollTargetBehavior(.paging)
             .scrollPosition(id: Binding(get: { index }, set: { if let v = $0 { index = v } }))
+            .scrollDisabled(notes?.marking == true)
+            .overlay { if let notes, notes.marking { markLayer(notes, box) } }
             .overlay(alignment: .topTrailing) {
                 Text(linkedin ? "\(index + 1) / \(slides.count)" : "\(index + 1)/\(slides.count)")
                     .font(.system(size: 12, weight: .semibold)).foregroundStyle(.white)
@@ -156,6 +179,72 @@ struct CarouselPager: View {
         }
         .aspectRatio(place.ratio, contentMode: .fit)
         .accessibilityLabel("Slide \(index + 1) of \(slides.count)")
+    }
+
+    /// Slide n's pins, the area being written about, and the comment button.
+    private func noteLayer(_ notes: SlideNotes, _ n: Int, _ box: CGRect) -> some View {
+        let mine = notes.pins.filter { $0.comment.slide == n + 1 }
+        let whole = mine.filter { $0.comment.area == nil }
+        return ZStack(alignment: .topLeading) {
+            if !notes.marking {
+                ForEach(mine.filter { $0.comment.area != nil }, id: \.comment.id) { p in
+                    AreaBox(rect: p.comment.area!, in: box, number: p.number, strong: notes.focused == p.comment.id)
+                        .onTapGesture { notes.pick(p.comment) }
+                }
+            }
+            if let d = notes.draft, d.slide == n, let r = d.rect { AreaBox(rect: r, in: box, number: nil, strong: true).allowsHitTesting(false) }
+            if !notes.marking {
+                HStack(spacing: 6) {
+                    Button { notes.start() } label: {
+                        Image(systemName: "text.bubble").font(.system(size: 13, weight: .semibold)).foregroundStyle(.white)
+                            .frame(width: 32, height: 32).background(Palette.accent, in: Circle())
+                            .shadow(color: .black.opacity(0.2), radius: 3, y: 1)
+                    }
+                    .buttonStyle(.press)
+                    .accessibilityLabel("Comment on slide \(n + 1)")
+                    ForEach(whole, id: \.comment.id) { p in
+                        Button { notes.pick(p.comment) } label: {
+                            Text("\(p.number)").font(.caption2.monospacedDigit().weight(.bold)).foregroundStyle(.white)
+                                .frame(minWidth: 20, minHeight: 20)
+                                .background(Palette.accent.opacity(notes.focused == p.comment.id ? 1 : 0.8), in: RoundedRectangle(cornerRadius: 5))
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Comment \(p.number) on the whole slide")
+                    }
+                }
+                .padding(10)
+            }
+        }
+        .frame(width: box.width, height: box.height, alignment: .topLeading)
+    }
+
+    /// Marking: dims the slide, says what to do, and a drag marks an area (a tap: the whole slide).
+    private func markLayer(_ notes: SlideNotes, _ box: CGRect) -> some View {
+        ZStack(alignment: .topLeading) {
+            Color.black.opacity(0.2)
+            if let r = drawing { AreaBox(rect: r, in: box, number: nil, strong: true).allowsHitTesting(false) }
+        }
+        .contentShape(Rectangle())
+        .gesture(DragGesture(minimumDistance: 0, coordinateSpace: .local).onChanged { g in
+            drawing = MediaReview.normal(g.startLocation, g.location, in: box)
+        }.onEnded { g in
+            drawing = nil
+            let r = MediaReview.normal(g.startLocation, g.location, in: box)
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+            notes.marked(index, r.width < 0.015 && r.height < 0.015 ? nil : r)
+        })
+        .overlay(alignment: .top) {
+            if drawing == nil {
+                HStack(spacing: 8) {
+                    Text("Drag over the area · tap for the whole slide").font(.inter(.caption, .medium)).foregroundStyle(.white)
+                        .multilineTextAlignment(.center)
+                    Button("Cancel") { notes.cancel() }.font(.inter(.caption, .semibold)).foregroundStyle(.white.opacity(0.85))
+                }
+                .padding(.horizontal, 12).padding(.vertical, 7)
+                .background(Palette.accent, in: Capsule())
+                .padding(12)
+            }
+        }
     }
 }
 

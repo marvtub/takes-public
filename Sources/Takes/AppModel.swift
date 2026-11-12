@@ -105,7 +105,9 @@ final class AppModel {
         didSet {
             guard preview != oldValue else { return }
             holdCamera()
-            if preview.map({ Asset.kind(of: $0) != .video }) ?? true { player = nil }
+            // Only a file with no video drops the player. Closing keeps it: jump(to:) closes and
+            // reopens the same file, the view stays, and Space found no player and beeped (2026-11-06).
+            if let p = preview, Asset.kind(of: p) != .video { player = nil }
         }
     }
     /// The post tab fills the window and hides the camera, so the camera can stop. It hides the
@@ -268,6 +270,7 @@ final class AppModel {
         || ProcessInfo.processInfo.arguments.contains { $0.hasSuffix(".xctest") || $0.contains("PackageTests") }
 
     init() {
+        LaunchProbe.step("library")
         // The screen is recorded only from the pill (2026-10-14), and the pill starts closed.
         if UserDefaults.standard.string(forKey: "mode") != Mode.camera.rawValue, UserDefaults.standard.string(forKey: "mode") != nil {
             UserDefaults.standard.set(Mode.camera.rawValue, forKey: "mode")
@@ -327,6 +330,7 @@ final class AppModel {
                 self?.rememberView()
                 self?.library.current?.close()
                 self?.chats.stopAll()  // a running claude would go on without the app
+                ClaudeChat.flushSaves()  // the chats' last saves are on disk before the app ends
             }
         })
         // Changes Claude makes through the MCP server show up without a click: FSEvents tells us,
@@ -377,7 +381,10 @@ final class AppModel {
         if !Self.testing {
             chats.resume()
             // The build's own lists, not the shown ones: in Public view the admin jobs run on, unseen (2026-10-22).
-            if Features.Built.socialBoards { scout.start(chats) }
+            if Features.Built.socialBoards {
+                scout.waiting = { [copilot] in copilot.review.count }
+                scout.start(chats)
+            }
             for p in Plugins.built where Plugins.isInstalled(p.id) { p.start?(self) }
         }
         // The camera runs only while you can see it.
@@ -389,6 +396,7 @@ final class AppModel {
                 MainActor.assumeIsolated { self?.holdCamera() }
             })
         }
+        LaunchProbe.step("model")
     }
 
     /// takes://open?path=<project folder, session folder, or a file in a session>
@@ -551,7 +559,7 @@ final class AppModel {
     private func wire(_ doc: SessionDoc) {
         doc.onScriptSettled = { [weak self, weak doc] in
             guard let self, let doc else { return }
-            self.autoName(doc)
+            self.autoName(doc, typing: true)
         }
     }
 
@@ -572,20 +580,25 @@ final class AppModel {
 
     // MARK: Naming
 
-    func autoName(_ doc: SessionDoc) {
+    /// `typing`: called from a pause in typing. Then it waits while a text view has the keys: a
+    /// rename moves the folder, and the panes keyed on it rebuild, which drops the cursor and the
+    /// undo. The next pause or the next take names it.
+    func autoName(_ doc: SessionDoc, typing: Bool = false) {
         let words = doc.script.split { $0.isWhitespace }.count
-        guard !doc.meta.named, !naming, phase == .idle, words >= 12 else { return }
-        Task { await aiName(doc) }
+        guard !doc.meta.named, !naming, phase == .idle, words >= 12, !(typing && Self.editingText) else { return }
+        Task { await aiName(doc, typing: typing) }
     }
 
-    func aiName(_ doc: SessionDoc) async {
+    func aiName(_ doc: SessionDoc, typing: Bool = false) async {
         guard !naming else { return }
         naming = true
         let title = await Namer.title(for: doc.script, project: doc.projectName)
         naming = false
-        guard let title, phase == .idle, library.current === doc else { return }
+        guard let title, phase == .idle, library.current === doc, !(typing && Self.editingText) else { return }
         rename(doc, to: title, named: true)
     }
+
+    private static var editingText: Bool { NSApp?.keyWindow?.firstResponder is NSText }
 
     func rename(_ doc: SessionDoc, to title: String, named: Bool = true) {
         guard phase == .idle else { return }
@@ -674,7 +687,7 @@ final class AppModel {
             self.error = error is CancellationError ? nil : error.localizedDescription
             await camera.stopRecording()
             await screen.stopRecording()
-            for u in [camURL, screenURL].compactMap({ $0 }) { try? FileManager.default.removeItem(at: u) }
+            for u in [camURL, screenURL, screenURL.map(CursorLog.file)].compactMap({ $0 }) { try? FileManager.default.removeItem(at: u) }
             library.isRecording = false
             Store.markRecording(library.root, false)
             phase = .idle
@@ -691,7 +704,7 @@ final class AppModel {
             async let a: Void = camera.stopRecording()
             async let b: Void = screen.stopRecording()
             _ = await (a, b)
-            for u in [p.cam, p.screen].compactMap({ $0 }) { try? FileManager.default.removeItem(at: u) }
+            for u in [p.cam, p.screen, p.screen.map(CursorLog.file)].compactMap({ $0 }) { try? FileManager.default.removeItem(at: u) }
             pending = nil
             library.isRecording = false
             Store.markRecording(library.root, false)
@@ -730,14 +743,19 @@ final class AppModel {
         Store.markRecording(library.root, false)
         for h in Plugins.recordHooks { h.take(TakeMoment(session: p.doc.url, number: p.number, started: nil)) }
 
+        // The two files are separate reads: load both lengths at once.
+        let camFile = p.camStart == nil ? nil : p.cam, screenFile = p.screenStart == nil ? nil : p.screen
+        async let camLength = Self.duration(camFile)
+        async let screenLength = Self.duration(screenFile)
+        let (camSecs, screenSecs) = await (camLength, screenLength)
         var takes: [Take] = []
         if let c = p.cam, let cs = p.camStart {
             takes.append(Take(number: p.number, kind: .camera, file: c.lastPathComponent,
-                              startedAt: cs, duration: await Self.duration(c), script: p.script, hook: p.hook, shot: p.shot))
+                              startedAt: cs, duration: camSecs, script: p.script, hook: p.hook, shot: p.shot))
         }
         if let s = p.screen, let ss = p.screenStart {
             takes.append(Take(number: p.number, kind: .screen, file: s.lastPathComponent,
-                              startedAt: ss, duration: await Self.duration(s), script: p.script, hook: p.hook, shot: p.shot))
+                              startedAt: ss, duration: screenSecs, script: p.script, hook: p.hook, shot: p.shot))
         }
         p.doc.addTakes(takes)
         if p.shot != nil { p.doc.fileShotTake(p.number) }
@@ -750,8 +768,8 @@ final class AppModel {
         FirstTake.shared.afterTake(p.doc, number: p.number, library: library)
     }
 
-    private static func duration(_ url: URL) async -> Double? {
-        guard let d = try? await AVURLAsset(url: url).load(.duration), d.isNumeric else { return nil }
+    private static func duration(_ url: URL?) async -> Double? {
+        guard let url, let d = try? await AVURLAsset(url: url).load(.duration), d.isNumeric else { return nil }
         return d.seconds
     }
 
@@ -779,6 +797,14 @@ final class AppModel {
     }
 
     /// A video or still in the player that can take review comments.
+    /// A board that takes comments on itself, by plugin id: its comment mode, and C and Esc for it.
+    struct BoardComments {
+        var mode: () -> Bool
+        var toggle: () -> Void
+        var end: () -> Void
+    }
+    static var boardComments: [String: BoardComments] = [:]
+
     var canComment: Bool {
         guard let p = preview, library.current != nil else { return false }
         return Asset.kind(of: p) == .video || Asset.kind(of: p) == .image
@@ -824,6 +850,17 @@ final class AppModel {
         c.canComment = canComment
         c.commentMode = commentMode
         c.hasPlayer = player != nil
+        // A board that takes comments on itself (the Site boards, 2026-11-06): C and Esc are its own.
+        if case .plugin(let id)? = board, phase == .idle, let hook = Self.boardComments[id] {
+            var b = c
+            b.canComment = true
+            b.commentMode = hook.mode()
+            switch KeyRouter.action(key: e.keyCode, modifiers: e.modifierFlags, b) {
+            case .toggleComment?: hook.toggle(); return nil
+            case .endComment?: hook.end(); return nil
+            default: break
+            }
+        }
         if postView && phase == .idle {
             // The post view hides the stage. Its keys go to the post's review player, if any.
             let review = postReview

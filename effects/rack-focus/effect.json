@@ -1,0 +1,14 @@
+{
+  "name": "Rack focus",
+  "description": "A fake lens pull: the room behind the speaker slides out of focus and darkens a little while the speaker stays sharp, with a slow push in. Then it racks back.",
+  "when": "When you want focus on you for one line: a key point, a confession, a quiet moment.",
+  "needs": [
+    "the cut time where it starts",
+    "a cutout of the speaker (made in the steps)",
+    "a clean plate: the room without the speaker (plate.png)"
+  ],
+  "kind": "Cut-out",
+  "length_s": 3,
+  "shape": "any",
+  "shipped": true
+}

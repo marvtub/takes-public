@@ -371,9 +371,51 @@ final class ParityTests: XCTestCase {
         shot(app, "p8-h-plan-chat")
     }
 
+    /// Plan's calm first open (2026-10-30, the Mac's FirstPlan): one question, big day keys, the time
+    /// and places card, the next two weeks and I'm in. The Plan chat waits behind the header button
+    /// with the Mac's intro and asks. Light and dark.
+    func testPlanFirst() throws {
+        for dark in [false, true] {
+            _ = try get("/test/reset")
+            _ = try get("/test/parity")
+            _ = try get("/test/plan-first")
+            let app = XCUIApplication()
+            if dark { app.launchArguments += ["-lookMode", "dark"] }
+            open(app)
+            app.page("Plan")
+            let mode = dark ? "dark" : "light"
+            XCTAssertTrue(app.staticTexts["When do you want to post?"].waitForExistence(timeout: 10), "the first open shows")
+            XCTAssertFalse(app.buttons["Change days"].exists, "no Change days before a plan")
+            app.settle(timeout: 1)
+            shot(app, "p8-i-plan-first-\(mode)")
+            if dark { app.terminate(); continue }
+            app.buttons["Sat"].tap()
+            app.buttons["Other Pick a time"].tap()
+            let field = app.textFields["Any time, 24-hour"]
+            XCTAssertTrue(field.waitForExistence(timeout: 5))
+            field.tap()
+            field.typeText("09:41")
+            app.buttons["X"].tap()
+            let go = app.buttons["I'm in"]
+            for _ in 0..<3 where !go.isHittable { app.swipeUp() }
+            app.settle(timeout: 1)
+            shot(app, "p8-j-plan-first-picked")
+            go.tap()
+            XCTAssertTrue(planLogged {
+                $0["action"] as? String == "save" && ($0["days"] as? [String]) == ["tue", "thu", "sat"] && $0["time"] as? String == "09:41"
+                    && ($0["platforms"] as? [String]) == ["linkedin", "x"]
+            }, "\(log())")
+            XCTAssertTrue(app.buttons["Change days"].waitForExistence(timeout: 10), "the board shows once there is a plan")
+            app.buttons["Plan chat"].tap()
+            XCTAssertTrue(app.staticTexts["Plan your next videos."].waitForExistence(timeout: 10), "the Mac's intro")
+            XCTAssertTrue(app.buttons["What should I record next?"].exists)
+            app.settle(timeout: 1)
+            shot(app, "p8-k-plan-chat-intro")
+            app.terminate()
+        }
+    }
+
     func shot(_ app: XCUIApplication, _ name: String) {
-        let png = XCUIScreen.main.screenshot().pngRepresentation
-        let dir = ProcessInfo.processInfo.environment["TAKES_SHOTS"] ?? NSTemporaryDirectory()
-        try? png.write(to: URL(fileURLWithPath: dir).appendingPathComponent(name + ".png"))
+        writeScreenshot(XCUIScreen.main.screenshot(), named: name)
     }
 }

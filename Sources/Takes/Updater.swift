@@ -1,4 +1,5 @@
 import AppKit
+import CryptoKit
 import Foundation
 import Observation
 import SwiftUI
@@ -13,6 +14,9 @@ import SwiftUI
 /// also asks GitHub for the newest release, at launch and every six hours. A newer one is
 /// downloaded and staged in the same folder, so the same Update row shows, with the release
 /// notes as What's new. Before this, users of a release never heard of a newer one.
+/// The file must be the release's Takes.dmg on GitHub with the SHA-256 GitHub lists for it
+/// (2026-11-06): gettakes.app only says that a new version exists. Release builds are ad-hoc
+/// signed, so there is no signing identity to check.
 @MainActor @Observable
 final class Updater {
     static let shared = Updater()
@@ -121,16 +125,57 @@ final class Updater {
     }
 
     private struct Release: Decodable {
-        struct Asset: Decodable { var name: String; var browser_download_url: URL }
+        struct Asset: Decodable { var name: String; var browser_download_url: URL; var digest: String? }
         var tag_name: String
         var body: String?
         var assets: [Asset]
     }
 
+    /// Only the tag of the answer from gettakes.app is read: it says that a new version exists,
+    /// never where the file is or what it must be (2026-11-06, security review T2).
+    private struct Hint: Decodable { var tag_name: String }
+
+    /// Where the file and its hash come from. gettakes.app cannot change what api.github.com says.
+    nonisolated static let githubAPI = URL(string: "https://api.github.com/repos/\(releaseRepo)")!
+
+    /// A download is only a Takes.dmg asset of a release in the public repo, at that tag:
+    /// https://github.com/marvtub/takes-public/releases/download/<tag>/Takes.dmg. No other host,
+    /// port, user or path.
+    nonisolated static func isReleaseAsset(_ url: URL, tag: String) -> Bool {
+        guard let c = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              c.scheme == "https", c.host?.lowercased() == "github.com", c.port == nil, c.user == nil, c.password == nil,
+              c.query == nil, c.fragment == nil, isTag(tag) else { return false }
+        return c.percentEncodedPath == "/\(releaseRepo)/releases/download/\(tag)/Takes.dmg"
+    }
+
+    /// A release tag as release.sh makes it: "v2026.10.7", "v2026.10.7.2". Nothing else goes in a URL.
+    nonisolated static func isTag(_ tag: String) -> Bool {
+        guard tag.hasPrefix("v") else { return false }
+        let parts = tag.dropFirst().split(separator: ".", omittingEmptySubsequences: false)
+        return parts.allSatisfy { !$0.isEmpty && $0.allSatisfy { $0.isASCII && $0.isNumber } }
+    }
+
+    /// GitHub's digest of an asset, "sha256:<64 hex>", as lowercase hex; nil for any other form.
+    nonisolated static func sha256Hex(digest: String?) -> String? {
+        guard let digest, digest.hasPrefix("sha256:") else { return nil }
+        let hex = digest.dropFirst(7).lowercased()
+        return hex.count == 64 && hex.allSatisfy(\.isHexDigit) ? hex : nil
+    }
+
+    /// The SHA-256 of a file, read in 1 MB pieces (a DMG is 50 MB).
+    nonisolated static func sha256(of file: URL) -> String? {
+        guard let h = try? FileHandle(forReadingFrom: file) else { return nil }
+        defer { try? h.close() }
+        var hasher = SHA256()
+        while let chunk = try? h.read(upToCount: 1 << 20), !chunk.isEmpty { hasher.update(data: chunk) }
+        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+    }
+
     /// The update check goes through gettakes.app (2026-10-10), which answers with GitHub's JSON
     /// and counts the check: this version, the macOS version and whether an iPhone used this Mac
     /// in the last 7 days. `from` is set on the first check of a new version: the version before
-    /// it (an update), or "new" (a first install). No ID. GitHub itself is the fallback.
+    /// it (an update), or "new" (a first install). No ID. GitHub itself is the fallback. The
+    /// answer is only a hint: the file and its hash come from api.github.com (`fetchRelease`).
     /// `ref` (2026-10-20): the random install code from a download link that named its source
     /// (InstallRef), sent only with a first install's check.
     nonisolated static func checkURL(own: String, phone: Bool, from: String? = nil, ref: String? = nil) -> URL {
@@ -157,7 +202,6 @@ final class Updater {
     func checkRelease() {
         guard let own = ownRelease, !fetching, !applying else { return }
         fetching = true
-        let github = URL(string: "https://api.github.com/repos/\(Self.releaseRepo)/releases/latest")!
         let from = Self.checkFrom(own: own), phone = PhoneServer.usedRecently()
         let stage = waiting.deletingLastPathComponent(), skip = staged?.release, id = Bundle.main.bundleIdentifier ?? ""
         Task { @MainActor in
@@ -171,41 +215,47 @@ final class Updater {
                 UserDefaults.standard.set(own, forKey: Self.checkedKey)
                 try? FileManager.default.removeItem(at: InstallRef.file)
             }
-            if await Self.fetchRelease(api: api, fallback: github, own: own, skip: skip, bundleID: id, into: stage, answered: counted) != nil {
+            if await Self.fetchRelease(api: api, own: own, skip: skip, bundleID: id, into: stage, answered: counted) != nil {
                 lastRead = nil; check()
             }
         }
     }
 
-    /// Reads the newest release from `api`, or from `fallback` when `api` does not answer; when
-    /// it is newer than `own` and not `skip` (already staged), downloads its Takes.dmg and stages
-    /// it. Returns the staged tag.
-    nonisolated static func fetchRelease(api: URL, fallback: URL? = nil, own: String, skip: String?, bundleID: String, into stage: URL,
-                                         answered: (@Sendable () -> Void)? = nil) async -> String? {
-        func latest(_ url: URL) async -> Data? {
+    /// Asks `api` (gettakes.app) whether a release newer than `own` exists, or api.github.com when
+    /// it does not answer. When one does, and it is not `skip` (already staged), reads that release
+    /// from api.github.com, downloads its Takes.dmg and stages it only when the file's SHA-256 is
+    /// the digest GitHub lists for the asset. No digest, no GitHub answer or another hash: no
+    /// update, and the reason goes to the log. Returns the staged tag.
+    nonisolated static func fetchRelease(api: URL, own: String, skip: String?, bundleID: String, into stage: URL,
+                                         session: URLSession = .shared, answered: (@Sendable () -> Void)? = nil) async -> String? {
+        func get(_ url: URL) async -> Data? {
             var req = URLRequest(url: url)
             req.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
-            guard let (data, resp) = try? await URLSession.shared.data(for: req),
+            guard let (data, resp) = try? await session.data(for: req),
                   (resp as? HTTPURLResponse)?.statusCode == 200 else { return nil }
             return data
         }
-        var data = await latest(api)
-        if data != nil { answered?() }
-        if data == nil, let fallback { data = await latest(fallback) }
-        let lists = fallback ?? api
-        guard let data,
-              let r = try? JSONDecoder().decode(Release.self, from: data),
-              isNewer(r.tag_name, than: own), skip != r.tag_name,
-              let dmg = r.assets.first(where: { $0.name == "Takes.dmg" }),
-              let (file, dresp) = try? await URLSession.shared.download(from: dmg.browser_download_url) else { return nil }
+        func refuse(_ why: String) -> String? { NSLog("Takes update refused: \(why)"); return nil }
+        var hint = await get(api).flatMap { try? JSONDecoder().decode(Hint.self, from: $0) }
+        if hint != nil { answered?() }
+        if hint == nil { hint = await get(githubAPI.appending(path: "releases/latest")).flatMap { try? JSONDecoder().decode(Hint.self, from: $0) } }
+        guard let tag = hint?.tag_name, isNewer(tag, than: own), skip != tag else { return nil }
+        guard isTag(tag) else { return refuse("bad tag \(tag)") }
+        guard let data = await get(githubAPI.appending(path: "releases/tags/\(tag)")),
+              let r = try? JSONDecoder().decode(Release.self, from: data), r.tag_name == tag else {
+            return refuse("api.github.com did not list release \(tag)")
+        }
+        guard let dmg = r.assets.first(where: { $0.name == "Takes.dmg" }) else { return refuse("\(tag) has no Takes.dmg") }
+        guard isReleaseAsset(dmg.browser_download_url, tag: tag) else { return refuse("\(tag) download is not a GitHub release asset") }
+        guard let want = sha256Hex(digest: dmg.digest) else { return refuse("\(tag) has no sha256 digest on GitHub") }
+        guard let (file, dresp) = try? await session.download(from: dmg.browser_download_url) else { return refuse("\(tag) download failed") }
         defer { try? FileManager.default.removeItem(at: file) }
-        guard (dresp as? HTTPURLResponse)?.statusCode == 200 else { return nil }
+        guard (dresp as? HTTPURLResponse)?.statusCode == 200 else { return refuse("\(tag) download failed") }
+        guard sha256(of: file) == want else { return refuse("\(tag) Takes.dmg does not match GitHub's sha256 digest") }
         // One update jumps to the newest release, so What's new lists every release since `own`
         // (2026-10-08), not only the newest. Without the list, the newest release's notes.
         var bodies = [r.body ?? ""]
-        if let list = URL(string: lists.absoluteString.replacingOccurrences(of: "/releases/latest", with: "/releases?per_page=30")),
-           list != lists, let (ldata, lresp) = try? await URLSession.shared.data(for: URLRequest(url: list)),
-           (lresp as? HTTPURLResponse)?.statusCode == 200,
+        if let ldata = await get(githubAPI.appending(path: "releases").appending(queryItems: [.init(name: "per_page", value: "30")])),
            let all = try? JSONDecoder().decode([Release].self, from: ldata) {
             let since = all.filter { isNewer($0.tag_name, than: own) && !isNewer($0.tag_name, than: r.tag_name) }
                 .sorted { isNewer($0.tag_name, than: $1.tag_name) }

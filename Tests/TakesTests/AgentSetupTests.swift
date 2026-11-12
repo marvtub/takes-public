@@ -46,4 +46,37 @@ struct AgentSetupTests {
         try "x".write(to: home.appending(path: "hyperframes/SKILL.md"), atomically: true, encoding: .utf8)
         #expect(AgentSetup.packsToFetch(packs, off: [], home: home).isEmpty)
     }
+
+    /// A pack Takes installed updates once a day; the user's own copy never.
+    @Test func updatesThePackDaily() throws {
+        let fm = FileManager.default
+        let home = fm.temporaryDirectory.appending(path: UUID().uuidString)
+        defer { try? fm.removeItem(at: home) }
+        let dir = home.appending(path: "hyperframes")
+        try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        try "x".write(to: dir.appending(path: "SKILL.md"), atomically: true, encoding: .utf8)
+        let packs = [SkillPack.hyperframes], now = Date()
+        #expect(AgentSetup.packsToFetch(packs, off: [], home: home, fetched: { _ in nil }, now: now).isEmpty)
+        try SkillPack.hyperframes.repo.write(to: dir.appending(path: SkillShelf.marker), atomically: true, encoding: .utf8)
+        #expect(AgentSetup.packsToFetch(packs, off: [], home: home, fetched: { _ in now.addingTimeInterval(-3600) }, now: now).isEmpty)
+        #expect(AgentSetup.packsToFetch(packs, off: [], home: home, fetched: { _ in now.addingTimeInterval(-90_000) }, now: now) == packs)
+        #expect(AgentSetup.packsToFetch(packs, off: [], home: home, fetched: { _ in nil }, now: now) == packs)
+        #expect(AgentSetup.packsToFetch(packs, off: ["hyperframes"], home: home, fetched: { _ in nil }, now: now).isEmpty)
+    }
+
+    /// Raea starts off: launch downloads it only once the user switched it on, then daily.
+    @Test func raeaWaitsForTheSwitch() throws {
+        let fm = FileManager.default
+        let home = fm.temporaryDirectory.appending(path: UUID().uuidString)
+        defer { try? fm.removeItem(at: home) }
+        try fm.createDirectory(at: home, withIntermediateDirectories: true)
+        let packs = [SkillPack.raea], now = Date()
+        #expect(AgentSetup.packsToFetch(packs, off: [], home: home).isEmpty)
+        let dir = home.appending(path: "raea")
+        try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        try "x".write(to: dir.appending(path: "SKILL.md"), atomically: true, encoding: .utf8)
+        try SkillPack.raea.repo.write(to: dir.appending(path: SkillShelf.marker), atomically: true, encoding: .utf8)
+        #expect(AgentSetup.packsToFetch(packs, off: [], home: home, fetched: { _ in now.addingTimeInterval(-90_000) }, now: now) == packs)
+        #expect(AgentSetup.packsToFetch(packs, off: ["raea"], home: home, fetched: { _ in nil }, now: now).isEmpty)
+    }
 }

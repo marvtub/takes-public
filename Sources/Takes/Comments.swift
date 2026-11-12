@@ -15,7 +15,8 @@ import UniformTypeIdentifiers
 // video frame, from the top left; missing means the whole frame. frame is a PNG of the moment with the
 // area drawn on it, so Claude sees what the user means (MCP get_comments / reply_comment).
 // Stills have a rect and no time. Script comments have file "script.md" or "variants/<slug>.md"
-// and a quote: the text the user selected.
+// and a quote: the text the user selected. Carousel comments (2026-10-30) have file "posts/carousel.json",
+// slide (1-based) and a rect on that slide; their frame is the slide as the post showed it.
 
 struct Reply: Codable, Hashable {
     var by: String
@@ -54,6 +55,8 @@ struct Comment: Codable, Identifiable, Hashable {
     var `repeat`: Bool? = nil
     /// The rule was there, but the comment asked for something new or was taste near it (2026-10-11).
     var request: Bool? = nil
+    /// A comment on a carousel slide: its number, from 1 (file is posts/carousel.json).
+    var slide: Int? = nil
 
     var open: Bool { status != "resolved" }
     var area: CGRect? {
@@ -162,6 +165,24 @@ final class CommentStore: ObservableObject {
         return made
     }
 
+    /// A comment on carousel slide `slide` (from 1) from outside the app (the iPhone), with the slide's
+    /// picture as its frame PNG.
+    nonisolated static func addSlide(_ session: URL, slide: Int, rect: CGRect?, text: String, picture: CGImage?,
+                                     by: String = "user") -> Comment {
+        var made: Comment!
+        let r2 = { (v: Double) in (v * 1000).rounded() / 1000 }
+        change(session) { f in
+            let n = (f.comments.compactMap { Int($0.id.dropFirst()) }.max() ?? 0) + 1
+            made = Comment(id: "c\(n)", file: CarouselFile.rel,
+                           rect: rect.map { [r2($0.minX), r2($0.minY), r2($0.width), r2($0.height)] },
+                           text: text, status: "open", by: by, at: now(),
+                           frame: picture == nil ? nil : "comments/c\(n).png", slide: slide)
+            f.comments.append(made)
+        }
+        if let picture { try? CommentFrame.write(image: picture, rect: rect, to: session.appending(path: "comments/\(made.id).png")) }
+        return made
+    }
+
     @discardableResult
     func add(media: URL, start: Double? = nil, end: Double? = nil, rect: CGRect?, text: String) -> Comment? {
         guard let session else { return nil }
@@ -181,8 +202,16 @@ final class CommentStore: ObservableObject {
         add(file: file, media: nil, start: nil, end: nil, rect: nil, quote: quote, text: text)
     }
 
+    /// A comment on carousel slide `slide` (from 1), on an area or the whole slide. `picture` is the
+    /// slide as the post shows it, for the frame PNG.
+    @discardableResult
+    func add(slide: Int, rect: CGRect?, text: String, picture: CGImage?) -> Comment? {
+        add(file: CarouselFile.rel, media: nil, start: nil, end: nil, rect: rect, quote: nil, text: text,
+            slide: slide, picture: picture)
+    }
+
     private func add(file: String, media: URL?, start: Double?, end: Double?, rect: CGRect?,
-                     quote: String?, text: String) -> Comment? {
+                     quote: String?, text: String, slide: Int? = nil, picture: CGImage? = nil) -> Comment? {
         guard let session else { return nil }
         let n = (Self.read(session).comments.compactMap { Int($0.id.dropFirst()) }.max() ?? 0) + 1
         let r2 = { (v: Double) in (v * 1000).rounded() / 1000 }
@@ -191,9 +220,11 @@ final class CommentStore: ObservableObject {
                         end: end.map { ($0 * 100).rounded() / 100 },
                         rect: rect.map { [r2($0.minX), r2($0.minY), r2($0.width), r2($0.height)] },
                         quote: quote, text: text, status: "open", by: "user", at: Self.now(),
-                        frame: media == nil ? nil : "comments/c\(n).png", replies: nil)
+                        frame: media == nil && picture == nil ? nil : "comments/c\(n).png", replies: nil, slide: slide)
         edit { $0.comments.append(c) }
-        if let media {
+        if let picture {
+            try? CommentFrame.write(image: picture, rect: rect, to: session.appending(path: "comments/c\(n).png"))
+        } else if let media {
             Task.detached {
                 try? await CommentFrame.write(media: media, at: start ?? 0, rect: rect,
                                               to: session.appending(path: "comments/c\(n).png"))
@@ -217,6 +248,12 @@ final class CommentStore: ObservableObject {
             guard let i = f.comments.firstIndex(where: { $0.id == id }) else { return }
             f.comments[i].status = resolved ? "resolved" : "open"
         }
+    }
+
+    /// Resolves many at once, in one write (Dismiss all on the Site boards).
+    func resolve(_ ids: [String]) {
+        let set = Set(ids)
+        edit { f in for i in f.comments.indices where set.contains(f.comments[i].id) { f.comments[i].status = "resolved" } }
     }
 
     func delete(_ id: String) {
@@ -269,6 +306,11 @@ enum CommentFrame {
             gen.requestedTimeToleranceAfter = .zero
             image = try await gen.image(at: CMTime(seconds: seconds, preferredTimescale: 600)).image
         }
+        try write(image: image, rect: rect, to: target)
+    }
+
+    /// `image` with the area outlined, as a PNG.
+    static func write(image: CGImage, rect: CGRect?, to target: URL) throws {
         let w = image.width, h = image.height
         guard let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,
                                   space: CGColorSpace(name: CGColorSpace.sRGB)!,
@@ -559,7 +601,12 @@ struct ReviewPlayer: View {
                 Color.black
                 // The AVPlayerView keeps every click, so a clear layer on top takes it: a click
                 // on the picture plays or pauses. Off while commenting: that click draws an area.
-                PlayerLayerView(player: clock.player).allowsHitTesting(false)
+                // Screenshots can't see a player layer: a still frame stands in (PostVideo.stills).
+                if PostVideo.stills {
+                    PostVideo(player: clock.player, fit: true).allowsHitTesting(false)
+                } else {
+                    PlayerLayerView(player: clock.player, pointer: url).allowsHitTesting(false)
+                }
                 if !mode {
                     Color.clear
                         .contentShape(Rectangle())
@@ -796,13 +843,18 @@ struct PressScale: ButtonStyle {
 
 struct PlayerLayerView: NSViewRepresentable {
     let player: AVPlayer
+    /// A screen take whose video left the pointer out: it is drawn back from its cursor log (2026-10-30).
+    var pointer: URL? = nil
     func makeNSView(context: Context) -> AVPlayerView {
         let v = AVPlayerView()
         v.controlsStyle = .none
         v.player = player
+        if let pointer, let track = PointerTrack.load(pointer) { context.coordinator.draw(track, in: v, player: player) }
         return v
     }
     func updateNSView(_ nsView: AVPlayerView, context: Context) {}
+    func makeCoordinator() -> PointerDrawer { PointerDrawer() }
+    static func dismantleNSView(_ nsView: AVPlayerView, coordinator: PointerDrawer) { coordinator.stop() }
 }
 
 // MARK: - Timeline
@@ -1167,7 +1219,8 @@ struct CommentCard: View {
                 Text("\(number)").font(Theme.mono(10, .bold)).foregroundStyle(.white)
                     .frame(minWidth: 16, minHeight: 16)
                     .background(comment.open ? Theme.accent : Color.white.opacity(0.25), in: RoundedRectangle(cornerRadius: 3))
-                Text(comment.start != nil ? comment.timeLabel : comment.quote != nil ? "text" : "image")
+                Text(comment.slide.map { "slide \($0)" } ?? (comment.start != nil ? comment.timeLabel : comment.quote != nil ? "text"
+                    : comment.file.hasPrefix("board:") ? "board" : "image"))
                     .font(Theme.mono(10.5)).foregroundStyle(.white.opacity(0.55))
                 if !comment.open {
                     Text("resolved").font(Theme.mono(10.5)).foregroundStyle(.white.opacity(0.4))

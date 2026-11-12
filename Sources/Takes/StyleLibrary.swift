@@ -944,12 +944,14 @@ struct LibrarySection: View {
         }
     }
 
-    /// The first lines of prose, without Markdown marks.
+    /// The first lines of prose, without Markdown marks. The "# Name style" title is left out: the
+    /// section heading above the card names the style already (2026-11-07).
     static func preview(_ md: String) -> String {
         md.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }
-            .filter { !$0.isEmpty && !$0.hasPrefix("```") && !$0.hasPrefix("|") && !$0.hasPrefix("---") }
+            .filter { !$0.isEmpty && !$0.hasPrefix("```") && !$0.hasPrefix("|") && !$0.hasPrefix("---") && !$0.hasPrefix("# ") }
             .prefix(5)
-            .map { $0.replacingOccurrences(of: #"^[#>*\-\s]+"#, with: "", options: .regularExpression) }
+            .map { $0.replacingOccurrences(of: #"^[#>*\-\s]+"#, with: "", options: .regularExpression)
+                .replacingOccurrences(of: "`", with: "").replacingOccurrences(of: "**", with: "") }
             .joined(separator: "\n")
     }
 
@@ -1343,13 +1345,15 @@ struct StylePoster: View {
     }
 
     private func load() async {
+        // A poster file decodes while the clip's length loads; a frame from the clip needs the length.
+        let decode = poster.map { p in Task.detached(priority: .utility) { NSImage(contentsOf: p) } }
         if let video {
             let asset = AVURLAsset(url: video)
             if let d = try? await asset.load(.duration) { duration = d.seconds.isFinite ? d.seconds : nil }
         }
         let still: NSImage?
-        if let poster {
-            still = await Task.detached(priority: .utility) { NSImage(contentsOf: poster) }.value
+        if let decode {
+            still = await decode.value
         } else if let video {
             let gen = AVAssetImageGenerator(asset: AVURLAsset(url: video))
             gen.appliesPreferredTrackTransform = true

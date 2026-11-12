@@ -25,7 +25,6 @@ final class ReadmeShots: XCTestCase {
     }
 
     private func shot(_ name: String) {
-        let dir = ProcessInfo.processInfo.environment["TAKES_SHOTS"] ?? NSTemporaryDirectory()
-        try? XCUIScreen.main.screenshot().pngRepresentation.write(to: URL(fileURLWithPath: dir).appendingPathComponent(name + ".png"))
+        writeScreenshot(XCUIScreen.main.screenshot(), named: name, requiresOutputDirectory: true)
     }
 }

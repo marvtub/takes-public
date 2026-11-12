@@ -1,0 +1,13 @@
+{
+  "name": "Blade slice",
+  "description": "A thin white flash slashes across the frame on a slant, and the shot splits along it: the top half slides one way, the bottom half the other, with a dark gap. Then they slide back together.",
+  "when": "On a hard word or a sharp claim: 'cut', 'split', a hit you want to feel.",
+  "needs": [
+    "where the cut crosses the frame (about the mouth) and its slant",
+    "the cut time where it starts"
+  ],
+  "kind": "Full frame",
+  "length_s": 3,
+  "shape": "any",
+  "shipped": true
+}

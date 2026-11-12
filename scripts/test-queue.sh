@@ -18,11 +18,15 @@ takes_on_exit() {
 # public copy's test.sh) holds no ticket of its own: TAKES_QUEUE_HELD.
 queue_wait() {
   [[ "${TAKES_QUEUE_HELD:-}" == 1 ]] && return 0
-  local q="$TAKES_CACHE/takes-test-queue" said="" mine first f pid ahead
+  local q="$TAKES_CACHE/takes-test-queue" said="" pending mine first f pid ahead
   mkdir -p "$q"
+  # The hidden file keeps scanners from seeing a ticket before its PID is complete.
+  pending="$(mktemp "$q/.ticket.XXXXXX")"
+  takes_on_exit "$pending"
+  printf '%s\n%s at %s\n' "$$" "$(basename "$PWD")" "$(git rev-parse --short HEAD 2>/dev/null)" > "$pending"
   mine="$(python3 -c 'import time; print(time.time_ns())')-$$"
-  printf '%s\n%s at %s\n' "$$" "$(basename "$PWD")" "$(git rev-parse --short HEAD 2>/dev/null)" > "$q/$mine"
   takes_on_exit "$q/$mine"
+  mv "$pending" "$q/$mine"
   while :; do
     first="" ahead=0
     for f in $(ls "$q" | sort); do
@@ -32,6 +36,10 @@ queue_wait() {
       [[ "$f" == "$mine" ]] && break
       ahead=$((ahead + 1))
     done
+    if [[ ! -f "$q/$mine" ]]; then
+      echo "Test queue ticket disappeared; stopping instead of waiting forever." >&2
+      return 1
+    fi
     [[ "$first" == "$mine" ]] && break
     local msg="Waiting: $ahead test run(s) ahead on this Mac (now: $(sed -n 2p "$q/$first" 2>/dev/null))."
     [[ "$msg" != "$said" ]] && { echo "$msg" >&2; said="$msg"; }

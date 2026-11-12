@@ -140,8 +140,15 @@ enum Stall {
     nonisolated(unsafe) private static var last = ""
     nonisolated(unsafe) private static var lastAt = CACurrentMediaTime()
     nonisolated(unsafe) private static var active = true
+    /// When the ask that has no answer yet went out.
+    nonisolated(unsafe) private static var asked: Double?
 
     static func note(_ what: String) { lock.withLock { last = what; lastAt = CACurrentMediaTime() } }
+
+    /// How long the main thread has not answered the open ask, in ms (0 when it answered).
+    nonisolated static func lateNow() -> Double {
+        lock.withLock { asked.map { (CACurrentMediaTime() - $0) * 1000 } ?? 0 }
+    }
 
     static func start() {
         // While Takes is in the back, ask once every 2 s: 10 wakeups a second kept an idle app
@@ -153,7 +160,7 @@ enum Stall {
             while true {
                 Thread.sleep(forTimeInterval: lock.withLock { active } ? 0.1 : 2)
                 let sent = CACurrentMediaTime()
-                let front = lock.withLock { active }
+                let front = lock.withLock { asked = sent; return active }
                 let done = DispatchSemaphore(value: 0)
                 DispatchQueue.main.async { done.signal() }
                 // Late by 1.5 s: save a sample while it is still frozen, so a 2–5 s freeze names
@@ -168,7 +175,8 @@ enum Stall {
                     }
                 }
                 let ms = (CACurrentMediaTime() - sent) * 1000
-                LaunchProbe.felt(ms)
+                lock.withLock { asked = nil }
+                LaunchProbe.felt(ms, sent: sent)
                 guard ms >= 100 else { continue }
                 let (after, since) = lock.withLock { (last, CACurrentMediaTime() - lastAt) }
                 // How long after the click: a freeze a minute later was not caused by drawing it.
@@ -185,22 +193,44 @@ enum Stall {
     }
 }
 
-/// After each launch Takes freezes once more for 0.2–0.9 s, about 1 s after the session shows
-/// (perf.txt, 8 launches 13–18 Oct). Stall samples only from 1.5 s, so nothing names its cause.
-/// For the first 8 s after a launch, `sample` runs on Takes the whole time. The file stays only when
-/// a freeze of 300 ms or more came in that time: ~/Library/Logs/Takes/launch-<time>.txt, the newest
-/// ten (2026-10-18).
+/// The first 10 s after a launch, in one line of perf.txt: when each step was done (seconds since
+/// the process started) and the freezes of 100 ms or more in that time, e.g.
+/// "launch: library 0.31 s, model 0.36 s, window 0.80 s, camera 1.02 s; freezes 2, 690 ms (420, 270)".
+///
+/// Until 2026-11-06 `sample` also ran on Takes for the first 8 s of every launch. That made the
+/// freezes it was there to find: while it runs, each framework or plugin that loads waits for it
+/// (a dlopen on main: 7 ms alone, 200–680 ms beside `sample`), and it takes no samples meanwhile,
+/// so the files never showed the cause. The launch bench (ZBenchLaunch) measured the first window
+/// 0.42 s alone and 0.80–1.0 s with it. It runs now only with `defaults write de.marvinaziz.takes
+/// launchProbe -bool true`: ~/Library/Logs/Takes/launch-<time>.txt, kept when a freeze of 300 ms or
+/// more began in the 8 s, the newest ten.
+@MainActor
 enum LaunchProbe {
     static let seconds = 8
     static let keepFrom = 300.0  // ms
     private static let lock = NSLock()
     nonisolated(unsafe) private static var until = 0.0
     nonisolated(unsafe) private static var stalls: [Double] = []
+    private static var steps: [(String, Double)] = []
+    nonisolated static func sampling(_ d: UserDefaults = .standard) -> Bool { d.bool(forKey: "launchProbe") }
+
+    /// A launch step is done (the first time only).
+    static func step(_ name: String) {
+        guard !steps.contains(where: { $0.0 == name }), let age = Perf.processAge(), age < Perf.launchWindow else { return }
+        steps.append((name, age))
+    }
 
     static func start() {
-        lock.withLock { until = CACurrentMediaTime() + Double(seconds); stalls = [] }
+        let window = Perf.launchWindow - (Perf.processAge() ?? 0)
+        lock.withLock { until = CACurrentMediaTime() + window; stalls = [] }
+        DispatchQueue.main.asyncAfter(deadline: .now() + window + 1) {
+            MainActor.assumeIsolated { Perf.note(line(steps: steps, freezes: lock.withLock { stalls })) }
+        }
+        guard sampling() else { return }
         HangWatch.sample(prefix: "launch", seconds: seconds) { file in
-            let felt = lock.withLock { until = 0; return stalls }
+            // A freeze still going on when `sample` ends counts too (2026-11-05: a 9.4 s one ended
+            // after the 8 s, so its file was thrown away).
+            let felt = lock.withLock { stalls } + [Stall.lateNow()].filter { $0 >= 100 }
             guard keep(felt) else { try? FileManager.default.removeItem(at: file); return }
             let list = felt.map { String(format: "%.0f", $0) }.joined(separator: ", ")
             DispatchQueue.main.async {
@@ -209,11 +239,23 @@ enum LaunchProbe {
         }
     }
 
-    /// From Stall's thread: how late the main thread answered.
-    nonisolated static func felt(_ ms: Double) {
-        guard ms >= 100 else { return }
-        lock.withLock { if CACurrentMediaTime() < until { stalls.append(ms) } }
+    nonisolated static func line(steps: [(String, Double)], freezes: [Double]) -> String {
+        let s = steps.sorted { $0.1 < $1.1 }.map { String(format: "%@ %.2f s", $0.0, $0.1) }.joined(separator: ", ")
+        let f = freezes.isEmpty ? "no freezes"
+            : String(format: "freezes %d, %.0f ms (%@)", freezes.count, freezes.reduce(0, +),
+                     freezes.map { String(format: "%.0f", $0) }.joined(separator: ", "))
+        return "launch: \(s.isEmpty ? "no steps" : s); \(f)"
     }
+
+    /// From Stall's thread: how late the main thread answered an ask sent at `sent`. A freeze
+    /// counts for the launch when it began in the window, however late it ends.
+    nonisolated static func felt(_ ms: Double, sent: Double) {
+        guard ms >= 100 else { return }
+        lock.withLock { if counts(sent: sent, until: until) { stalls.append(ms) } }
+    }
+
+    /// It began before the window closed. It used to count only when it had ended by then.
+    nonisolated static func counts(sent: Double, until: Double) -> Bool { sent < until }
 
     /// Keep the sample only when the launch had a freeze worth a look.
     nonisolated static func keep(_ stalls: [Double]) -> Bool { stalls.contains { $0 >= keepFrom } }

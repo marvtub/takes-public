@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <!-- Impact frame: a manga "impact frame". The shot snaps to two-tone ink: the speaker in black and cream with
+         ink outlines, radial speed lines bursting out behind the head, a huge word across the chest and rushing
+         lines below it. The whole frame flips to negative for a couple of frames on the hits, and shakes a little.
+         Then it cuts back.
+         Inputs next to this file: footage.mp4 (the moment, at the frame size) and person-ink.webm (the speaker as
+         an ink drawing: `python3 ink.py <this folder> <seconds>` makes it from person.webm, the cutout).
+         Full frame: render it as mp4 and lay it over the cut. The frame size is data-width / data-height on #root.
+         Edit WORD, LOOK and AT below. -->
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+    <style>
+      @font-face { font-family: "Inter"; src: url("fonts/InterVariable.ttf"); font-weight: 100 900; }
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
+      #root { position: relative; width: 100%; height: 100%; overflow: hidden; background: #000; }
+      #root video, .full { position: absolute; inset: 0; width: 100%; height: 100%; }
+      #root video { object-fit: cover; }
+      #ink { opacity: 0; }
+      #ink canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+      #word { position: absolute; left: 0; width: 100%; text-align: center; font-family: "Inter", sans-serif; font-weight: 900;
+              letter-spacing: -0.02em; line-height: 1; color: var(--cream); }
+    </style>
+  </head>
+  <body>
+    <div id="root" data-composition-id="main" data-start="0" data-duration="2.4" data-width="1080" data-height="1920">
+      <video id="footage" class="clip" src="footage.mp4" muted playsinline data-start="0" data-track-index="0"></video>
+      <div id="ink" class="full">
+        <canvas id="lines"></canvas>
+        <video id="person" class="clip" src="person-ink.webm" muted playsinline data-start="0" data-track-index="1"></video>
+        <canvas id="low"></canvas>
+        <div id="word"></div>
+      </div>
+    </div>
+    <script>
+      // The word across the chest, and where its middle sits (part of the frame height).
+      const WORD = { text: "IMPACT", y: 0.66, size: 240 };
+      // Look: paper and ink colours, how many speed lines, how hard it shakes (the drawing itself: LINE, SIGMA, DARK in ink.py).
+      // lines = how many speed lines. shake = px at a 1080 px short side.
+      const LOOK = { cream: "#f3efe2", ink: "#0a0a0a", lines: 260, shake: 7 };
+      // When (seconds): cut in, cut out, and the hits that flip to negative (each for `flip` seconds).
+      const AT = { in: 0.3, out: 1.95, hits: [0.3, 0.75, 1.3], flip: 0.07 };
+
+      const root = document.getElementById("root");
+      const FRAME = { w: Number(root.dataset.width), h: Number(root.dataset.height) };
+      const U = Math.min(FRAME.w, FRAME.h) / 1080;
+      root.style.setProperty("--cream", LOOK.cream);
+      const word = document.getElementById("word");
+      word.textContent = WORD.text;
+      Object.assign(word.style, { fontSize: Math.min(WORD.size * U, FRAME.w * 0.92 / (WORD.text.length * 0.66)) + "px", top: WORD.y * FRAME.h + "px", transform: "translateY(-50%)" });
+      const cv = document.getElementById("lines"), ctx = cv.getContext("2d");
+      cv.width = FRAME.w; cv.height = FRAME.h;
+      // From just above the word down: black ground with cream lines, in front of the speaker's body,
+      // so the word reads on any shirt.
+      const lineY = (WORD.y - 0.058) * FRAME.h;
+      const low = document.getElementById("low"), lctx = low.getContext("2d");
+      low.width = FRAME.w; low.height = FRAME.h;
+      function burst(seed) {
+        let s = seed; const rnd = () => ((s = (s * 16807) % 2147483647) / 2147483647);
+        ctx.fillStyle = LOOK.cream; ctx.fillRect(0, 0, FRAME.w, lineY);
+        ctx.fillStyle = LOOK.ink; ctx.fillRect(0, lineY, FRAME.w, FRAME.h - lineY);
+        // Radial lines from behind the head (upper part).
+        const cx = FRAME.w / 2, cy = FRAME.h * 0.28, R = Math.hypot(FRAME.w, FRAME.h);
+        ctx.fillStyle = LOOK.ink;
+        for (let i = 0; i < LOOK.lines; i++) {
+          const a = rnd() * Math.PI * 2, w = (0.002 + rnd() * 0.012), r0 = (0.3 + rnd() * 0.25) * FRAME.w;
+          ctx.beginPath();
+          ctx.moveTo(cx + Math.cos(a) * r0, cy + Math.sin(a) * r0);
+          ctx.lineTo(cx + Math.cos(a - w) * R, cy + Math.sin(a - w) * R);
+          ctx.lineTo(cx + Math.cos(a + w) * R, cy + Math.sin(a + w) * R);
+          ctx.closePath(); ctx.fill();
+        }
+        // Lower part (its own canvas, in front of the body): black, with cream lines rushing down.
+        lctx.clearRect(0, 0, FRAME.w, FRAME.h);
+        lctx.fillStyle = LOOK.ink; lctx.fillRect(0, lineY, FRAME.w, FRAME.h - lineY);
+        lctx.fillStyle = LOOK.cream;
+        const vx = FRAME.w / 2, vy = lineY - FRAME.h * 0.6;
+        for (let i = 0; i < LOOK.lines * 0.5; i++) {
+          const x = (rnd() * 1.6 - 0.3) * FRAME.w, w = (1 + rnd() * 4) * U, y0 = lineY + rnd() * 40 * U;
+          const k = (FRAME.h - vy) / (y0 - vy);
+          const y1 = y0 + FRAME.h * 0.12;
+          lctx.beginPath(); lctx.moveTo(x, y1); lctx.lineTo(vx + (x - vx) * k - w * 3, FRAME.h); lctx.lineTo(vx + (x - vx) * k + w * 3, FRAME.h); lctx.closePath(); lctx.fill();
+        }
+      }
+      const ink = document.getElementById("ink");
+      function draw() {
+        const t = tl.time();
+        // New lines every 2 frames: the burst flickers like hand-drawn frames.
+        burst(1 + Math.floor(t * 15) % 6);
+        const flip = AT.hits.some((h) => t >= h && t < h + AT.flip * 2 && Math.floor((t - h) / AT.flip) === 0);
+        ink.style.filter = flip ? "invert(1)" : "none";
+        const sh = t < AT.in + 0.25 ? LOOK.shake * U * (1 - (t - AT.in) / 0.25) : 0;
+        ink.style.transform = `translate(${Math.sin(t * 90) * sh}px, ${Math.cos(t * 77) * sh}px) scale(1.02)`;
+      }
+      window.__timelines = window.__timelines || {};
+      const tl = gsap.timeline({ paused: true, onUpdate: draw });
+      tl.set(ink, { opacity: 1 }, AT.in);
+      tl.set(ink, { opacity: 0 }, AT.out);
+      tl.set({}, {}, Number(root.dataset.duration));
+      window.__timelines["main"] = tl;
+      draw(); tl.seek(0);
+    </script>
+  </body>
+</html>

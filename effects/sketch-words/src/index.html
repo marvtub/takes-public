@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <!-- Sketch words: the room cuts to warm paper with pencil guide lines. A small word writes itself by hand,
+         then a big serif word is sketched: each letter's outline is drawn on in pencil (two loose passes), then
+         red hatching scribbles in from left to right. A pencil underline swipes under it. Everything boils a little, like
+         stop motion. The speaker stays in front with a soft shadow on the paper. Then it cuts back to the room.
+         Inputs next to this file: footage.mp4 (the moment, at the frame size) and person.webm (its cutout).
+         Full frame: render it as mp4 and lay it over the cut. The frame size is data-width / data-height on #root.
+         Edit WORDS, PLACE, LOOK and AT below. -->
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+    <style>
+      @font-face { font-family: "Caveat"; src: url("fonts/Caveat.ttf"); font-weight: 400 700; }
+      @font-face { font-family: "Garamond"; src: url("fonts/EBGaramond.ttf"); font-weight: 400 800; }
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
+      #root { position: relative; width: 100%; height: 100%; overflow: hidden; background: #000; }
+      #root video, .full { position: absolute; inset: 0; width: 100%; height: 100%; }
+      #root video { object-fit: cover; }
+      #paper { opacity: 0; }
+      #person { filter: drop-shadow(calc(var(--u) * 22px) calc(var(--u) * 26px) calc(var(--u) * 30px) rgba(60, 45, 25, .38)); }
+      #art text.small { font-family: "Caveat", cursive; font-weight: 500; }
+      #art text.big { font-family: "Garamond", serif; font-weight: 600; }
+    </style>
+  </head>
+  <body>
+    <div id="root" data-composition-id="main" data-start="0" data-duration="3.4" data-width="1080" data-height="1920">
+      <video id="footage" class="clip" src="footage.mp4" muted playsinline data-start="0" data-track-index="0"></video>
+      <svg id="paper" class="full">
+        <defs>
+          <filter id="rough" x="-5%" y="-20%" width="110%" height="140%"><feTurbulence id="turb" type="fractalNoise" baseFrequency="0.035" numOctaves="2" seed="1" result="n"/><feDisplacementMap in="SourceGraphic" in2="n" id="disp" scale="7"/></filter>
+          <filter id="grain"><feTurbulence type="fractalNoise" baseFrequency="0.9" numOctaves="2" seed="4"/><feColorMatrix values="0 0 0 0 0.45  0 0 0 0 0.38  0 0 0 0 0.28  0 0 0 0.06 0"/></filter>
+          <pattern id="hatch" patternUnits="userSpaceOnUse" width="60" height="40" patternTransform="rotate(-40)"><line x1="-2" y1="3" x2="62" y2="4.5" stroke="#9e2236" stroke-width="4.2"/><line x1="-2" y1="11" x2="62" y2="10" stroke="#b5304a" stroke-width="2.6"/><line x1="-2" y1="17" x2="62" y2="18.5" stroke="#a3263a" stroke-width="5"/><line x1="-2" y1="25" x2="62" y2="24" stroke="#c0405a" stroke-width="2"/><line x1="-2" y1="31" x2="62" y2="32.5" stroke="#9a1f33" stroke-width="3.6"/><line x1="-2" y1="37" x2="62" y2="37" stroke="#b5304a" stroke-width="1.6"/></pattern>
+          <pattern id="hatch2" patternUnits="userSpaceOnUse" width="46" height="23" patternTransform="rotate(-52)"><line x1="-2" y1="4" x2="48" y2="5" stroke="#7d1426" stroke-width="1.4" opacity=".7"/><line x1="-2" y1="15" x2="48" y2="14" stroke="#8a1a2c" stroke-width="1" opacity=".55"/></pattern>
+          <filter id="rough2" x="-5%" y="-20%" width="110%" height="140%"><feTurbulence id="turb2" type="fractalNoise" baseFrequency="0.05" numOctaves="2" seed="7" result="n"/><feDisplacementMap in="SourceGraphic" in2="n" scale="6"/></filter>
+          <clipPath id="fillclip"><polygon id="fillwipe" points="0,0 0,0 0,0 0,0"/></clipPath>
+          <clipPath id="smallclip"><rect id="smallwipe" x="0" y="0" width="0" height="10000"/></clipPath>
+        </defs>
+        <rect id="ground" fill="#f3eee3"/>
+        <rect id="grainrect" filter="url(#grain)"/>
+        <g id="art" filter="url(#rough)"></g>
+      </svg>
+      <video id="person" class="clip" src="person.webm" muted playsinline data-start="0" data-track-index="1"></video>
+    </div>
+    <script>
+      // The small handwritten word and the big sketched word.
+      const WORDS = { small: "sketch", big: "words" };
+      // Where the big word's baseline sits (part of the frame height) and its size (px at a 1080 px short side;
+      // it shrinks to fit). The speaker's head should cover a little of the bottom of the word or sit just under it.
+      const PLACE = { baseline: 0.225, size: 380, left: 0.03 };
+      // Colours: pencil outline, guide lines, underline.
+      const LOOK = { pencil: "#2a211c", guide: "#8f8a80", under: "#b39a3d", boil: 2 };
+      // When (seconds): cut to paper, small word writes, outlines start (time between letters, time to draw one),
+      // the red hatching scribbles in left to right (start, how long), underline, cut back.
+      const AT = { cut: 0.3, small: 0.4, smallFor: 0.45, big: 0.8, every: 0.09, draw: 0.3, fill: 1.0, fillFor: 0.55, under: 1.7, back: 2.95 };
+
+      const root = document.getElementById("root");
+      const FRAME = { w: Number(root.dataset.width), h: Number(root.dataset.height) };
+      const U = Math.min(FRAME.w, FRAME.h) / 1080;
+      root.style.setProperty("--u", U);
+      const NS = "http://www.w3.org/2000/svg", svg = document.getElementById("paper"), art = document.getElementById("art");
+      svg.setAttribute("viewBox", `0 0 ${FRAME.w} ${FRAME.h}`);
+      for (const id of ["ground", "grainrect"]) { const r = document.getElementById(id); r.setAttribute("width", FRAME.w); r.setAttribute("height", FRAME.h); }
+      const el = (tag, a, p = art) => { const e = document.createElementNS(NS, tag); for (const k in a) e.setAttribute(k, a[k]); p.appendChild(e); return e; };
+      let size = PLACE.size * U;
+      const estW = (s) => WORDS.big.length * s * 0.47;
+      while (estW(size) > FRAME.w * (1 - 2 * PLACE.left)) size *= 0.96;
+      // Wide frames: the word goes beside the head, on the left. Other frames: centred, low enough that the small
+      // word above it stays in the frame.
+      const WIDE = FRAME.w > FRAME.h * 1.2;
+      if (WIDE) while (estW(size) > FRAME.w * 0.34) size *= 0.96;
+      const by = WIDE ? Math.max(0.42 * FRAME.h, size * 1.2) : FRAME.h > FRAME.w * 1.5 ? PLACE.baseline * FRAME.h : Math.max(PLACE.baseline * FRAME.h, size * 1.2 + 0.02 * FRAME.h);
+      const bx = WIDE ? 0.05 * FRAME.w : (FRAME.w - estW(size)) / 2;
+      // Guide lines: baseline and x-height, edge to edge, drawn on.
+      const guides = [by, by - size * 0.47, by - size * 0.72].map((y, i) => el("line", { x1: 0, y1: y + (i === 2 ? 0 : 0), x2: FRAME.w, y2: y + 1.5, stroke: LOOK.guide, "stroke-width": 1.6 * U, opacity: i === 2 ? 0.0 : 0.75 }));
+      guides.forEach((g) => { g.setAttribute("stroke-dasharray", FRAME.w); g.setAttribute("stroke-dashoffset", FRAME.w); });
+      // The small word, written left to right (a wipe through a clip).
+      const small = el("text", { x: bx + size * 0.08, y: by - size * 0.78, class: "small", "font-size": size * 0.42, fill: LOOK.pencil, "clip-path": "url(#smallclip)" });
+      small.textContent = WORDS.small;
+      // The big word: per letter a hatch fill and a pencil outline.
+      const fills = [], lines = [];
+      const word = el("text", { x: bx, y: by, class: "big", "font-size": size });
+      [...WORDS.big].forEach((c) => { const t = document.createElementNS(NS, "tspan"); t.textContent = c; word.appendChild(t); });
+      // Copies of the word: two hatch layers (clipped by a slanted wipe that scribbles in left to right) and two
+      // loose pencil outlines, slightly apart and each with its own wobble, drawn on letter by letter.
+      const hatchWord = word, hatch2 = word.cloneNode(true), lineA = word.cloneNode(true), lineB = word.cloneNode(true);
+      const fillG = el("g", { "clip-path": "url(#fillclip)" }); fillG.appendChild(hatchWord); fillG.appendChild(hatch2);
+      hatchWord.setAttribute("fill", "url(#hatch)"); hatch2.setAttribute("fill", "url(#hatch2)");
+      const roughB = el("g", { filter: "url(#rough2)" });
+      art.appendChild(lineA); roughB.appendChild(lineB);
+      lineB.setAttribute("transform", `translate(${2.5 * U} ${-2 * U})`);
+      const DASH = size * 6;
+      [[lineA, 2.4], [lineB, 1.5]].forEach(([w, sw]) => {
+        w.setAttribute("fill", "none"); w.setAttribute("stroke", LOOK.pencil); w.setAttribute("stroke-width", sw * U);
+        w.setAttribute("stroke-linejoin", "round"); w.setAttribute("stroke-linecap", "round");
+        [...w.children].forEach((t) => { t.setAttribute("stroke-dasharray", DASH); t.setAttribute("stroke-dashoffset", DASH); lines.push(t); });
+      });
+      const nL = WORDS.big.length;
+      // Underline: a loose pencil swipe.
+      const uy = by + size * 0.13, ux0 = bx - size * 0.05, ux1 = bx + estW(size) * 1.02;
+      const under = el("path", { d: `M${ux0} ${uy + 6 * U} C ${ux0 + (ux1 - ux0) * 0.3} ${uy - 4 * U}, ${ux0 + (ux1 - ux0) * 0.7} ${uy + 8 * U}, ${ux1} ${uy - 2 * U}`, fill: "none", stroke: LOOK.under, "stroke-width": 7 * U, "stroke-linecap": "round", opacity: 0.9 });
+      const UL = (ux1 - ux0) * 1.05; under.setAttribute("stroke-dasharray", UL); under.setAttribute("stroke-dashoffset", UL);
+      const wipe = document.getElementById("smallwipe"), turb = document.getElementById("turb");
+      function draw() {
+        const t = tl.time();
+        // Stop-motion boil: a new pencil wobble every few frames.
+        turb.setAttribute("seed", 1 + Math.floor(t * 30 / LOOK.boil) % 5);
+        document.getElementById("turb2").setAttribute("seed", 7 + Math.floor(t * 30 / LOOK.boil) % 4);
+        const sp = Math.max(0, Math.min(1, (t - AT.small) / AT.smallFor));
+        wipe.setAttribute("width", FRAME.w * sp * 0.6 + 1);
+        // Outlines: each letter's pencil line is drawn on; the second, lighter pass follows a moment later.
+        lines.forEach((l, j) => {
+          const i = j % nL, pass = Math.floor(j / nL);
+          const a = Math.max(0, Math.min(1, (t - AT.big - i * AT.every - pass * 0.12) / AT.draw));
+          l.setAttribute("stroke-dashoffset", DASH * (1 - (1 - Math.pow(1 - a, 2))));
+          l.setAttribute("opacity", pass ? 0.55 : 0.9);
+        });
+        // Hatching: a slanted edge sweeps across the word, with a ragged front, like a fast scribble.
+        const f = Math.max(0, Math.min(1, (t - AT.fill) / AT.fillFor));
+        const x0 = bx - size * 0.3, x1 = bx + estW(size) + size * 0.5, xf = x0 + (x1 - x0) * f, top = by - size, bot = by + size * 0.3;
+        const jag = Math.floor(t * 30 / LOOK.boil) % 2 ? 1 : -1;
+        document.getElementById("fillwipe").setAttribute("points", `${x0},${top} ${xf + size * 0.25},${top} ${xf + jag * size * 0.06},${(top + bot) / 2} ${xf - size * 0.25},${bot} ${x0},${bot}`);
+      }
+      window.__timelines = window.__timelines || {};
+      const tl = gsap.timeline({ paused: true, onUpdate: draw });
+      tl.set("#paper", { opacity: 1 }, AT.cut);
+      guides.forEach((g, i) => tl.to(g, { attr: { "stroke-dashoffset": 0 }, duration: 0.35, ease: "power2.out" }, AT.cut + i * 0.06));
+      tl.to(under, { attr: { "stroke-dashoffset": 0 }, duration: 0.25, ease: "power2.out" }, AT.under);
+      tl.set("#paper", { opacity: 0 }, AT.back);
+      tl.set({}, {}, Number(root.dataset.duration));
+      window.__timelines["main"] = tl;
+      draw(); tl.seek(0);
+    </script>
+  </body>
+</html>

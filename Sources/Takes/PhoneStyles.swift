@@ -200,3 +200,91 @@ extension PhoneServer {
         return .encode(Self.sessionStyle(s, meta: d.meta, root: libraryRoot))
     }
 }
+
+// The Effects tab for the phone (2026-10-30): every effect with its preview and details, Use in a
+// video and New effect, with the Mac's asks (EffectLib). Shipped effects live in the app, not the
+// library, so their files come through /api/effects/file.
+
+struct PhoneEffect: Codable, Hashable {
+    var slug: String
+    var name: String
+    var description: String
+    var when: String
+    var kind: String
+    var needs: [String]
+    var seconds: Double?
+    var shape: String
+    var video: Bool
+    var poster: Bool
+    var readme: Bool
+}
+
+/// A row of the chat's @ list from the Mac: a style, an effect or a skill (ChatMentions.swift).
+/// The phone sends `id` back with the message, and the Mac adds the same note as for its own @.
+struct PhoneMention: Codable, Hashable {
+    var kind: String
+    var name: String
+    var detail: String?
+    var id: String
+    /// A picture in the library, for /thumb.
+    var image: String?
+    /// An effect's slug: its poster comes from /api/effects/file.
+    var effect: String?
+}
+
+extension PhoneServer {
+    func effects() -> [PhoneEffect] {
+        EffectLib.cards(root: libraryRoot).map { c in
+            PhoneEffect(slug: c.slug, name: c.name, description: c.description, when: c.when, kind: c.kind, needs: c.needs,
+                        seconds: c.seconds, shape: c.shape, video: c.video != nil, poster: c.poster != nil,
+                        readme: c.dir.map { FileManager.default.fileExists(atPath: $0.appending(path: "README.md").path) } ?? false)
+        }
+    }
+
+    /// ?slug=<effect>&file=preview.mp4 | preview.png | README.md
+    func effectFile(_ slug: String?, _ file: String?) -> URL? {
+        guard let file, ["preview.mp4", "preview.png", "README.md"].contains(file),
+              let dir = EffectLib.cards(root: libraryRoot).first(where: { $0.slug == slug })?.dir else { return nil }
+        let f = dir.appending(path: file)
+        return FileManager.default.fileExists(atPath: f.path) ? f : nil
+    }
+
+    /// {"action": "use", "slug": "<effect>", "session": "<id>"}: the video's chat gets the Mac's ask.
+    /// {"action": "new", "example": "…"}: the Styles chat builds a new effect.
+    @MainActor func changeEffect(_ b: [String: String]) -> PhoneResponse {
+        guard let app = appModel else { return .error(503, "Takes is starting") }
+        switch b["action"] {
+        case "use":
+            guard let c = EffectLib.cards(root: libraryRoot).first(where: { $0.slug == b["slug"] }) else { return .error(404, "No such effect") }
+            guard let s = session(b["session"]) else { return .error(404, "No such session") }
+            let title = Store.readMeta(s)?.title ?? s.lastPathComponent
+            app.chats.chat(s).send(EffectLib.useAsk(c), title: title, onStage: nil, origin: Self.origin(["from": "Styles"]))
+        case "new":
+            let x = (b["example"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !x.isEmpty else { return .error(400, "Paste a reel or say the move") }
+            app.chats.styles.send(EffectLib.makeAsk(x, root: libraryRoot), title: "Styles", onStage: nil)
+        default:
+            return .error(400, "Use or new?")
+        }
+        return .encode(["ok": true])
+    }
+
+    /// The styles, effects and skills of the Mac's @ list, in its order. The phone lists the
+    /// video's files itself.
+    func mentions(_ s: URL?) -> [PhoneMention] {
+        let root = libraryRoot.resolvingSymlinksInPath().path + "/"
+        return Mentions.all(session: s, root: libraryRoot).filter { $0.kind != .asset }.map { m in
+            let image = m.image.flatMap { $0.resolvingSymlinksInPath().path.hasPrefix(root) ? $0.path : nil }
+            return PhoneMention(kind: m.kind.rawValue, name: m.name, detail: m.detail, id: m.id, image: image,
+                                effect: m.kind == .effect ? m.path.lastPathComponent : nil)
+        }
+    }
+
+    /// What the agent reads after a phone message, for the names picked with @: the Mac's note.
+    func mentionNote(_ ids: String?, text: String, session s: URL) -> String {
+        let want = Set((ids ?? "").split(separator: "\n").map(String.init))
+        guard !want.isEmpty else { return "" }
+        let picked = Mentions.all(session: s, root: libraryRoot).filter { want.contains($0.id) }
+        return Mentions.note(Mentions.used(picked, in: text), session: s)
+    }
+}

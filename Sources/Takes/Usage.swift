@@ -437,12 +437,12 @@ struct UsagePage: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(alignment: .top) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Usage counts").font(Theme.display(17)).foregroundStyle(Theme.ink)
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Usage").font(Theme.display(26)).foregroundStyle(Theme.ink)
                     Text(Usage.release == nil
                          ? "This Takes is built from source, so it never sends anything."
                          : "Anonymous counts, once a day, to gettakes.app. Off unless you turn it on.")
-                        .font(Theme.sans(12)).foregroundStyle(Theme.muted)
+                        .font(Theme.sans(12.5)).foregroundStyle(Theme.muted)
                 }
                 Spacer()
                 if Usage.release != nil {
@@ -450,7 +450,7 @@ struct UsagePage: View {
                         .help(usage.on ? "Stop sending counts" : "Send counts once a day")
                 }
             }
-            .padding(20)
+            .padding(.horizontal, 32).padding(.top, 28).padding(.bottom, 20)
             Rule()
             ScrollView {
                 VStack(alignment: .leading, spacing: 20) {
@@ -480,7 +480,7 @@ struct UsagePage: View {
                     Link("Privacy at gettakes.app/privacy", destination: URL(string: "https://gettakes.app/privacy")!)
                         .font(Theme.sans(12)).foregroundStyle(Theme.accentInk)
                 }
-                .padding(20)
+                .padding(.horizontal, 32).padding(.vertical, 20)
             }
         }
     }

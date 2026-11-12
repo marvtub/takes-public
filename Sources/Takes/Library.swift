@@ -43,6 +43,45 @@ struct SessionMeta: Codable, Equatable {
     var archived: Bool?  // out of the way: in the closed group at the bottom (phone swipe, sidebar menu)
     var opens: [String: String]?  // first open: {"tab": "assets", "file": "edits/x.mp4"} (SessionView.read)
     var id: String?  // 12 hex characters that stay on a rename or move (Store.derivedID); nil = not stored yet
+
+    /// Three-way merge for `SessionDoc.save` when session.json changed on disk: a field (or a take's
+    /// field) this doc changed since `base` comes from `mine`, every other one from `disk`. Takes match
+    /// by number and kind; a take added on either side stays, one removed on either side goes.
+    /// Works on the JSON, so a new field needs nothing here.
+    static func merge(base: SessionMeta, mine: SessionMeta, disk: SessionMeta) -> SessionMeta {
+        func json(_ m: SessionMeta) -> [String: Any] {
+            (try? Store.encoder.encode(m)).flatMap { try? JSONSerialization.jsonObject(with: $0) } as? [String: Any] ?? [:]
+        }
+        func same(_ a: Any?, _ b: Any?) -> Bool {
+            switch (a, b) {
+            case (nil, nil): true
+            case let (a?, b?): (a as AnyObject).isEqual(b)
+            default: false
+            }
+        }
+        func fields(_ b: [String: Any], _ m: [String: Any], _ d: [String: Any]) -> [String: Any] {
+            var out = d
+            for k in Set(b.keys).union(m.keys) where !same(b[k], m[k]) { out[k] = m[k] }
+            return out
+        }
+        func takes(_ j: [String: Any]) -> [[String: Any]] { j["takes"] as? [[String: Any]] ?? [] }
+        func key(_ t: [String: Any]) -> String { "\(t["number"] ?? "")-\(t["kind"] ?? "")" }
+        let b = json(base), m = json(mine), d = json(disk)
+        let baseTakes = Dictionary(takes(b).map { (key($0), $0) }, uniquingKeysWith: { a, _ in a })
+        let diskTakes = Dictionary(takes(d).map { (key($0), $0) }, uniquingKeysWith: { a, _ in a })
+        var out = fields(b, m, d)
+        var list: [[String: Any]] = []
+        for t in takes(m) {
+            guard let bt = baseTakes[key(t)] else { list.append(t); continue }  // added here
+            if let dt = diskTakes[key(t)] { list.append(fields(bt, t, dt)) }  // else removed on disk
+        }
+        let mineKeys = Set(takes(m).map(key))
+        list += takes(d).filter { baseTakes[key($0)] == nil && !mineKeys.contains(key($0)) }  // added on disk
+        out["takes"] = list
+        guard let data = try? JSONSerialization.data(withJSONObject: out),
+              let merged = try? Store.decoder.decode(SessionMeta.self, from: data) else { return mine }
+        return merged
+    }
 }
 
 struct Project: Identifiable, Hashable {
@@ -278,13 +317,16 @@ final class SessionDoc {
     @ObservationIgnored var scriptUnsaved = false
     @ObservationIgnored var variantUnsaved: Set<String> = []
     @ObservationIgnored private var metaStamp: Date?
+    /// session.json as this doc last read or wrote it: what `save` merges against.
+    @ObservationIgnored private var diskMeta: SessionMeta?
     @ObservationIgnored private var scriptStamp: Date?
     @ObservationIgnored private var loadingFromDisk = false
 
     init(url: URL) {
         let url = Store.dir(url)
         self.url = url
-        var m = Store.readMeta(url) ?? SessionMeta(
+        diskMeta = Store.readMeta(url)
+        var m = diskMeta ?? SessionMeta(
             title: Self.titleFromFolder(url.lastPathComponent),
             createdAt: (try? url.resourceValues(forKeys: [.creationDateKey]).creationDate) ?? Date(), named: true)
         // The same id the server derives; saved with the next save, never written on open.
@@ -318,13 +360,29 @@ final class SessionDoc {
     func fileURL(_ take: Take) -> URL { url.appending(path: take.file) }
 
     func save() {
-        try? Store.encoder.encode(meta).write(to: url.appending(path: "session.json"))
+        let file = url.appending(path: "session.json")
+        // Claude's MCP wrote session.json since this doc read it (set_published, set_keeper, …), and
+        // reload() skips the open session while recording. Put this doc's changes on that copy, or
+        // the write drops the MCP's change for good.
+        if Store.modified(file) != metaStamp, let base = diskMeta, let disk = Store.readMeta(url) {
+            let merged = SessionMeta.merge(base: base, mine: meta, disk: disk)
+            if merged != meta { meta = merged }
+        }
+        try? Store.encoder.encode(meta).write(to: file, options: .atomic)
         try? manifest().write(to: url.appending(path: "SESSION.md"), atomically: true, encoding: .utf8)
+        // A fresh URL: `file` keeps the time it read before the write (URL caches resource values).
         metaStamp = Store.modified(url.appending(path: "session.json"))
+        diskMeta = meta
     }
 
     func flushScript() {
         saveTask?.cancel()
+        writeScript()
+    }
+
+    /// The write without the cancel: the autosave task calls it, and cancelling itself skipped the
+    /// snapshot and `onScriptSettled` after every pause in typing.
+    private func writeScript() {
         try? script.write(to: url.appending(path: "script.md"), atomically: true, encoding: .utf8)
         scriptUnsaved = false
         scriptStamp = Store.modified(url.appending(path: "script.md"))
@@ -340,6 +398,7 @@ final class SessionDoc {
         guard FileManager.default.fileExists(atPath: url.path) else { return false }
         let ms = Store.modified(url.appending(path: "session.json"))
         if ms != metaStamp, var m = Store.readMeta(url) {
+            diskMeta = m
             if m.id == nil { m.id = meta.id }
             // The same content again (Claude's MCP writes it often) redraws nothing.
             if m != meta { meta = m }
@@ -362,7 +421,7 @@ final class SessionDoc {
         saveTask = Task { [weak self] in
             try? await Task.sleep(for: .milliseconds(600))
             guard let self, !Task.isCancelled else { return }
-            self.flushScript()
+            self.writeScript()
             try? await Task.sleep(for: .seconds(3))
             guard !Task.isCancelled else { return }
             self.saveTask = nil
@@ -407,6 +466,7 @@ final class SessionDoc {
         for t in meta.takes where t.number == number {
             try? FileManager.default.trashItem(at: fileURL(t), resultingItemURL: nil)
             try? FileManager.default.trashItem(at: Transcript.file(for: fileURL(t)), resultingItemURL: nil)
+            try? FileManager.default.trashItem(at: CursorLog.file(for: fileURL(t)), resultingItemURL: nil)
         }
         meta.takes.removeAll { $0.number == number }
         save()
@@ -422,9 +482,11 @@ final class SessionDoc {
             let newFile = Self.takeFile(number: number, slug: slug, kind: t.kind, ext: ext.isEmpty ? "mov" : ext.lowercased())
             if newFile != t.file,
                (try? FileManager.default.moveItem(at: fileURL(t), to: url.appending(path: newFile))) != nil {
-                // The transcript keeps the video's name.
+                // The transcript and the cursor log keep the video's name.
                 try? FileManager.default.moveItem(at: Transcript.file(for: fileURL(t)),
                                                   to: Transcript.file(for: url.appending(path: newFile)))
+                try? FileManager.default.moveItem(at: CursorLog.file(for: fileURL(t)),
+                                                  to: CursorLog.file(for: url.appending(path: newFile)))
                 meta.takes[i].file = newFile
             }
             meta.takes[i].name = clean.isEmpty ? nil : clean

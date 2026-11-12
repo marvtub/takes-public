@@ -53,16 +53,14 @@ The composition needs two clips of the same moment. The render is a full-frame l
               "-vf", "scale=<W>:<H>:force_original_aspect_ratio=increase,crop=<W>:<H>,setsar=1,fps=<fps>",
               "-an", "-c:v", "libx264", "-crf", "14", "-pix_fmt", "yuv420p", "split-screen/footage.mp4"],
       "makes": ["split-screen/footage.mp4"]},
-     {"run": ["ffmpeg", "-y", "-ss", "<screen time>", "-t", "<D>", "-i", "../../<take>-screen.mov",
-              "-vf", "fps=<fps>,setsar=1",
-              "-an", "-c:v", "libx264", "-crf", "16", "-pix_fmt", "yuv420p", "split-screen/screen.mp4"],
+     {"run": ["takes-screen", "../../<take>-screen.mov", "<screen time>", "<D>", "split-screen/screen.mp4", "<fps>"],
       "makes": ["split-screen/screen.mp4"]},
      {"run": ["npx", "--yes", "hyperframes@0.8.214", "render", "split-screen", "-q", "delivery", "-o", "split-screen.mp4"],
       "makes": ["split-screen.mp4"]}
    ]
    ```
 
-   `<W>` and `<H>` are the edit's size. `<take time>` is the cut entry's `in` plus (`T` minus the time where that entry starts in the cut). `<screen time>` is `<take time>` minus the screen offset. `<fps>` is the edit's frame rate. If the recipe has `frame.crop`, put `crop=w:h:x:y,` before `scale` in the camera `-vf`. For a b-roll clip instead of a screen recording, cut any part of it in the second step.
+   `<W>` and `<H>` are the edit's size. `<take time>` is the cut entry's `in` plus (`T` minus the time where that entry starts in the cut). `<screen time>` is `<take time>` minus the screen offset. `<fps>` is the edit's frame rate. If the recipe has `frame.crop`, put `crop=w:h:x:y,` before `scale` in the camera `-vf`. `takes-screen` is a step Takes runs itself: it cuts the screen file like ffmpeg would and draws the pointer back in, since screen takes from 2026-10-30 on record without it (the cursor log has it). For a b-roll clip instead of a screen recording, cut it with ffmpeg in the second step (`-ss`, `-t`, `-vf fps=<fps>,setsar=1`).
 6. Add the layer: `"over": [{"file": "_edit/<name>/split-screen.mp4", "at": T}]`. Do not set `alpha`: the layer is full-frame.
 7. Run `render_edit`, then `check_edit`. Look at a frame in the middle of the effect. The face must sit well in its half, and you must be able to read the screen.
 

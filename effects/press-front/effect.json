@@ -1,0 +1,16 @@
+{
+  "name": "Press front",
+  "description": "A hard cut to a newspaper front page: masthead, date line, a big headline and an italic deck, columns of small text, and the speaker in the middle as a live halftone photo, still talking. A pull quote and a contents list sit under it. The page creeps in slowly.",
+  "when": "When your news or claim deserves a headline: a launch, a result, 'this made the front page'.",
+  "needs": [
+    "the masthead, headline and deck",
+    "the column text, quote, contents and caption",
+    "the cut time where it starts",
+    "a cutout of the speaker (made in the steps)",
+    "the halftone data (lum.js, made in the steps)"
+  ],
+  "kind": "Cut-out",
+  "length_s": 3,
+  "shape": "any",
+  "shipped": true
+}

@@ -100,6 +100,34 @@ class Higgsfield(unittest.TestCase):
                                                            "sketch": d["sketch"], "do": "Wider."}]})
         self.assertTrue(t.read_storyboard(self.s)["shots"][0].get("generating"))
 
+    def test_a_clip_whose_runner_died_lets_the_shot_go(self):
+        """Else the app keeps Make the clip off for good."""
+        sid = self.board()
+        r = t.t_higgsfield({"session": self.s, "shot": sid, "prompt": "Receipts."})
+        open(t.job_path(self.s, r["job"], ".lock", True), "w").close()  # a free lock: its runner is gone
+        d = t.read_storyboard(self.s)["shots"][0]
+        t.t_set_storyboard({"session": self.s, "shots": [{"id": sid, "kind": "B-ROLL", "say": d["say"],
+                                                           "sketch": d["sketch"], "do": "Wider."}]})
+        self.assertNotIn("generating", t.read_storyboard(self.s)["shots"][0])
+        # get_session lets it go too, in the file the app reads.
+        t.edit_shot(self.s, sid, lambda x: x.update(generating=r["file"]))
+        self.assertNotIn("generating", t.storyboard_view(self.s)["list"][0])
+        self.assertNotIn("generating", t.read_storyboard(self.s)["shots"][0])
+
+    def test_two_clips_for_one_shot_get_their_own_numbers(self):
+        sid = self.board()
+        # What an older job with the first id left behind must not mark the new one as told or lost.
+        os.makedirs(t.hf_jobs_dir(self.s))
+        for ext in (".told", ".lock"):
+            open(t.job_path(self.s, "shot-%s-v1" % sid, ext, True), "w").close()
+        a = t.t_higgsfield({"session": self.s, "shot": sid, "prompt": "Receipts."})
+        b = t.t_higgsfield({"session": self.s, "shot": sid, "prompt": "Receipts, wider."})
+        self.assertEqual((a["job"], b["job"]), ("shot-%s-v1" % sid, "shot-%s-v2" % sid))
+        self.assertNotEqual(a["file"], b["file"])
+        self.assertFalse(os.path.exists(t.job_path(self.s, a["job"], ".told", True)))
+        self.assertEqual(t.read_job(self.s, a["job"], True)["status"], "running")
+        self.assertEqual(sorted(j["id"] for j in t.hf_jobs(self.s)), [a["job"], b["job"]])
+
     def test_reframe_a_session_video(self):
         os.makedirs(os.path.join(self.s, "edits"))
         open(os.path.join(self.s, "edits", "cut-v1.mp4"), "wb").write(b"v")
@@ -134,6 +162,20 @@ class Higgsfield(unittest.TestCase):
         job = t.hf_jobs(self.s)[0]
         self.assertEqual((job["draft"], job["hf_id"]), (True, "job1"))
         self.assertEqual(r["file"], os.path.join("generated", "can-v1.mp4"))
+
+    def test_a_voice_line_goes_in_as_the_audio_reference(self):
+        self.take()
+        os.makedirs(os.path.join(self.s, "generated"), exist_ok=True)
+        open(os.path.join(self.s, "generated", "line-v1.wav"), "wb").write(b"wav")
+        t.t_higgsfield({"session": self.s, "prompt": "She speaks the line in @audio1 to the lens.", "name": "line",
+                        "image": "stills/target.png", "audio": "generated/line-v1.wav"})
+        t.higgsfield_run(self.s, self.started[0])
+        a = self.args()
+        self.assertTrue(a[a.index("--audio") + 1].endswith("generated/line-v1.wav"))
+        self.assertEqual(a[a.index("--mode") + 1], "omni_reference")  # t2v takes no reference
+        self.assertNotIn("--generate_audio", a)  # the clip keeps its sound: the line is in it
+        with self.assertRaises(ValueError):
+            t.t_higgsfield({"session": self.s, "prompt": "x", "audio": "generated/missing.wav"})
 
     def test_finalise_makes_the_full_size_from_the_draft_job(self):
         self.take()

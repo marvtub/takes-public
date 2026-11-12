@@ -53,6 +53,23 @@ class CommentCopilot(unittest.TestCase):
         a.update(kw)
         return t.t_add_comment_suggestion(a)
 
+    def test_target_photo_follows_the_drafts_photo(self):
+        """A draft's author photo also becomes that person's face in the target list."""
+        src = os.path.join(self.root, "p.jpg")
+        with open(src, "wb") as f:
+            f.write(b"jpg")
+        t.save_target_photo("https://www.linkedin.com/in/Some-Person/?x=1", src)
+        with open(os.path.join(t.target_photos_dir(), "some-person.jpg"), "rb") as f:
+            self.assertEqual(f.read(), b"jpg")
+        t.save_target_photo("https://www.linkedin.com/company/x/", src)
+        self.assertEqual(os.listdir(t.target_photos_dir()), ["some-person.jpg"])
+
+    def learn_all(self):
+        """The admin build learns every signal before the next draft (learn_comment); the public copy has no loop."""
+        if hasattr(t, "t_learn_comment") and t.pending_signals():
+            t.t_learn_comment({"learned": [{"signals": [g["signal"] for _, g in t.pending_signals()],
+                                            "outcome": "no-change", "why": "test"}]})
+
     def file(self, sid):
         with open(os.path.join(self.root, "_library", "comments", "suggestions", sid + ".json")) as f:
             return json.load(f)
@@ -99,6 +116,7 @@ class CommentCopilot(unittest.TestCase):
         ctx = t.t_get_comment_context({})
         self.assertEqual(ctx["waiting_for_redraft"][0]["id"], sid)
         self.assertEqual(ctx["examples"]["feedback_given"][0]["feedback"], "shorter")
+        self.learn_all()
         t.t_redraft_comment({"id": sid, "variants": ["same lol", "short one?", "we cut ours to 3 lines"]})
         s = self.file(sid)
         self.assertEqual((s["status"], len(s["drafts"])), ("review", 2))
@@ -124,9 +142,22 @@ class CommentCopilot(unittest.TestCase):
         self.assertIn("Jane", ctx["targets"])
         self.assertIn("Comment lessons", ctx["lessons"])
         # The scouts' briefs carry the rules and the skips.
+        self.learn_all()
         sid = self.add(url="https://l.in/3", source="feed")["id"]
         self.assertEqual(self.file(sid)["post"]["source"], "feed")
-        sc = t.t_get_comment_context({})["scouts"]
+        cli = t.treg_cli
+        try:
+            t.treg_cli = lambda: "/bin/treg"   # treg installed: the search scout uses no browser
+            ts = t.t_get_comment_context({})["scouts"]["search"]
+            t.treg_cli = lambda: None          # no treg: every scout reads LinkedIn in Chrome
+            sc = t.t_get_comment_context({})["scouts"]
+        finally:
+            t.treg_cli = cli
+        self.assertIn("/bin/treg call scrapecreators.x.v1-linkedin-search-posts", ts)
+        self.assertNotIn("tabs_create_mcp", ts)
+        for s in ('"Claude Code"', "feed/update/<activityUrn>", "urn:li:activity:1", '"candidates"',
+                  "Skip anyone on the target list", "/company/"):
+            self.assertIn(s, ts)
         self.assertEqual(set(sc), {"feed", "list", "search", "commenters"})
         for brief in sc.values():
             self.assertIn("tabs_create_mcp", brief)        # a subagent sees only its brief

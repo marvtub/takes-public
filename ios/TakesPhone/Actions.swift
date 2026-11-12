@@ -274,13 +274,10 @@ struct VoiceSheet: View {
             Spacer()
         }
         .background(Palette.paper.ignoresSafeArea())
-        .task { await load() }
+        .task { try? await load() }
         .task(id: v?.state) {
             // While it cleans, ask again every few seconds.
-            while v?.state == "running" {
-                try? await Task.sleep(for: .seconds(3))
-                await load()
-            }
+            try? await VoicePolling.run(while: { v?.state == "running" }, load: load)
         }
         .onDisappear { player?.pause() }
     }
@@ -354,13 +351,18 @@ struct VoiceSheet: View {
         }
     }
 
-    private func load() async {
+    private func load() async throws {
         do {
             let data = try await model.act("/api/voice", query, nil, method: "GET")
             let next = try API.decoder.decode(VoiceState.self, from: data)
             if next != v { withAnimation(Brand.quick) { v = next }; strength = next.strength }
             failed = nil
-        } catch { failed = error.localizedDescription }
+        } catch let error as CancellationError {
+            throw error
+        } catch {
+            guard !Task.isCancelled else { throw CancellationError() }
+            failed = error.localizedDescription
+        }
     }
 
     private func send(_ body: [String: String]) async {

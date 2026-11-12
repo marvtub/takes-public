@@ -104,8 +104,10 @@ enum BrollLib {
         if let hit = infos[url] { return hit }
         let asset = AVURLAsset(url: url)
         var out = BrollInfo()
-        out.duration = (try? await asset.load(.duration).seconds).flatMap { $0.isFinite ? $0 : nil } ?? 0
-        for item in (try? await asset.load(.metadata)) ?? [] {
+        // One load for both: AVFoundation reads the header once.
+        let loaded = try? await asset.load(.duration, .metadata)
+        out.duration = loaded.map { $0.0.seconds }.flatMap { $0.isFinite ? $0 : nil } ?? 0
+        for item in loaded?.1 ?? [] {
             let key = (item.key as? String)?.lowercased() ?? item.commonKey?.rawValue.lowercased()
             guard let key, let value = try? await item.load(.stringValue), !value.isEmpty else { continue }
             if key == "description" || (key == "comment" && out.description == nil) { out.description = value }
@@ -521,8 +523,12 @@ struct BrollClipTile: View {
         .task(id: clip.url) {
             info = BrollLib.cachedInfo(clip.url)
             poster = BrollLib.cachedPoster(clip.url)
-            if poster == nil { poster = await BrollLib.poster(clip.url) }
-            if info == nil { info = await BrollLib.info(clip.url) }
+            // The frame and the info are separate reads of the clip: load both at once.
+            let url = clip.url, needPoster = poster == nil, needInfo = info == nil
+            async let frame: NSImage? = needPoster ? BrollLib.poster(url) : nil
+            async let about: BrollInfo? = needInfo ? BrollLib.info(url) : nil
+            if needPoster { poster = await frame }
+            if needInfo { info = await about }
         }
     }
 

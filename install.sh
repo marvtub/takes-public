@@ -22,7 +22,20 @@ v=$(sw_vers -productVersion)
 [ "${v%%.*}" -ge 15 ] || fail "Takes needs macOS 15 or later. This Mac has macOS $v."
 
 tmp=$(mktemp -d)
-trap 'hdiutil detach -quiet "$tmp/mnt" 2>/dev/null || true; rm -rf "$tmp"' EXIT
+stage="" lock="" lock_held="" owner_id=""
+cleanup() {
+    status=$?
+    trap - EXIT HUP INT TERM
+    [ -z "$stage" ] || rm -rf "$stage"
+    if [ -n "$lock_held" ] && [ "$(readlink "$lock" 2>/dev/null || true)" = "$owner_id" ]; then
+        rm -f "$lock"
+    fi
+    hdiutil detach -quiet "$tmp/mnt" 2>/dev/null || true
+    rm -rf "$tmp"
+    exit "$status"
+}
+trap cleanup EXIT
+trap 'exit 1' HUP INT TERM
 bin="$HOME/.local/bin"
 mkdir -p "$bin"
 
@@ -35,14 +48,97 @@ hdiutil attach -quiet -nobrowse -readonly -noverify -mountpoint "$tmp/mnt" "$tmp
 # TAKES_APPS=<dir> installs there for a test and leaves a running Takes alone.
 apps=${TAKES_APPS:-/Applications}
 [ -w "$apps" ] || { apps="$HOME/Applications"; mkdir -p "$apps"; }
+started=$(ps -p "$$" -o lstart= 2>/dev/null || true)
+owner_id="$$|$started"
+lock="$apps/.takes-install.lock.$$.$(basename "$tmp")"
+ln -s "$owner_id" "$lock"
+lock_held=1
+# Each installer owns a different atomic symlink (2026-11-06). A live peer always makes this one
+# stop; stale peers can be removed without replacing a shared path another installer may now own.
+for peer in "$apps/.takes-install.lock" "$apps"/.takes-install.lock.*; do
+    [ -L "$peer" ] || continue
+    [ "$peer" = "$lock" ] && continue
+    owner=$(readlink "$peer" 2>/dev/null || true)
+    owner_pid=${owner%%|*}
+    owner_started=${owner#*|}
+    if [[ "$owner_pid" =~ ^[0-9]+$ ]] && kill -0 "$owner_pid" 2>/dev/null; then
+        running_started=$(ps -p "$owner_pid" -o lstart= 2>/dev/null || true)
+        if [ -z "$owner_started" ] || [ "$owner_started" = "$running_started" ]; then
+            fail "Another Takes installation is already running. Try again when it finishes."
+        fi
+    fi
+    rm -f "$peer"
+done
+# A replacement keeps this backup until the new bundle is in place. Recover one left by a
+# previous interrupted installer before discarding its other staging directories.
+for previous in "$apps"/.takes-install.previous.*; do
+    [ -e "$previous" ] || continue
+    if [ -e "$apps/Takes.app" ]; then rm -rf "$previous"
+    else mv "$previous" "$apps/Takes.app"
+    fi
+done
+# Only the lock owner may remove staging directories abandoned by SIGKILL or a power loss.
+for abandoned in "$apps"/.takes-install.*; do
+    [ ! -L "$abandoned" ] && [ -d "$abandoned" ] && rm -rf "$abandoned"
+done
 if [ -z "${TAKES_APPS:-}" ] && pgrep -xq -U "$(id -u)" Takes; then
     say "Quitting Takes to replace it…"
     osascript -e 'quit app "Takes"' || true
     for _ in 1 2 3 4 5 6 7 8 9 10; do pgrep -xq -U "$(id -u)" Takes || break; sleep 1; done
 fi
-rm -rf "$apps/Takes.app"
-ditto "$tmp/mnt/Takes.app" "$apps/Takes.app"
-xattr -dr com.apple.quarantine "$apps/Takes.app" 2>/dev/null || true
+stage=$(mktemp -d "$apps/.takes-install.XXXXXX")
+incoming="$stage/Takes.app"
+ditto "$tmp/mnt/Takes.app" "$incoming" || fail "Could not copy Takes. Your installed app was not changed."
+plist="$incoming/Contents/Info.plist"
+plistbuddy=${TAKES_PLISTBUDDY:-/usr/libexec/PlistBuddy}
+[ -f "$plist" ] &&
+    [ "$("$plistbuddy" -c 'Print :CFBundleIdentifier' "$plist" 2>/dev/null)" = de.marvinaziz.takes ] &&
+    [ "$("$plistbuddy" -c 'Print :CFBundleExecutable' "$plist" 2>/dev/null)" = Takes ] &&
+    [ -x "$incoming/Contents/MacOS/Takes" ] || fail "The download does not contain a valid Takes app. Your installed app was not changed."
+xattr -dr com.apple.quarantine "$incoming" 2>/dev/null || true
+replace_app() {
+    "${TAKES_OSASCRIPT:-/usr/bin/osascript}" -l JavaScript - "$1" "$2" "$3" <<'JXA'
+ObjC.import('Foundation')
+
+function run(argv) {
+    const manager = $.NSFileManager.defaultManager
+    const incoming = $.NSURL.fileURLWithPath($(argv[0]))
+    const installed = $.NSURL.fileURLWithPath($(argv[1]))
+    const backupName = $.NSURL.fileURLWithPath($(argv[2])).lastPathComponent
+    const error = Ref()
+    let ok
+    if (manager.fileExistsAtPath(installed.path)) {
+        ok = manager.replaceItemAtURLWithItemAtURLBackupItemNameOptionsResultingItemURLError(
+            installed, incoming, backupName,
+            $.NSFileManagerItemReplacementUsingNewMetadataOnly |
+                $.NSFileManagerItemReplacementWithoutDeletingBackupItem,
+            null, error
+        )
+    } else {
+        ok = manager.moveItemAtURLToURLError(incoming, installed, error)
+    }
+    if (!ok) {
+        const detail = error[0] ? ObjC.unwrap(error[0].localizedDescription) : 'unknown error'
+        throw new Error(detail)
+    }
+}
+JXA
+}
+# Foundation replaces same-volume items without a point where neither bundle exists.
+backup="$apps/.takes-install.previous.$$"
+had_app=""
+[ -e "$apps/Takes.app" ] && had_app=1
+if ! replace_app "$incoming" "$apps/Takes.app" "$backup"; then
+    if [ ! -e "$apps/Takes.app" ] && [ -e "$backup" ]; then
+        mv "$backup" "$apps/Takes.app"
+    fi
+    if [ -n "$had_app" ]; then
+        fail "Could not replace Takes. The previous app was restored."
+    else
+        fail "Could not install Takes. Try again."
+    fi
+fi
+rm -rf "$backup"
 echo "Takes is in $apps."
 if [[ $TAKES_INSTALL_TOKEN =~ ^[a-km-np-z2-9]{10}$ ]]; then
     support="$HOME/Library/Application Support/Takes"

@@ -1,0 +1,203 @@
+{
+ "note": "Real recordings Takes ships next to earshot's bank: CC0 (public domain) sounds from Freesound, each named in source. Clicks are one press, trimmed; typing ones are 4 s of steady typing, cut shorter for a short run, never looped. Peak at -1 dBFS, mono, 48 kHz.",
+ "sounds": [
+  {
+   "id": "rec/click/mouse",
+   "category": "click",
+   "file": "rec/click-mouse.flac",
+   "dur_s": 0.25,
+   "onset_s": 0.0123,
+   "peak_s": 0.0132,
+   "end_s": 0.165,
+   "notes": "one real mouse click: a dry plastic press and release",
+   "kinds": [
+    "click",
+    "recording"
+   ],
+   "source": {
+    "id": 213004,
+    "title": "Mouse Click.wav",
+    "author": "abstraktgeneriert",
+    "license": "CC0 1.0",
+    "url": "https://freesound.org/s/213004/"
+   },
+   "label": "Mouse click"
+  },
+  {
+   "id": "rec/click/mouse_pixeliota",
+   "category": "click",
+   "file": "rec/click-mouse_pixeliota.flac",
+   "dur_s": 0.182,
+   "onset_s": 0.0149,
+   "peak_s": 0.1089,
+   "end_s": 0.1174,
+   "notes": "a real mouse click, the one Remotion offers",
+   "kinds": [
+    "click",
+    "recording"
+   ],
+   "source": {
+    "id": 678248,
+    "title": "Mouse Click Sound.mp3",
+    "author": "Pixeliota",
+    "license": "CC0 1.0",
+    "url": "https://freesound.org/s/678248/"
+   },
+   "label": "Mouse click, light"
+  },
+  {
+   "id": "rec/click/mouse_long",
+   "category": "click",
+   "file": "rec/click-mouse_long.flac",
+   "dur_s": 0.25,
+   "onset_s": 0.0076,
+   "peak_s": 0.0093,
+   "end_s": 0.0804,
+   "notes": "a real mouse button held a moment: press, then release",
+   "kinds": [
+    "click",
+    "recording"
+   ],
+   "source": {
+    "id": 687108,
+    "title": "Mouse 2 Button Long Click",
+    "author": "aphom000",
+    "license": "CC0 1.0",
+    "url": "https://freesound.org/s/687108/"
+   },
+   "label": "Mouse click, long"
+  },
+  {
+   "id": "rec/click/mouse_firm",
+   "category": "click",
+   "file": "rec/click-mouse_firm.flac",
+   "dur_s": 0.25,
+   "onset_s": 0.0092,
+   "peak_s": 0.0123,
+   "end_s": 0.202,
+   "notes": "a firm real mouse click",
+   "kinds": [
+    "click",
+    "recording"
+   ],
+   "source": {
+    "id": 400659,
+    "title": "Mouse Clicks",
+    "author": "TheFlakesMaster",
+    "license": "CC0 1.0",
+    "url": "https://freesound.org/s/400659/"
+   },
+   "label": "Mouse click, firm"
+  },
+  {
+   "id": "rec/typing/mixed",
+   "category": "typing_run",
+   "file": "rec/typing-mixed.flac",
+   "dur_s": 4.0,
+   "onset_s": 0.013,
+   "peak_s": 3.656,
+   "end_s": 3.9227,
+   "notes": "real typing on a computer keyboard",
+   "kinds": [
+    "typing",
+    "recording"
+   ],
+   "source": {
+    "id": 499050,
+    "title": "Keyboard, variety of typing.wav",
+    "author": "16FPanskaVyskocil_Tom",
+    "license": "CC0 1.0",
+    "url": "https://freesound.org/s/499050/"
+   },
+   "label": "Keyboard typing"
+  },
+  {
+   "id": "rec/typing/computer",
+   "category": "typing_run",
+   "file": "rec/typing-computer.flac",
+   "dur_s": 4.0,
+   "onset_s": 0.0137,
+   "peak_s": 0.0279,
+   "end_s": 3.9734,
+   "notes": "real typing on a computer keyboard, steady",
+   "kinds": [
+    "typing",
+    "recording"
+   ],
+   "source": {
+    "id": 750148,
+    "title": "Computer Keyboard Typing",
+    "author": "DataJuggler",
+    "license": "CC0 1.0",
+    "url": "https://freesound.org/s/750148/"
+   },
+   "label": "Computer typing"
+  },
+  {
+   "id": "rec/typing/expensive",
+   "category": "typing_run",
+   "file": "rec/typing-expensive.flac",
+   "dur_s": 4.0,
+   "onset_s": 0.3983,
+   "peak_s": 1.6615,
+   "end_s": 3.9339,
+   "notes": "real typing on a quality keyboard",
+   "kinds": [
+    "typing",
+    "recording"
+   ],
+   "source": {
+    "id": 615190,
+    "title": "Expensive keyboard typing.aiff",
+    "author": "throwdwn",
+    "license": "CC0 1.0",
+    "url": "https://freesound.org/s/615190/"
+   },
+   "label": "Quiet keyboard typing"
+  },
+  {
+   "id": "rec/typing/keyboard",
+   "category": "typing_run",
+   "file": "rec/typing-keyboard.flac",
+   "dur_s": 4.0,
+   "onset_s": 0.0114,
+   "peak_s": 0.0157,
+   "end_s": 3.9225,
+   "notes": "real typing on a keyboard",
+   "kinds": [
+    "typing",
+    "recording"
+   ],
+   "source": {
+    "id": 502048,
+    "title": "Typing On Keyboard.mp3",
+    "author": "jozef_sound",
+    "license": "CC0 1.0",
+    "url": "https://freesound.org/s/502048/"
+   },
+   "label": "Typing on a keyboard"
+  },
+  {
+   "id": "rec/typing/mechanical",
+   "category": "typing_run",
+   "file": "rec/typing-mechanical.flac",
+   "dur_s": 4.0,
+   "onset_s": 0.0008,
+   "peak_s": 1.228,
+   "end_s": 3.9965,
+   "notes": "real typing on a mechanical keyboard",
+   "kinds": [
+    "typing",
+    "recording"
+   ],
+   "source": {
+    "id": 546167,
+    "title": "Keyboard Typing 10 (WhiteFox, Mechanical)",
+    "author": "grcekh",
+    "license": "CC0 1.0",
+    "url": "https://freesound.org/s/546167/"
+   },
+   "label": "Mechanical keyboard typing"
+  }
+ ]
+}

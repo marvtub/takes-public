@@ -1,0 +1,15 @@
+{
+  "name": "Orbit ring",
+  "description": "A ring of tall serif capitals spins round the speaker's head like a planet's ring. The front half passes in front of the chin in gold, the back half goes behind the head in silver. It whips in with a blur, spins, and spins out round the neck.",
+  "when": "When a word or a name should circle you: a title, a topic, a short loop of words.",
+  "needs": [
+    "the text of the ring (short, it repeats)",
+    "the middle of the ring (about the nose)",
+    "the cut time where it starts",
+    "a cutout of the speaker (made in the steps)"
+  ],
+  "kind": "Cut-out",
+  "length_s": 3,
+  "shape": "any",
+  "shipped": true
+}

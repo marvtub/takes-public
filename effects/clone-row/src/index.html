@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <!-- Clone row: the shot punches in a little, then copies of the speaker shoot out from behind them to both
+         sides, smaller and darker the further out they go, like a row of clones going back into the room. They all
+         talk in sync (they are the same cutout). Then they snap back behind the speaker and the shot is normal again.
+         Inputs next to this file: footage.mp4 (the moment, at the frame size) and person.webm (its cutout).
+         Full frame: render it as mp4 and lay it over the cut. The frame size is data-width / data-height on #root.
+         Edit HEAD, ROW, LOOK and AT below. -->
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+    <style>
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
+      #root { position: relative; width: 100%; height: 100%; overflow: hidden; background: #000; }
+      #root video, .stage { position: absolute; inset: 0; width: 100%; height: 100%; }
+      #root video { object-fit: cover; }
+      .clone { opacity: 0; }
+    </style>
+  </head>
+  <body>
+    <div id="root" data-composition-id="main" data-start="0" data-duration="3.6" data-width="1080" data-height="1920">
+      <div id="stage" class="stage">
+        <video id="footage" class="clip" src="footage.mp4" muted playsinline data-start="0" data-track-index="0"></video>
+        <!-- 8 clones (ROW.count up to 4 a side), furthest first; the script places them -->
+        <video class="clip clone" src="person.webm" muted playsinline data-start="0" data-track-index="2"></video>
+        <video class="clip clone" src="person.webm" muted playsinline data-start="0" data-track-index="3"></video>
+        <video class="clip clone" src="person.webm" muted playsinline data-start="0" data-track-index="4"></video>
+        <video class="clip clone" src="person.webm" muted playsinline data-start="0" data-track-index="5"></video>
+        <video class="clip clone" src="person.webm" muted playsinline data-start="0" data-track-index="6"></video>
+        <video class="clip clone" src="person.webm" muted playsinline data-start="0" data-track-index="7"></video>
+        <video class="clip clone" src="person.webm" muted playsinline data-start="0" data-track-index="8"></video>
+        <video class="clip clone" src="person.webm" muted playsinline data-start="0" data-track-index="9"></video>
+        <video id="person" class="clip" src="person.webm" muted playsinline data-start="0" data-track-index="20"></video>
+      </div>
+    </div>
+    <script>
+      // The middle of the speaker's head, as parts of the frame (0 to 1). The clones line up on it.
+      const HEAD = { x: 0.52, y: 0.27 };
+      // The row: how many clones on each side, how far out each one sits (part of the frame width, from the head),
+      // its size (1 = the speaker) and how bright it is (1 = as filmed). Wide frames spread the row by the width.
+      const ROW = { count: 4, out: [0.25, 0.39, 0.49, 0.56], size: [0.52, 0.41, 0.34, 0.29], light: [0.62, 0.5, 0.42, 0.35], drop: 0.03 };
+      // Look: the punch-in on the shot (1 = none) and how dark the room gets while the clones are out.
+      const LOOK = { punch: 1.12, room: 0.82, blur: 14 };
+      // When (seconds): punch in, first clone out, all out, back in.
+      const AT = { punch: 0.25, out: 0.32, stagger: 0.07, back: 2.75 };
+
+      const root = document.getElementById("root");
+      const FRAME = { w: Number(root.dataset.width), h: Number(root.dataset.height) };
+      const U = Math.min(FRAME.w, FRAME.h) / 1080;
+      const wide = FRAME.w / FRAME.h > 1.2;
+      const stage = document.getElementById("stage"), person = document.getElementById("person"), footage = document.getElementById("footage");
+      const hx = HEAD.x * FRAME.w, hy = HEAD.y * FRAME.h;
+      // Clones: build them furthest first so the near ones sit in front.
+      const clones = [], els = [...document.querySelectorAll(".clone")];
+      let k = 0;
+      for (let i = 3; i >= 0; i--) for (const side of [-1, 1]) {
+        const v = els[k++];
+        if (i >= ROW.count) { v.style.display = "none"; continue; }
+        v.style.transformOrigin = `${hx}px ${hy}px`;
+        v.style.filter = `brightness(${ROW.light[i]}) saturate(0.85)`;
+        // In a tall frame the row reaches the edges and past them; in a wide frame it spreads by the height.
+        const spread = wide ? FRAME.h * 0.9 : FRAME.w;
+        clones.push({ el: v, i, side, x: side * ROW.out[i] * spread, y: ROW.drop * FRAME.h * (i + 1) * 0.6, s: ROW.size[i] });
+      }
+      stage.style.transformOrigin = `${hx}px ${hy}px`;
+
+      window.__timelines = window.__timelines || {};
+      const tl = gsap.timeline({ paused: true });
+      // Punch in on the head, quick and clean.
+      tl.to(stage, { scale: LOOK.punch, duration: 0.18, ease: "power3.out" }, AT.punch);
+      tl.to(footage, { filter: `brightness(${LOOK.room})`, duration: 0.25 }, AT.out);
+      // Out: each clone starts behind the speaker at full size and shoots to its place, the near ones first.
+      clones.forEach((c) => {
+        const t = AT.out + c.i * AT.stagger;
+        tl.set(c.el, { opacity: 1, x: 0, y: 0, scale: 0.92 }, t);
+        tl.to(c.el, { x: c.x, y: c.y, scale: c.s, duration: 0.34, ease: "expo.out" }, t);
+        tl.fromTo(c.el, { filter: `brightness(${ROW.light[c.i]}) saturate(0.85) blur(${LOOK.blur * U}px)` },
+                        { filter: `brightness(${ROW.light[c.i]}) saturate(0.85) blur(0px)`, duration: 0.22, ease: "power2.out" }, t);
+      });
+      // Back: all together, the far ones a hair first, with a smear of blur.
+      clones.forEach((c) => {
+        const t = AT.back + (ROW.count - 1 - c.i) * 0.025;
+        tl.to(c.el, { x: 0, y: 0, scale: 0.92, duration: 0.2, ease: "power3.in" }, t);
+        tl.to(c.el, { filter: `brightness(${ROW.light[c.i]}) saturate(0.85) blur(${LOOK.blur * U}px)`, duration: 0.18, ease: "power2.in" }, t);
+        tl.set(c.el, { opacity: 0 }, t + 0.2);
+      });
+      tl.to(footage, { filter: "brightness(1)", duration: 0.2 }, AT.back + 0.1);
+      tl.to(stage, { scale: 1, duration: 0.2, ease: "power3.inOut" }, AT.back + 0.24);
+      tl.set({}, {}, Number(root.dataset.duration));
+      window.__timelines["main"] = tl;
+      tl.seek(0);
+    </script>
+  </body>
+</html>

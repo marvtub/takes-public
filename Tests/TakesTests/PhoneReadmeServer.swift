@@ -5,15 +5,23 @@ import Testing
 // The public README's phone pictures (2026-10-08): serves the made-up library that
 // scripts/public/demo.py builds to the iPhone simulator, until the stop file appears.
 // scripts/public/media.sh runs it beside ios/TakesPhoneUITests/ReadmeShots.swift.
-//   TAKES_PHONE_DEMO=/tmp/takes-demo TAKES_PHONE_PORT=8799 TAKES_PHONE_STOP=/tmp/stop ./test.sh --filter PhoneReadmeServer
+//   TAKES_PHONE_DEMO=/tmp/takes-demo TAKES_PHONE_READY=/tmp/port TAKES_PHONE_STOP=/tmp/stop ./test.sh --filter PhoneReadmeServer
 @Suite struct PhoneReadmeServer {
     @Test(.enabled(if: ProcessInfo.processInfo.environment["TAKES_PHONE_DEMO"] != nil))
     func serveTheDemoLibrary() async throws {
         let env = ProcessInfo.processInfo.environment
         let server = PhoneServer(root: URL(fileURLWithPath: env["TAKES_PHONE_DEMO"]!), demo: true)
         let listener = PhoneListener(handler: server)
-        try listener.start(port: UInt16(env["TAKES_PHONE_PORT"] ?? "8799")!)
+        try listener.start(port: UInt16(env["TAKES_PHONE_PORT"] ?? "0")!)
         defer { listener.stop() }
+        if let ready = env["TAKES_PHONE_READY"] {
+            let end = Date().addingTimeInterval(10)
+            while listener.port == nil && Date() < end {
+                try await Task.sleep(for: .milliseconds(20))
+            }
+            guard let port = listener.port else { throw CocoaError(.fileWriteUnknown) }
+            try Data("\(port)\n".utf8).write(to: URL(fileURLWithPath: ready), options: .atomic)
+        }
         let stop = env["TAKES_PHONE_STOP"] ?? "/tmp/takes-phone-stop"
         let end = Date().addingTimeInterval(900)
         while !FileManager.default.fileExists(atPath: stop) && Date() < end {

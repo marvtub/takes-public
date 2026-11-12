@@ -33,11 +33,11 @@ struct ChatMessage: Codable, Identifiable, Hashable {
     static let jobNote = "takes-job"
     var isJobNote: Bool { role == .tool && toolID == Self.jobNote }
     /// The toolID of a line for something the user did on a board (ClaudeChat.action): a button,
-    /// a toggle, a refresh and what came of it. Its own line too, never folded (2026-10-19).
+    /// a toggle, a refresh and what came of it. Finished updates fold with the steps (2026-11-09).
     static let actionNote = "takes-action"
     var isActionNote: Bool { role == .tool && toolID == Self.actionNote }
     /// A line of its own in the conversation, not a step of the agent's run.
-    var isOwnLine: Bool { isJobNote || isActionNote }
+    var isOwnLine: Bool { isJobNote || (isActionNote && (!done || failed == true)) }
 
     init(role: Role, text: String, toolID: String? = nil, done: Bool = true) {
         self.role = role; self.text = text; self.toolID = toolID; self.done = done
@@ -117,7 +117,8 @@ final class StreamLines: @unchecked Sendable {
             var start = buffer.startIndex
             var i = buffer.startIndex + scanned
             while let nl = buffer[i...].firstIndex(of: 0x0A) {
-                out.append(Self.shrink(String(decoding: buffer[start..<nl], as: UTF8.self)))
+                let line = Self.shrink(String(decoding: buffer[start..<nl], as: UTF8.self))
+                if !line.isEmpty { out.append(line) }
                 start = nl + 1
                 i = start
             }
@@ -128,7 +129,21 @@ final class StreamLines: @unchecked Sendable {
     }
 
     static func shrink(_ line: String) -> String {
-        guard line.utf8.count > 64_000, line.hasPrefix(#"{"type":"user""#) else { return line }
+        // Discard invisible deltas on the pipe's thread, before they can queue UI work.
+        if line.hasPrefix(#"{"type":"tool_execution_update""#) { return "" }
+        if line.hasPrefix(#"{"type":"message_update""#),
+           let o = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any],
+           let event = o["assistantMessageEvent"] as? [String: Any],
+           let type = event["type"] as? String,
+           ["thinking_start", "thinking_delta", "thinking_end", "toolcall_start", "toolcall_delta", "toolcall_end"].contains(type) { return "" }
+        guard line.utf8.count > 64_000 else { return line }
+        // Tool results and the final transcript may contain images; the UI needs only completion metadata.
+        if line.hasPrefix(#"{"type":"tool_execution_end""#) || line.hasPrefix(#"{"type":"agent_end""#),
+           let o = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any],
+           let data = try? JSONSerialization.data(withJSONObject: o.filter { ["type", "toolCallId", "isError", "parent_tool_use_id"].contains($0.key) }) {
+            return String(decoding: data, as: UTF8.self)
+        }
+        guard line.hasPrefix(#"{"type":"user""#) else { return line }
         func ids(_ key: String) -> [String] {
             let pattern = "\"\(key)\":\"([^\"]+)\""
             guard let re = try? NSRegularExpression(pattern: pattern) else { return [] }
@@ -301,6 +316,13 @@ final class ClaudeChat {
     /// What a plugin board tells its chat, by board name (Plugins/). Read on every send, so it can
     /// name what the board shows right now.
     static var boardContexts: [String: @MainActor () -> String] = [:]
+    /// Board chats that come in a family (2026-11-10, a chat per goal): "goals.g-1" is the plugin goals' chat for
+    /// "g-1" and hears its `chatFamily`. A family chat's name in two: "goals.g-1" is ("goals", "g-1"). Nil for a plain board name.
+    nonisolated static func family(_ board: String) -> (name: String, key: String)? {
+        guard let dot = board.firstIndex(of: "."), dot != board.startIndex else { return nil }
+        let key = board[board.index(after: dot)...]
+        return key.isEmpty ? nil : (String(board[..<dot]), String(key))
+    }
     /// What a plugin board's empty chat says, and the asks it offers (label, ask), by board name.
     /// Without one, the empty chat spoke about the Performance board's numbers (2026-10-07).
     static var boardIntros: [String: (title: String, line: String, asks: [(String, String)])] = [:]
@@ -370,18 +392,45 @@ final class ClaudeChat {
         let m = currentMood
         if m != mood { mood = m }
         if hasMessages == messages.isEmpty { hasMessages = !messages.isEmpty }
+        let cut = !running && messages.last?.role == .error && messages.last?.text == Self.cutOff
+        if cut != wasCutOff { wasCutOff = cut }
     }
 
     nonisolated static func load(_ url: URL) -> ChatLog? {
+        flushSaves()  // a log on its way to disk is the newest one
         guard let data = try? Data(contentsOf: url) else { return nil }
         let dec = JSONDecoder()
         dec.dateDecodingStrategy = .iso8601
         return try? dec.decode(ChatLog.self, from: data)
     }
 
+    /// Logs go to disk on one queue, off the main thread (2026-11-06). The whole conversation is
+    /// written each time: a 5,500-message board chat (1.5 MB) took 12-18 ms of the main thread on
+    /// every send, board action, queued message and pause in typing (the draft is in the log).
+    nonisolated private static let disk = DispatchQueue(label: "takes.chat.disk", qos: .utility)
+    /// The newest log for each file not written yet. A burst of saves writes the last one once.
+    nonisolated(unsafe) private static var due: [URL: (log: ChatLog, create: Bool)] = [:]
+    nonisolated private static let dueLock = NSLock()
+
+    /// Returns when every log saved so far is on disk. Before Takes quits, and before reading or
+    /// removing chat files.
+    nonisolated static func flushSaves() { disk.sync {} }
+
     /// `create`: make the folder if it is missing. Never for a session folder: a renamed session
     /// would come back as an empty copy under its old name (2026-10-01).
     private static func write(_ log: ChatLog, to url: URL, create: Bool) {
+        let queued = dueLock.withLock { () -> Bool in
+            defer { due[url] = (log, create) }
+            return due[url] != nil
+        }
+        guard !queued else { return }
+        disk.async {
+            guard let next = dueLock.withLock({ due.removeValue(forKey: url) }) else { return }
+            writeNow(next.log, to: url, create: next.create)
+        }
+    }
+
+    nonisolated private static func writeNow(_ log: ChatLog, to url: URL, create: Bool) {
         let enc = JSONEncoder()
         enc.outputFormatting = [.prettyPrinted, .withoutEscapingSlashes]
         enc.dateEncodingStrategy = .iso8601
@@ -627,6 +676,9 @@ final class ClaudeChat {
     @ObservationIgnored private var deadSince: Date?
     /// The user pressed Stop: the run ends without going on to the queue.
     @ObservationIgnored private var stopped = false
+    /// A fresh ask (send's `fresh`) waits in the queue: the run that sends the queue starts a new
+    /// conversation. A steer or a go-on after a drop never uses it: they continue the cut-off run (2026-11-05).
+    @ObservationIgnored private var freshNext = false
 
     /// Keeps the Mac from sleeping by itself while Claude works. Closing the lid still sleeps it.
     @ObservationIgnored private var awake: NSObjectProtocol?
@@ -669,8 +721,10 @@ final class ClaudeChat {
     /// `origin`: where on his phone the user sent it from (Phone.origin); nil from the Mac.
     /// `shown`: what the panel shows for a button's ask; Claude gets `text`, the instructions.
     /// `notes`: a job ended (JobBoard): the panel shows these tick lines instead of a message from the user.
+    /// `fresh`: a board's own run (the Site climb) starts a new conversation that gets a recap of the
+    /// panel. One long conversation carried 150k+ tokens into every run (2026-11-05).
     func send(_ text: String, title: String, onStage: URL?, now: Bool = false, origin: String? = nil, shown: String? = nil,
-              notes: [ChatMessage] = []) {
+              notes: [ChatMessage] = [], fresh: Bool = false) {
         var text = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
         let shown = shown ?? text
@@ -685,6 +739,7 @@ final class ClaudeChat {
         // /compact", which Claude reads as text and nothing compacts (2026-10-03).
         if running && (!now || compacting || Self.isCompact(text)) {
             queued.append(text)
+            if fresh { freshNext = true }
             return
         }
         // Jobs that ended while the chat was stopped or could not hear: their notes go first, as
@@ -714,7 +769,7 @@ final class ClaudeChat {
             return
         }
         if notes.isEmpty { append(ChatMessage(role: .user, text: shown)) } else { notes.forEach(append) }
-        run(text, claude: claude, title: title, onStage: onStage, recap: nil)
+        run(text, claude: claude, title: title, onStage: onStage, fresh: fresh)
     }
 
     /// Claude Code deletes old conversations (after 30 days by default), and one made in another
@@ -724,7 +779,20 @@ final class ClaudeChat {
     /// each run: else it takes him to be at this panel and misreads "this" (2026-10-03).
     private var origin: String?
 
-    private func run(_ text: String, claude: String, title: String, onStage: URL?, recap: String?) {
+    /// `note`: a recap for a new conversation, told in front of the ask. `fresh`: start a new conversation.
+    private func run(_ text: String, claude: String, title: String, onStage: URL?, note: String? = nil, fresh: Bool = false) {
+        var note = note
+        if fresh, log.started, !Self.isCompact(text) {
+            // The log stays (pending, draft, actions, agent, messages): only the conversation is new.
+            let old = log.conversation
+            log.conversation = UUID().uuidString.lowercased()
+            log.started = false
+            log.thread = nil
+            log.context = nil
+            context = nil
+            Self.forgetRules(root: Self.libraryRoot, conversation: old)
+            note = "This is a new conversation for this run. The panel showed before it:\n" + Self.recap(messages.dropLast())
+        }
         follow()
         lastAsk = (text, title, onStage)
         unread = false
@@ -785,6 +853,8 @@ final class ClaudeChat {
             context = CopilotAsk.context
         } else if let plugin = Self.boardContexts[boardName] {
             context = plugin()
+        } else if let f = Self.family(boardName), let family = Plugins.builtChatPlugin(f.name)?.chatFamily {
+            context = family(f.key)
         } else if let plugin = Plugins.builtChatPlugin(boardName)?.chatContext {
             // The build's list (2026-10-22): in Public view a hidden board's chat still gets its own context.
             context = plugin()
@@ -815,10 +885,9 @@ final class ClaudeChat {
         context += "\n\n" + ChatRefs.howTo
         context += "\n\n" + Self.endlessCommands
         if !PublicView.on, let note = Releaser.agentNote { context += "\n\n" + note }
+        for note in Plugins.agentNotes { context += "\n\n" + note }
         if let origin { notes.append(origin) }
-        if let recap {
-            notes.append("The earlier conversation in this panel could not be resumed. What it showed:\n" + recap)
-        }
+        if let note { notes.append(note) }
         // A note stays in the conversation: when the user closed what it named, say so once.
         if agent == .claude, session != nil, !Self.isCompact(text) {
             let looks = onStage != nil || UserDefaults.standard.string(forKey: "rightTab") == "post"
@@ -838,46 +907,117 @@ final class ClaudeChat {
         }
 
         if !log.started { log.agent = agent.rawValue }
-        let mcp = agent == .claude ? ChatMCP.config(folder: Self.folder) : nil
         let canWarm = agent == .claude && Warm.on && !Self.isCompact(text) && (Self.claudeOverride.map { $0.hasSuffix("/claude-warm") } ?? true)
+        let board = session == nil ? boardName : nil
         var turn = ChatTurn(
             context: context, model: agent.model.id, conversation: log.conversation, thread: log.thread,
-            started: log.started, access: Self.access, board: session == nil ? boardName : nil,
-            mcpConfig: mcp, warm: canWarm)
-        var env = Self.environment(board: session == nil ? boardName : nil)
-        // The takes server knows the chat by it (rules seen, jobs). Claude Code sets its own
-        // CLAUDE_CODE_SESSION_ID, the same id; pi hands its environment to its MCP servers.
-        env["TAKES_CHAT_ID"] = log.conversation
+            started: log.started, access: Self.access, board: board, warm: canWarm)
         // Public view (2026-10-22): the takes server hides the admin tools and text. Admin boards keep
         // them, so their jobs run on. A flip changes the warm key, so it applies at the next message.
-        turn.publicView = Self.publicView(board: session == nil ? boardName : nil)
-        env[PublicView.envKey] = turn.publicView ? "1" : nil
-        let args = agent.adapter.chatArguments(turn)
-        turn.started = true  // the key leaves out how the process found the conversation
-        let key = canWarm ? Warm.key(exe: claude, args: agent.adapter.chatArguments(turn), env: env, mcp: mcp, folder: Self.folder) : ""
+        turn.publicView = Self.publicView(board: board)
+        let start = ChatStart(exe: claude, adapter: agent.adapter, mcp: agent == .claude, turn: turn, folder: Self.folder,
+                              canWarm: canWarm, ask: ask)
+        starting = gen
+        early = Early()
+        launch(start, gen: gen, reuse: canWarm ? warm : nil)
+    }
 
-        // The open process takes the message. If it is gone, a new one starts.
-        if canWarm, let w = warm, w.key == key, w.process.isRunning {
-            WarmPool.leave(self)
-            warm?.timer?.cancel()
-            warm?.timer = nil
-            listen(w.process, output: w.output, errors: w.errors, lines: w.lines, gen: gen)
-            if Warm.write(Warm.line(ask), to: w.input) {
-                clock?.process = "open"
-                process = w.process
-                pipes = [w.output, w.errors]
-                watch(gen)
+    // MARK: Starting the process
+
+    /// The run `gen` is being set up off the main thread: its MCP file, environment and process.
+    /// Until it is, the run has no process, and nothing may settle it as dead (heal).
+    @ObservationIgnored private var starting: Int?
+    /// What the process said, or its end, before its start reached the main thread: handled once
+    /// the run has its process, in order.
+    @ObservationIgnored private var early = Early()
+    /// The process a start made, for a quit that comes before the start reaches the main thread.
+    @ObservationIgnored private let spawned = Spawned()
+    /// Main-thread time spent attaching started processes, for ChatStartBench.
+    @ObservationIgnored private(set) var startMainMs = 0.0
+
+    struct Early {
+        var lines: [String] = []
+        var end: (rest: [String], status: Int32, killed: Bool)?
+    }
+
+    final class Spawned: @unchecked Sendable {
+        private let lock = NSLock()
+        private var process: Process?
+        func set(_ p: Process?) { lock.withLock { process = p } }
+        func take() -> Process? { lock.withLock { defer { process = nil }; return process } }
+    }
+
+    /// One run's start, as the main thread hands it off.
+    struct ChatStart: @unchecked Sendable {
+        let exe: String
+        let adapter: any ChatAdapter
+        /// Claude Code: it loads only the user's MCP servers (ChatMCP).
+        let mcp: Bool
+        var turn: ChatTurn
+        let folder: URL
+        let canWarm: Bool
+        let ask: String
+    }
+
+    /// What the start worked out off the main thread.
+    struct Ready: @unchecked Sendable {
+        let args: [String]
+        let env: [String: String]
+        let key: String
+    }
+
+    enum Started: @unchecked Sendable {
+        /// The open process has the same key: it takes the message.
+        case reuse
+        case new(Process, input: FileHandle, output: Pipe, errors: Pipe, lines: StreamLines)
+        case failed(Error)
+    }
+
+    /// Runs the start's file and process work in order, off the main thread (2026-11-07). On the
+    /// main thread it read ~/.claude.json and wrote the MCP file, ran a login shell for PATH (first
+    /// message), read the warm key's files and started the process: 4-13 ms each message, 50-100 ms
+    /// the first time, and a 1.7 s hang when a file open stalled (a phone message, 2026-10-24).
+    nonisolated private static let starter = DispatchQueue(label: "takes.chat.start", qos: .userInitiated)
+
+    private func launch(_ s: ChatStart, gen: Int, reuse: WarmClaude?) {
+        let reuseKey = reuse.flatMap { $0.process.isRunning ? $0.key : nil }
+        let spawned = self.spawned
+        Self.starter.async { [weak self] in
+            Self.startProbe?(Thread.isMainThread)
+            let ready = Self.prepare(s)
+            if let reuseKey, ready.key == reuseKey {
+                DispatchQueue.main.async { self?.started(gen, s, ready, .reuse) }
                 return
             }
-            dropWarm()
+            let result = Self.spawn(s, ready, gen: gen, chat: self)
+            if case .new(let p, _, _, _, _) = result { spawned.set(p) }
+            DispatchQueue.main.async { self?.started(gen, s, ready, result) }
         }
-        dropWarm()
+    }
 
+    /// Tests: called on the thread that sets a run up.
+    nonisolated(unsafe) static var startProbe: (@Sendable (Bool) -> Void)?
+
+    nonisolated private static func prepare(_ s: ChatStart) -> Ready {
+        var turn = s.turn
+        turn.mcpConfig = s.mcp ? ChatMCP.config(folder: s.folder) : nil
+        var env = environment(board: turn.board)
+        // The takes server knows the chat by it (rules seen, jobs). Claude Code sets its own
+        // CLAUDE_CODE_SESSION_ID, the same id; pi hands its environment to its MCP servers.
+        env["TAKES_CHAT_ID"] = turn.conversation
+        env[PublicView.envKey] = turn.publicView ? "1" : nil
+        let args = s.adapter.chatArguments(turn)
+        turn.started = true  // the key leaves out how the process found the conversation
+        let key = s.canWarm ? Warm.key(exe: s.exe, args: s.adapter.chatArguments(turn), env: env, mcp: turn.mcpConfig, folder: s.folder) : ""
+        return Ready(args: args, env: env, key: key)
+    }
+
+    nonisolated private static func spawn(_ s: ChatStart, _ r: Ready, gen: Int, chat: ClaudeChat?) -> Started {
         let p = Process()
-        p.executableURL = URL(fileURLWithPath: claude)
-        p.arguments = args
-        p.currentDirectoryURL = Self.folder
-        p.environment = env
+        p.executableURL = URL(fileURLWithPath: s.exe)
+        p.arguments = r.args
+        p.currentDirectoryURL = s.folder
+        p.environment = r.env
         let input = Pipe(), output = Pipe(), errors = Pipe()
         p.standardInput = input
         p.standardOutput = output
@@ -885,42 +1025,113 @@ final class ClaudeChat {
         // Lines are cut and big tool results shrunk here, on the pipe's thread; the main thread
         // only parses what the chat shows (2026-10-03).
         let lines = StreamLines()
-        listen(p, output: output, errors: errors, lines: lines, gen: gen)
-        do { try p.run() } catch {
+        handlers(p, output: output, errors: errors, lines: lines, gen: gen, chat: chat)
+        do { try p.run() } catch { return .failed(error) }
+        if s.canWarm {
+            // A failed write: the process is gone, and its end settles the run.
+            _ = Warm.write(Warm.line(s.ask), to: input.fileHandleForWriting)
+        } else {
+            // Without SIGPIPE: a process that ended at once must not end Takes (its end settles the run).
+            _ = Warm.write(Data(s.ask.utf8), to: input.fileHandleForWriting)
+            try? input.fileHandleForWriting.close()
+        }
+        return .new(p, input: input.fileHandleForWriting, output: output, errors: errors, lines: lines)
+    }
+
+    /// The start is ready: the run gets its process, on the main thread.
+    private func started(_ gen: Int, _ s: ChatStart, _ r: Ready, _ result: Started) {
+        let t0 = CACurrentMediaTime()
+        defer { startMainMs += (CACurrentMediaTime() - t0) * 1000 }
+        if case .new = result { _ = spawned.take() }
+        guard generation == gen, starting == gen, running else {
+            // A reset or a quit came first: the new process is not this chat's any more.
+            if case .new(let p, let input, let output, let errors, _) = result {
+                p.terminationHandler = nil
+                output.fileHandleForReading.readabilityHandler = nil
+                errors.fileHandleForReading.readabilityHandler = nil
+                try? input.close()
+                end(p)
+            }
+            return
+        }
+        starting = nil
+        switch result {
+        case .reuse:
+            // The open process takes the message. If it went away meanwhile, a new one starts.
+            if let w = warm, w.key == r.key, w.process.isRunning {
+                WarmPool.leave(self)
+                warm?.timer?.cancel()
+                warm?.timer = nil
+                listen(w.process, output: w.output, errors: w.errors, lines: w.lines, gen: gen)
+                if Warm.write(Warm.line(s.ask), to: w.input) {
+                    clock?.process = "open"
+                    process = w.process
+                    pipes = [w.output, w.errors]
+                    watch(gen)
+                    afterStart()
+                    return
+                }
+            }
+            dropWarm()
+            starting = gen
+            launch(s, gen: gen, reuse: nil)
+        case .failed(let error):
+            dropWarm()
             running = false
             letSleep()
             append(ChatMessage(role: .error, text: "Couldn't start the chat: \(error.localizedDescription)"))
+        case .new(let p, let input, let output, let errors, let lines):
+            dropWarm()
+            self.lines = lines
+            process = p
+            pipes = [output, errors]
+            if s.canWarm {
+                clock?.process = "new"
+                warm = WarmClaude(process: p, input: input, output: output, errors: errors, lines: lines, key: r.key)
+            }
+            watch(gen)
+            afterStart()
+        }
+    }
+
+    /// What came while the process started, then a stop or a steer sent meanwhile: as if each came
+    /// just after the start.
+    private func afterStart() {
+        let e = early
+        early = Early()
+        if !e.lines.isEmpty { take(e.lines) }
+        if let end = e.end {
+            if let p = process, warm?.process === p { forgetWarm() }
+            if !end.rest.isEmpty { take(end.rest) }
+            finish(status: end.status, killed: end.killed)
             return
         }
-        process = p
-        pipes = [output, errors]
-        if canWarm {
-            clock?.process = "new"
-            warm = WarmClaude(process: p, input: input.fileHandleForWriting, output: output, errors: errors, lines: lines, key: key)
-            // A failed write: the process is gone, and its end settles the run.
-            _ = Warm.write(Warm.line(ask), to: input.fileHandleForWriting)
-        } else {
-            input.fileHandleForWriting.write(Data(ask.utf8))
-            try? input.fileHandleForWriting.close()
-        }
-        watch(gen)
+        if running, stopped || steer != nil { end(process) }
     }
 
     /// Takes the process's output and its end for the run `gen`.
     private func listen(_ p: Process, output: Pipe, errors: Pipe, lines: StreamLines, gen: Int) {
         self.lines = lines
-        output.fileHandleForReading.readabilityHandler = { [weak self] h in
+        Self.handlers(p, output: output, errors: errors, lines: lines, gen: gen, chat: self)
+    }
+
+    nonisolated private static func handlers(_ p: Process, output: Pipe, errors: Pipe, lines: StreamLines, gen: Int, chat: ClaudeChat?) {
+        output.fileHandleForReading.readabilityHandler = { [weak chat] h in
             let d = h.availableData
             guard !d.isEmpty else { return }
             let got = lines.feed(d)
-            DispatchQueue.main.async { if self?.generation == gen { self?.take(got) } }
+            guard !got.isEmpty else { return }
+            DispatchQueue.main.async {
+                guard let chat, chat.generation == gen else { return }
+                if chat.starting == gen { chat.early.lines += got } else { chat.take(got) }
+            }
         }
-        errors.fileHandleForReading.readabilityHandler = { [weak self] h in
+        errors.fileHandleForReading.readabilityHandler = { [weak chat] h in
             let d = h.availableData
             guard !d.isEmpty else { return }
-            DispatchQueue.main.async { if self?.generation == gen { self?.stderr.append(d) } }
+            DispatchQueue.main.async { if chat?.generation == gen { chat?.stderr.append(d) } }
         }
-        p.terminationHandler = { [weak self] proc in
+        p.terminationHandler = { [weak chat] proc in
             output.fileHandleForReading.readabilityHandler = nil
             errors.fileHandleForReading.readabilityHandler = nil
             // What is left, without waiting for the end of the pipe: a tool's child that outlives
@@ -928,11 +1139,15 @@ final class ClaudeChat {
             let rest = lines.feed(Self.drain(output.fileHandleForReading))
             let status = proc.terminationStatus, reason = proc.terminationReason
             DispatchQueue.main.async {
-                guard let self else { return }
-                if self.warm?.process === proc { self.forgetWarm() }
-                guard self.generation == gen else { return }
-                if !rest.isEmpty { self.take(rest) }
-                self.finish(status: status, killed: reason == .uncaughtSignal)
+                guard let chat else { return }
+                if chat.warm?.process === proc { chat.forgetWarm() }
+                guard chat.generation == gen else { return }
+                if chat.starting == gen {
+                    chat.early.end = (rest, status, reason == .uncaughtSignal)
+                    return
+                }
+                if !rest.isEmpty { chat.take(rest) }
+                chat.finish(status: status, killed: reason == .uncaughtSignal)
             }
         }
     }
@@ -950,7 +1165,7 @@ final class ClaudeChat {
     }
 
     func stop() {
-        steer = nil; queued = []; cancelResume(); stopped = true
+        steer = nil; queued = []; cancelResume(); stopped = true; freshNext = false
         end(process)
         heal(force: true)
     }
@@ -1004,6 +1219,8 @@ final class ClaudeChat {
     func heal(force: Bool = false) -> Bool {
         guard running else { deadSince = nil; return false }
         if let p = process, p.isRunning { deadSince = nil; return false }
+        // Its process is being started: not dead.
+        if starting != nil { deadSince = nil; return false }
         if !force {
             guard let since = deadSince else { deadSince = Date(); return false }
             guard -since.timeIntervalSinceNow >= 2 else { return false }
@@ -1034,6 +1251,8 @@ final class ClaudeChat {
         watchdog?.cancel()
         watchdog = nil
         generation += 1
+        starting = nil
+        early = Early()
         return p
     }
 
@@ -1060,7 +1279,7 @@ final class ClaudeChat {
             self.reconnecting = false
             self.resumeTask = nil
             self.append(ChatMessage(role: .user, text: Self.goOnDropped))
-            self.run(Self.goOnDropped, claude: claude, title: title, onStage: onStage, recap: nil)
+            self.run(Self.goOnDropped, claude: claude, title: title, onStage: onStage)
         }
     }
 
@@ -1068,12 +1287,23 @@ final class ClaudeChat {
     /// it did so far, and the next message resumes the conversation from there.
     func quit() {
         saveDraft()
+        // A run still starting: its process, if the start made one by now. A start stuck on a file
+        // does not hold the quit for long; a process it makes later ends with Takes' end of its input.
+        let pending = starting != nil
+        if pending {
+            let done = DispatchSemaphore(value: 0)
+            Self.starter.async { done.signal() }
+            _ = done.wait(timeout: .now() + 2)
+            dropWarm()
+        }
         if !running { dropWarm() }
-        guard running, let process = detach() else { return }
+        guard running else { return }
+        let process = detach() ?? (pending ? spawned.take() : nil)
+        guard process != nil || pending else { return }
         // A steer that did not go out yet waits in the queue, which is saved: it goes next launch.
         if let steer { queued.append(steer.replacingOccurrences(of: "I interrupted you.\n", with: "")) }
         steer = nil
-        process.terminate()
+        process?.terminate()
         if var parser {
             parser.closeOpen()
             if parser.started { log.started = true }
@@ -1094,7 +1324,9 @@ final class ClaudeChat {
     static let cutOff = "Takes quit while the chat was working."
     static let goOn = "Takes quit while you were working. Go on where you stopped."
     /// The last reply was cut off by a quit.
-    var wasCutOff: Bool { !running && messages.last?.role == .error && messages.last?.text == Self.cutOff }
+    /// Stored, like `mood`: the message box shows it, and a computed one made the box redraw for
+    /// each new message, also every board action line (2026-11-06).
+    private(set) var wasCutOff = false
 
     /// A new conversation. The old one goes to the history (and stays in Claude Code's).
     func reset() {
@@ -1102,7 +1334,9 @@ final class ClaudeChat {
         // resets and sends at once; the old run's end then put the old messages back and dropped
         // the new ask from the queue).
         steer = nil; queued = []; cancelResume()
-        if let p = detach() {
+        let pending = starting != nil
+        let p = detach()
+        if p != nil || pending {
             end(p)
             if var parser {
                 parser.closeOpen()
@@ -1124,6 +1358,7 @@ final class ClaudeChat {
 
     /// Past conversations, newest first.
     func past() -> [PastChat] {
+        Self.flushSaves()  // shelve() may still be writing the newest one
         let files = (try? FileManager.default.contentsOfDirectory(at: archive, includingPropertiesForKeys: nil)) ?? []
         return files.filter { $0.pathExtension == "json" }.compactMap { url -> PastChat? in
             guard let log = Self.load(url), !log.messages.isEmpty else { return nil }
@@ -1138,6 +1373,7 @@ final class ClaudeChat {
     func resume(_ past: PastChat) {
         guard !running, let saved = Self.load(past.file) else { return }
         shelve()
+        Self.flushSaves()
         try? FileManager.default.removeItem(at: past.file)
         log = saved
         messages = saved.messages
@@ -1147,7 +1383,10 @@ final class ClaudeChat {
         save()
     }
 
-    func forget(_ past: PastChat) { try? FileManager.default.removeItem(at: past.file) }
+    func forget(_ past: PastChat) {
+        Self.flushSaves()
+        try? FileManager.default.removeItem(at: past.file)
+    }
 
     /// Keeps the open conversation in the history, if it has anything in it.
     private func shelve() {
@@ -1282,10 +1521,10 @@ final class ClaudeChat {
             // Drop the failed reply; keep the question (or the note of a job that ended).
             if let q = messages.lastIndex(where: { $0.role == .user || $0.isJobNote }) { messages = Array(messages[...q]) }
             log = ChatLog(conversation: UUID().uuidString.lowercased(), messages: messages)
-            let recap = Self.recap(messages.dropLast())
+            let note = "The earlier conversation in this panel could not be resumed. What it showed:\n" + Self.recap(messages.dropLast())
             self.parser = nil
             process = nil
-            run(ask.text, claude: claude, title: ask.title, onStage: ask.onStage, recap: recap)
+            run(ask.text, claude: claude, title: ask.title, onStage: ask.onStage, note: note)
             return
         }
         parser.closeOpen()
@@ -1335,7 +1574,7 @@ final class ClaudeChat {
             resumeWhenOnline(title: ask.title, onStage: ask.onStage)
         } else if let steer, let ask = lastAsk, let claude = self.exePath {
             self.steer = nil
-            run(steer, claude: claude, title: ask.title, onStage: ask.onStage, recap: nil)
+            run(steer, claude: claude, title: ask.title, onStage: ask.onStage)
         } else if !stopped, !queued.isEmpty, let ask = lastAsk, let claude = self.exePath {
             // Also after a kill from outside: what the user sent while it ran goes on in the same
             // conversation, with no tap from him (2026-10-03).
@@ -1362,7 +1601,10 @@ final class ClaudeChat {
         if messages.last(where: { $0.role == .user })?.text != next { append(ChatMessage(role: .user, text: next)) }
         // Claude hears that its last run did not finish; the panel shows only the user's words.
         let ask = cutOff && !Self.isCompact(next) ? Self.cutOffNote + next : next
-        run(ask, claude: claude, title: title, onStage: onStage, recap: nil)
+        // A /compact that goes first leaves the fresh ask for the run after it.
+        let fresh = freshNext && !Self.isCompact(next)
+        if fresh { freshNext = false }
+        run(ask, claude: claude, title: title, onStage: onStage, fresh: fresh)
     }
 
     static let cutOffNote = "(Your last run was cut off before it finished. Check what you already did before you repeat a step.)\n\n"
@@ -1809,7 +2051,6 @@ private struct ChatPanel: View {
     /// Hides the tools 2.5 s after the pointer leaves them, unless it comes back first.
     @State private var hideTools: Task<Void, Never>?
     @State private var showHistory = false
-    @State private var showMeter = false
     @AppStorage("claudeAccess") private var access = "bypassPermissions"
     @State private var dropping = false
 
@@ -1819,10 +2060,6 @@ private struct ChatPanel: View {
             header
             Rule()
             messages
-            // A plugin's card under its board chat (TakesPlugin.chatFoot): asked only on a board chat.
-            if chat.session == nil, let foot = Plugins.all.lazy.compactMap({ $0.chatFoot?(chat) }).first {
-                foot.padding(.horizontal, 14).padding(.vertical, 12).transition(.opacity)
-            }
             // Its own view: a typed letter or a dictated word redraws the box, not the panel and
             // its transcript (ChatPanel built 60 times in 10 s while the user dictated; 2026-10-03).
             ChatComposer(chat: chat, target: target, openComments: openComments)
@@ -1844,7 +2081,7 @@ private struct ChatPanel: View {
 
     private var header: some View {
         HStack(spacing: 10) {
-            LiveMascot(mood: chat.mood, size: 34)
+            PanelMascot(chat: chat)
             VStack(alignment: .leading, spacing: 1) {
                 Text("Takes").font(Theme.display(20))
                 if chat.boardName.hasPrefix("comments") {
@@ -1858,7 +2095,7 @@ private struct ChatPanel: View {
             Spacer()
             // Always there once the chat has a conversation (2026-10-03: hidden under 20%, the
             // Comments chat had no way to see or compact its context).
-            if chat.hasMessages { meter(chat.context).transition(.opacity) }
+            if chat.hasMessages { ContextMeter(chat: chat, send: send).transition(.opacity) }
             // One "…" (2026-10-02): the tools slide out to its left on hover or a click, and stay
             // 2.5 s after the pointer leaves (2026-10-03), so reaching for one does not lose them.
             HStack(spacing: 10) {
@@ -1927,7 +2164,6 @@ private struct ChatPanel: View {
         }
         .padding(.horizontal, 16).padding(.vertical, 12)
         .animation(Theme.motion, value: chat.running)
-        .animation(Theme.motion, value: chat.context)
     }
 
     private func hoverTools(_ inside: Bool) {
@@ -1944,61 +2180,6 @@ private struct ChatPanel: View {
                 if !showHistory && !MenuPanel.shared.isOpen { break }
             }
             withAnimation(Theme.spring) { tools = false }
-        }
-    }
-
-    /// How full Claude's context is. A click opens the details with a Compact button: a click that
-    /// compacted at once looked like Takes started work by itself (Jeremy, 2026-10-06).
-    private func meter(_ c: ChatContext?) -> some View {
-        let f = c?.fraction ?? 0
-        let tint = f >= 0.7 ? Theme.accentInk : Theme.muted
-        let size = c.map { "\(ChatContext.short($0.used)) of \(ChatContext.short($0.window)) tokens" }
-        return Button { showMeter.toggle() } label: {
-            HStack(spacing: 5) {
-                ZStack {
-                    Circle().stroke(Theme.border, lineWidth: 2)
-                    Circle().trim(from: 0, to: min(f, 1))
-                        .stroke(tint, style: StrokeStyle(lineWidth: 2, lineCap: .round))
-                        .rotationEffect(.degrees(-90))
-                }
-                .frame(width: 11, height: 11)
-                if chat.compacting {
-                    Text("Compacting").font(Theme.sans(11, .medium))
-                } else {
-                    Text(c == nil ? "–" : "\(Int((f * 100).rounded()))%").font(Theme.sans(11, .medium)).monospacedDigit()
-                }
-            }
-            .foregroundStyle(tint)
-            .padding(.horizontal, 6).frame(height: 26)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(IconButtonStyle())
-        .help(chat.compacting ? "Compacting the conversation" : "How much of this conversation Takes keeps in mind")
-        .disabled(chat.compacting)
-        .takesPopover(isPresented: $showMeter) {
-            VStack(alignment: .leading, spacing: 10) {
-                Text("Conversation memory").font(Theme.sans(13, .semibold))
-                GeometryReader { g in
-                    ZStack(alignment: .leading) {
-                        Capsule().fill(Theme.border)
-                        Capsule().fill(tint).frame(width: g.size.width * min(f, 1))
-                    }
-                }
-                .frame(height: 5)
-                Text(size.map { "\(Int((f * 100).rounded()))% full: \($0)." } ?? "The size shows after the next reply.")
-                    .font(Theme.sans(12, .medium)).monospacedDigit()
-                Text("This is the conversation itself, not work that runs. When it is full, Takes compacts it: it keeps a short summary and drops the details. Compact earlier to start a new topic with a clean slate.")
-                    .font(Theme.sans(12)).foregroundStyle(Theme.muted)
-                    .fixedSize(horizontal: false, vertical: true)
-                Button(chat.running ? "Compact when Takes is done" : "Compact now") {
-                    showMeter = false
-                    send("/compact")
-                }
-                .buttonStyle(AccentButtonStyle(kind: .quiet))
-                .disabled(!chat.hasMessages)
-            }
-            .padding(14)
-            .frame(width: 260)
         }
     }
 
@@ -2117,6 +2298,77 @@ private struct ChatPanel: View {
     private func countComments() {
         openComments = target.session.map { CommentStore.read($0).comments.filter(\.open).count } ?? 0
     }
+}
+
+/// How full Claude's context is. A click opens the details with a Compact button: a click that
+/// compacted at once looked like Takes started work by itself (Jeremy, 2026-10-06).
+/// Its own view, with the mascot beside it: the context and the mood change on each step of a
+/// run, and only these two redraw, not the panel's header and its menus (2026-11-06).
+private struct ContextMeter: View {
+    var chat: ClaudeChat
+    let send: (String) -> Void
+    @State private var showMeter = false
+
+    var body: some View {
+        let c = chat.context
+        let f = c?.fraction ?? 0
+        let tint = f >= 0.7 ? Theme.accentInk : Theme.muted
+        let size = c.map { "\(ChatContext.short($0.used)) of \(ChatContext.short($0.window)) tokens" }
+        return Button { showMeter.toggle() } label: {
+            HStack(spacing: 5) {
+                ZStack {
+                    Circle().stroke(Theme.border, lineWidth: 2)
+                    Circle().trim(from: 0, to: min(f, 1))
+                        .stroke(tint, style: StrokeStyle(lineWidth: 2, lineCap: .round))
+                        .rotationEffect(.degrees(-90))
+                }
+                .frame(width: 11, height: 11)
+                if chat.compacting {
+                    Text("Compacting").font(Theme.sans(11, .medium))
+                } else {
+                    Text(c == nil ? "–" : "\(Int((f * 100).rounded()))%").font(Theme.sans(11, .medium)).monospacedDigit()
+                }
+            }
+            .foregroundStyle(tint)
+            .padding(.horizontal, 6).frame(height: 26)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(IconButtonStyle())
+        .help(chat.compacting ? "Compacting the conversation" : "How much of this conversation Takes keeps in mind")
+        .disabled(chat.compacting)
+        .animation(Theme.motion, value: c)
+        .takesPopover(isPresented: $showMeter) {
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Conversation memory").font(Theme.sans(13, .semibold))
+                GeometryReader { g in
+                    ZStack(alignment: .leading) {
+                        Capsule().fill(Theme.border)
+                        Capsule().fill(tint).frame(width: g.size.width * min(f, 1))
+                    }
+                }
+                .frame(height: 5)
+                Text(size.map { "\(Int((f * 100).rounded()))% full: \($0)." } ?? "The size shows after the next reply.")
+                    .font(Theme.sans(12, .medium)).monospacedDigit()
+                Text("This is the conversation itself, not work that runs. When it is full, Takes compacts it: it keeps a short summary and drops the details. Compact earlier to start a new topic with a clean slate.")
+                    .font(Theme.sans(12)).foregroundStyle(Theme.muted)
+                    .fixedSize(horizontal: false, vertical: true)
+                Button(chat.running ? "Compact when Takes is done" : "Compact now") {
+                    showMeter = false
+                    send("/compact")
+                }
+                .buttonStyle(AccentButtonStyle(kind: .quiet))
+                .disabled(!chat.hasMessages)
+            }
+            .padding(14)
+            .frame(width: 260)
+        }
+    }
+}
+
+/// The mascot in the panel's header: it follows the chat's mood.
+private struct PanelMascot: View {
+    var chat: ClaudeChat
+    var body: some View { LiveMascot(mood: chat.mood, size: 34) }
 }
 
 /// The message box under a chat, with its draft and voice note.
@@ -2291,6 +2543,7 @@ struct ChatField: View {
     var sends = true
     /// The @ list (ChatMentions). Nil: the box has none (Muse).
     var mentions: MentionPicker?
+    @Environment(\.displayScale) private var scale
 
     /// While a run goes, the button stops it; with text in the box it sends instead.
     private var stopping: Bool { running && !canSend }
@@ -2391,7 +2644,9 @@ struct ChatField: View {
         }
         .padding(.leading, 14).padding(.trailing, 6).padding(.vertical, 4)
         .background(Theme.canvas, in: RoundedRectangle(cornerRadius: 14))
-        .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(focused.wrappedValue ? Theme.muted.opacity(0.5) : Theme.border, lineWidth: 0.5))
+        // One device pixel (2026-10-30): 0.5 pt is half a pixel on a 1x screen, and the box's top edge did not draw there.
+        .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(focused.wrappedValue ? Theme.muted.opacity(0.5) : Theme.border,
+                                                                 lineWidth: 1 / scale))
         .animation(Theme.spring, value: dictation.active)
         // The list stands on the box: a zero-high frame on its top edge, the list growing up from it.
         .overlay(alignment: .top) {
@@ -2525,10 +2780,14 @@ struct ChatTranscript: View {
     let running: Bool
     var mood: LiveMascot.Mood = .thinking
     @State private var limit = ChatRows.first
+    /// The first item shown once the page is in. A new line adds below it and nothing drops off the
+    /// top, until three pages show; then the page starts again from the newest. Dropping one item
+    /// at the top for each new line laid the whole page out again (2026-11-06).
+    @State private var top: UUID?
 
     var body: some View {
         let all = ChatItem.group(messages)
-        let items = all.suffix(limit)
+        let items = all[Self.start(all, limit: limit, top: top)...]
         VStack(alignment: .leading, spacing: 10) {
             if all.count > items.count {
                 Button { limit += ChatRows.page * 3 } label: {
@@ -2565,7 +2824,25 @@ struct ChatTranscript: View {
             guard limit < ChatRows.page else { return }
             try? await Task.sleep(for: .milliseconds(60))
             limit = max(limit, ChatRows.page)
+            top = Self.anchor(messages, limit: limit)
         }
+        .onChange(of: messages.count) { _, _ in
+            let all = ChatItem.group(messages)
+            if Self.start(all, limit: limit, top: top) == max(0, all.count - limit) { top = Self.anchor(messages, limit: limit) }
+        }
+    }
+
+    /// Where the shown items start: the newest `limit`, or from `top` while that is at most three pages up.
+    static func start(_ all: [ChatItem], limit: Int, top: UUID?) -> Int {
+        let start = max(0, all.count - limit)
+        guard let top else { return start }
+        let lowest = max(0, all.count - ChatRows.page * 3)
+        guard lowest < start, let i = all[lowest..<start].firstIndex(where: { $0.id == top }) else { return start }
+        return i
+    }
+
+    static func anchor(_ messages: [ChatMessage], limit: Int) -> UUID? {
+        ChatItem.group(messages).suffix(limit).first?.id
     }
 }
 

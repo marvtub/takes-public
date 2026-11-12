@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <!-- Blade slice: a thin white flash slashes across the frame on a slant, and the shot splits along it. The
+         top half slides one way along the cut, the bottom half the other, with a dark gap between them, as if the
+         picture were cut with a blade. A moment later the halves slide back together and the seam is gone.
+         Input next to this file: footage.mp4 (the moment, at the frame size).
+         Full frame: render it as mp4 and lay it over the cut. The frame size is data-width / data-height on #root.
+         Edit CUT, LOOK and AT below. -->
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+    <style>
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
+      #root { position: relative; width: 100%; height: 100%; overflow: hidden; background: #050605; }
+      .half { position: absolute; inset: 0; }
+      .half video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+      #flash { position: absolute; left: 0; top: 0; height: var(--fh); background: linear-gradient(90deg, rgba(255,255,255,0), #fff 18%, #fff 82%, rgba(255,255,255,0));
+               box-shadow: 0 0 calc(var(--fh) * 4) rgba(255,255,255,.8); transform-origin: 0 50%; opacity: 0; }
+    </style>
+  </head>
+  <body>
+    <div id="root" data-composition-id="main" data-start="0" data-duration="2.8" data-width="1080" data-height="1920">
+      <div class="half" id="top"><video id="vtop" class="clip" src="footage.mp4" muted playsinline data-start="0" data-track-index="0"></video></div>
+      <div class="half" id="bot"><video id="vbot" class="clip" src="footage.mp4" muted playsinline data-start="0" data-track-index="1"></video></div>
+      <div id="flash"></div>
+    </div>
+    <script>
+      // The cut: where it crosses the middle of the frame (part of the height; about the mouth reads best) and
+      // its slant (degrees; negative = rises to the right). slide = how far each half moves along the cut, and
+      // gap = how far they move apart across it (px at a 1080 px short side).
+      const CUT = { y: 0.4, angle: -16, slide: 38, gap: 9 };
+      const LOOK = { flash: 5 };
+      // When (seconds): the slash, the halves part (how long), they close.
+      const AT = { slash: 0.4, part: 0.5, partFor: 0.55, close: 1.75, closeFor: 0.3 };
+
+      const root = document.getElementById("root");
+      const FRAME = { w: Number(root.dataset.width), h: Number(root.dataset.height) };
+      const U = Math.min(FRAME.w, FRAME.h) / 1080;
+      root.style.setProperty("--fh", LOOK.flash * U + "px");
+      const a = CUT.angle * Math.PI / 180, cx = FRAME.w / 2, cy = CUT.y * FRAME.h;
+      // The cut line from the left edge to the right edge.
+      const yAt = (x) => cy + (x - cx) * Math.tan(a);
+      const yl = yAt(0), yr = yAt(FRAME.w);
+      document.getElementById("top").style.transformOrigin = `${cx}px ${cy}px`;
+      document.getElementById("bot").style.transformOrigin = `${cx}px ${cy}px`;
+      document.getElementById("top").style.clipPath = `polygon(0 0, ${FRAME.w}px 0, ${FRAME.w}px ${yr}px, 0 ${yl}px)`;
+      document.getElementById("bot").style.clipPath = `polygon(0 ${yl}px, ${FRAME.w}px ${yr}px, ${FRAME.w}px ${FRAME.h}px, 0 ${FRAME.h}px)`;
+      const len = Math.hypot(FRAME.w, yr - yl);
+      const flash = document.getElementById("flash");
+      Object.assign(flash.style, { width: len + "px", top: yl + "px", transform: `translateY(-50%) rotate(${CUT.angle}deg) scaleX(0)` });
+      // Along the cut (ux, uy) and across it (nx, ny).
+      const ux = Math.cos(a), uy = Math.sin(a), nx = -uy, ny = ux;
+      const S = { p: 0 };
+      function draw() {
+        const d = CUT.slide * U * S.p, g = CUT.gap * U * S.p;
+        // A small zoom while apart keeps the frame edges filled (no black at the sides).
+        const z = 1 + 0.07 * S.p;
+        document.getElementById("top").style.transform = `translate(${ux * d - nx * g}px, ${uy * d - ny * g}px) scale(${z})`;
+        document.getElementById("bot").style.transform = `translate(${-ux * d + nx * g}px, ${-uy * d + ny * g}px) scale(${z})`;
+      }
+      window.__timelines = window.__timelines || {};
+      const tl = gsap.timeline({ paused: true, onUpdate: draw });
+      // The slash: the flash line shoots across in 3 frames and fades.
+      tl.set(flash, { opacity: 1 }, AT.slash);
+      tl.to(flash, { transform: `translateY(-50%) rotate(${CUT.angle}deg) scaleX(1)`, duration: 0.09, ease: "power2.out" }, AT.slash);
+      tl.to(flash, { opacity: 0, duration: 0.12 }, AT.slash + 0.1);
+      // Part, then close.
+      tl.to(S, { p: 1, duration: AT.partFor, ease: "power2.out" }, AT.part);
+      tl.to(S, { p: 0, duration: AT.closeFor, ease: "power3.in" }, AT.close);
+      tl.set({}, {}, Number(root.dataset.duration));
+      window.__timelines["main"] = tl;
+      draw(); tl.seek(0);
+    </script>
+  </body>
+</html>

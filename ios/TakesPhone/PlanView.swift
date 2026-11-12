@@ -5,7 +5,7 @@ import SwiftUI
 /// streak chain and the crown, the plan's weeks with their video cards, Change days, and the Plan
 /// chat. The Mac sends the board ready to draw (Plugins/PlanPhone.swift there); each button calls the
 /// Mac's own and writes the same line in the Plan chat. A day's + and a card's Move to stand in for
-/// the Mac's hover + and drag. Public.
+/// the Mac's hover + and drag. Before a plan, the calm first open (PlanFirst.swift). Public.
 
 struct PlanData: Decodable, Equatable {
     struct Plan: Decodable, Equatable {
@@ -76,6 +76,8 @@ struct PlanData: Decodable, Equatable {
     var minWeeks: Int
     var maxWeeks: Int
     var ready: [String]
+    /// What the empty Plan chat says and offers. Nil from a Mac before 2026-10-30.
+    var intro: BoardIntro?
 }
 
 struct PlanChoice: Decodable, Equatable, Identifiable, Hashable {
@@ -127,19 +129,32 @@ struct PlanScreen: View {
     @State private var card: CardPick?
     private struct CardPick { let card: PlanData.Card; let day: PlanData.Day }
     @State private var opened: Session?
+    @State private var openedTab = SessionView.Tab.chat
+    /// A card from the Ready posts feed over the whole screen (its day menu, a rename, a delete).
+    @State private var front: AnyView?
 
     var body: some View {
         VStack(spacing: 0) {
             ScreenHeader(title: "Plan", subtitle: data?.subtitle ?? "Show up on the days you choose") { EmptyView() } trailing: {
                 if data?.plan != nil && !editing {
                     Button("Change days") { withAnimation(Brand.spring) { editing = true } }.buttonStyle(.pill(.quiet, small: true))
+                } else if data != nil && data?.plan == nil {
+                    // The first open shows the setup on its own; the chat waits behind this button (the Mac's corner one).
+                    Button { Brand.tap(); talking = true } label: {
+                        Image(systemName: "bubble.left.and.bubble.right").font(.system(size: 16, weight: .medium)).foregroundStyle(Palette.muted)
+                            .frame(width: 44, height: 44).contentShape(Rectangle())
+                    }
+                    .buttonStyle(.press)
+                    .accessibilityLabel("Plan chat")
                 }
             }
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
                     if let d = data {
-                        if d.plan == nil || editing {
-                            PlanCommit(start: d.plan, first: d.plan == nil) { done in
+                        if d.plan == nil {
+                            PlanFirst { Task { await load() } }.arrive(0)
+                        } else if editing {
+                            PlanCommit(start: d.plan) { done in
                                 if done { Task { await load() } }
                                 withAnimation(Brand.spring) { editing = false }
                             }
@@ -150,7 +165,9 @@ struct PlanScreen: View {
                             PlanStrip(data: d, add: { adding = $0 }, open: { open($0.id) }, more: { c, day in withAnimation(Brand.quick) { card = CardPick(card: c, day: day) } },
                                       weeks: { n in act(["action": "weeks", "n": n]) })
                                 .planCard().arrive(2)
-                            if !d.ready.isEmpty { ready(d).planCard().arrive(3) }
+                            // Admin: the posts themselves, as the Mac's Ready posts feed (2026-10-30). Public: the list.
+                            ReadyPostsPhone.feed(plan: d, present: { v in withAnimation(Brand.quick) { front = v } },
+                                                openPost: { id, platform in openPost(id, platform) }) { AnyView(Group { if !d.ready.isEmpty { ready(d).planCard() } }) }.arrive(3)
                         }
                     } else if let failed {
                         MascotEmpty(title: "Can't load your plan", message: failed, mood: .sorry).padding(.top, 30)
@@ -161,7 +178,7 @@ struct PlanScreen: View {
             .refreshable { await load() }
         }
         .overlay(alignment: .bottom) {
-            if !editing {
+            if !editing && data?.plan != nil {
                 Button { Brand.tap(.medium); talking = true } label: {
                     Label("Plan chat", systemImage: "bubble.left.and.bubble.right.fill").frame(maxWidth: .infinity)
                 }
@@ -184,13 +201,14 @@ struct PlanScreen: View {
                 }
             }
         }
+        .overlay { if let front { front.transition(.opacity) } }
         .background(Palette.surface.ignoresSafeArea())
         .toolbar(.hidden, for: .navigationBar)
         .overlay(alignment: .bottom) { Toast(text: $model.toast) }
         .animation(Brand.quick, value: model.toast)
         .navigationDestination(isPresented: $talking) {
             BoardChatView(id: PlanWords.chatID, title: "Plan", empty: "Ask Takes to plan your videos, fill the next posting day, or change your days.",
-                          from: "Plan")
+                          from: "Plan", intro: data?.intro)
         }
         .navigationDestination(item: $adding) { day in
             PlanPicker(day: day) { id in
@@ -198,7 +216,7 @@ struct PlanScreen: View {
                 place(id, on: day.day, before: nil)
             }
         }
-        .navigationDestination(item: $opened) { SessionView(session: $0) }
+        .navigationDestination(item: $opened) { SessionView(session: $0, start: openedTab) }
         .task(id: talking) {
             // The chat and the Mac change the plan too: look again every few seconds while it shows.
             while !Task.isCancelled && !talking {
@@ -236,8 +254,14 @@ struct PlanScreen: View {
         }
     }
 
-    private func open(_ id: String) {
-        if let s = model.sessions.first(where: { $0.id == id }) { opened = s } else { model.toast = "That video is not on this phone yet. Pull the list to refresh." }
+    private func open(_ id: String, tab: SessionView.Tab = .chat) {
+        if let s = model.sessions.first(where: { $0.id == id }) { openedTab = tab; opened = s } else { model.toast = "That video is not on this phone yet. Pull the list to refresh." }
+    }
+
+    /// Ready posts' Edit: the session's Post tab, on that platform (the Mac's openPost).
+    private func openPost(_ id: String, _ platform: String) {
+        UserDefaults.standard.set(platform, forKey: "postPlatform")
+        open(id, tab: .post)
     }
 
     private func place(_ id: String, on day: String, before: String?) {
@@ -771,11 +795,10 @@ struct PlanPicker: View {
 
 // MARK: - Change days
 
-/// Your days and time, in a few taps (the Mac's CommitCard): day keys with Tue and Thu suggested, the
+/// Change days (the Mac's CommitCard): day keys with Tue and Thu suggested, the
 /// time, where you post, and the next two weeks as they would look before you save.
 struct PlanCommit: View {
     @EnvironmentObject var model: Model
-    let first: Bool
     let done: (Bool) -> Void
     @State private var days: Set<String>
     @State private var time: String
@@ -784,8 +807,7 @@ struct PlanCommit: View {
     @State private var preview: PlanData?
     @State private var saving = false
 
-    init(start: PlanData.Plan?, first: Bool, done: @escaping (Bool) -> Void) {
-        self.first = first
+    init(start: PlanData.Plan?, done: @escaping (Bool) -> Void) {
         self.done = done
         let t = start?.time ?? PlanWords.times[0].1
         _days = State(initialValue: Set(start?.days ?? Array(PlanWords.suggested)))
@@ -803,9 +825,9 @@ struct PlanCommit: View {
             HStack(spacing: 14) {
                 PlanFlame(rank: rank, size: 50)
                 VStack(alignment: .leading, spacing: 4) {
-                    Text(first ? "When do you want to show up?" : PlanWords.levels[rank]).font(.nunito(size: 22, relativeTo: .title2)).foregroundStyle(Palette.ink)
+                    Text(PlanWords.levels[rank]).font(.nunito(size: 22, relativeTo: .title2)).foregroundStyle(Palette.ink)
                         .fixedSize(horizontal: false, vertical: true)
-                    Text(first ? "\(PlanWords.levels[rank]). \(PlanWords.perMonth(days.count))" : PlanWords.perMonth(days.count))
+                    Text(PlanWords.perMonth(days.count))
                         .font(.inter(.footnote)).foregroundStyle(Palette.muted).fixedSize(horizontal: false, vertical: true)
                 }
                 .animation(Brand.quick, value: days.count)
@@ -878,8 +900,8 @@ struct PlanCommit: View {
                 Text("A post on any of these fills the day's slot.").font(.inter(.caption)).foregroundStyle(Palette.faint)
             }
             HStack(spacing: 10) {
-                if !first { Button("Cancel") { done(false) }.buttonStyle(.pill(.quiet, wide: true)) }
-                Button(first ? "I'm in" : "Save") { save() }.buttonStyle(.pill(.primary, wide: true)).disabled(!ok || saving)
+                Button("Cancel") { done(false) }.buttonStyle(.pill(.quiet, wide: true))
+                Button("Save") { save() }.buttonStyle(.pill(.primary, wide: true)).disabled(!ok || saving)
             }
         }
         .task(id: key) {

@@ -17,6 +17,11 @@ struct StylesView: View {
     @State private var confirm: Confirm?
     @State private var noName: NameAsk?
     @State private var problem: String?
+    /// Styles or Effects (2026-10-30), as the Mac board's switch under its title.
+    @AppStorage("stylesPage") private var tab = "styles"
+    @State private var openedEffect: Effect?
+    @State private var askingEffect = false
+    @State private var refreshes = LatestRefresh()
 
     static let chatID = "board:styles"
     private let columns = [GridItem(.flexible(), spacing: 14, alignment: .top), GridItem(.flexible(), spacing: 14, alignment: .top)]
@@ -27,14 +32,15 @@ struct StylesView: View {
 
     private var page: some View {
         ScrollView {
-            ScreenHeader(title: "Styles", subtitle: "Each video picks its style on its Files tab.") {
+            ScreenHeader(title: "Styles", subtitle: tab == "effects" ? "Ready-made moments you can ask Takes to add to a video."
+                                                                     : "Each video picks its style on its Files tab.") {
                 Button { chatOpen = true } label: { RoundIcon(icon: "bubble.left.and.text.bubble.right", label: "Styles chat") }
                     .buttonStyle(.press)
             } trailing: {
-                Button { asking = true } label: {
+                Button { if tab == "effects" { askingEffect = true } else { asking = true } } label: {
                     HStack(spacing: 6) {
                         Image(systemName: "plus").font(.system(size: 14, weight: .semibold))
-                        Text("New style")
+                        Text(tab == "effects" ? "New effect" : "New style")
                     }
                     .font(.inter(.subheadline, .semibold)).foregroundStyle(.white)
                     .padding(.horizontal, 14).frame(height: 34)
@@ -43,12 +49,15 @@ struct StylesView: View {
                 .buttonStyle(.press)
             }
             VStack(alignment: .leading, spacing: 22) {
+                Segments(items: ["styles", "effects"], selection: $tab, title: { $0 == "effects" ? "Effects" : "Styles" })
                 if model.stylesRunning { working }
                 if let problem {
                     Label(problem, systemImage: "exclamationmark.triangle").font(.inter(.footnote)).foregroundStyle(Palette.danger)
                         .onTapGesture { self.problem = nil }
                 }
-                if let list {
+                if tab == "effects" {
+                    EffectsPage(open: { openedEffect = $0 }, new: { askingEffect = true })
+                } else if let list {
                     if list.styles.isEmpty {
                         MascotEmpty(title: "No styles yet", message: "Tap New style and give Takes an example: a link, or words for the look.")
                             .padding(.top, 30)
@@ -75,6 +84,20 @@ struct StylesView: View {
                           empty: "Takes makes new styles, renders their previews and fixes the parts you comment on.")
         }
         .navigationDestination(item: $opened) { StyleView(target: $0) }
+        .navigationDestination(item: $openedEffect) { EffectView(effect: $0) }
+        .sheet(isPresented: $askingEffect) {
+            NewEffectSheet { example in
+                do {
+                    try await model.api.changeEffect(["action": "new", "example": example])
+                    model.stylesRunning = true
+                    chatOpen = true
+                    return true
+                } catch {
+                    return false
+                }
+            }
+            .presentationDetents([.medium])
+        }
         .sheet(isPresented: $asking) {
             NewStyleSheet { example in
                 let ok = await model.say(Self.makeAsk(example), in: Self.chatID, from: "Styles")
@@ -92,13 +115,16 @@ struct StylesView: View {
     }
 
     private func load() async {
+        let request = refreshes.begin()
         do {
             let raw = try await model.api.stylesData()
             let fresh = try API.decoder.decode(StyleList.self, from: raw)
+            guard refreshes.accepts(request) else { return }
             if fresh != list { list = fresh }
-            Task.detached(priority: .utility) { Cache.saveData(raw, "styles") }
             failed = nil
+            await CacheWrites.shared.saveData(raw, "styles", generation: request)
         } catch {
+            guard refreshes.accepts(request) else { return }
             if list == nil { failed = error.localizedDescription }
         }
     }
@@ -337,6 +363,7 @@ struct StyleView: View {
     /// item name -> the version on show (path).
     @State private var picked: [String: String] = [:]
     @State private var asked = false
+    @State private var refreshes = LatestRefresh()
 
     private var key: String {
         switch target {
@@ -398,18 +425,20 @@ struct StyleView: View {
     }
 
     private func load() async {
+        let request = refreshes.begin()
         do {
             let d: StyleDetail
             switch target {
             case .style(let n): d = try await model.api.style(name: n, id: nil)
             case .project(let p): d = try await model.api.style(name: nil, id: p + "/_library")
             }
+            guard refreshes.accepts(request) else { return }
             StyleFonts.load(d.fonts, api: model.api)
             if d != detail { detail = d }
-            let k = key
-            Task.detached(priority: .utility) { Cache.save(d, k) }
             failed = nil
+            await CacheWrites.shared.save(d, key, generation: request)
         } catch {
+            guard refreshes.accepts(request) else { return }
             if detail == nil { failed = error.localizedDescription }
         }
     }

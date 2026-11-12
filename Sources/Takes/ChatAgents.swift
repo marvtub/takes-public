@@ -66,7 +66,7 @@ enum ChatAgent: String, Codable, CaseIterable, Identifiable {
         switch self {
         case .claude: return "Uses your Claude plan"
         case .codex: return "Uses your ChatGPT plan"
-        case .pi: return "Uses the model set in pi"
+        case .pi: return "Uses your pi providers"
         }
     }
 
@@ -128,22 +128,6 @@ enum CodexModels {
             let shown = (m["display_name"] as? String).map { $0.replacingOccurrences(of: "-", with: " ").replacingOccurrences(of: "GPT 6", with: "GPT-6") } ?? slug
             return ChatModel(id: slug, name: shown, hint: m["description"] as? String ?? "")
         }
-    }
-}
-
-/// pi works with many providers, and its own settings pick the model (/model in pi). The chat offers
-/// that one: an empty id passes no --model.
-enum PiModels {
-    static var list: [ChatModel] {
-        [ChatModel(id: "", name: defaultModel ?? "pi's model", hint: "The model set in pi. Change it with /model in pi.")]
-    }
-
-    /// defaultModel in pi's settings.json (PI_CODING_AGENT_DIR, else ~/.pi/agent).
-    static var defaultModel: String? {
-        guard let d = try? Data(contentsOf: AgentKind.piDir.appending(path: "settings.json")),
-              let o = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
-              let m = o["defaultModel"] as? String, !m.isEmpty else { return nil }
-        return m
     }
 }
 
@@ -212,10 +196,12 @@ final class AgentsStatus {
             // Finding the CLIs may start a login shell: off the main thread.
             let paths = AgentKind.allCases.map(Agents.path)
             let (claude, codex, pi) = (paths[0], paths[1], paths[2])
-            let claudeLine = claude.map { Self.claudeLine(AgentCheck.run($0, ["auth", "status"])) }
-            let codexLine = codex.map { Self.codexLine(AgentCheck.run($0, ["login", "status"], errors: true)) }
+            // Three separate programs, none needs another's answer: run them side by side.
+            async let claudeCheck = claude.map { Self.claudeLine(AgentCheck.run($0, ["auth", "status"])) }
+            async let codexCheck = codex.map { Self.codexLine(AgentCheck.run($0, ["login", "status"], errors: true)) }
+            async let rowsCheck = server.flatMap { AgentCheck.run("/usr/bin/python3", [$0, "--agents"], seconds: 90) }.map(Self.parse) ?? []
             let piLine = pi.map { _ in AgentKind.piSignedIn() ? ChatAgent.pi.plan : "Not signed in: run pi in Terminal, then /login" }
-            let rows = server.flatMap { AgentCheck.run("/usr/bin/python3", [$0, "--agents"], seconds: 90) }.map(Self.parse) ?? []
+            let (claudeLine, codexLine, rows) = await (claudeCheck, codexCheck, rowsCheck)
             await MainActor.run {
                 let s = AgentsStatus.shared
                 // pi signs in per provider (pi auth check needs one): its line says whose model it uses.
@@ -280,9 +266,11 @@ struct AgentLine: View {
     @AppStorage("chatAgent") private var agentRaw = ChatAgent.claude.rawValue
     @AppStorage("chatModel.claude") private var claudeModel = ""
     @AppStorage("chatModel.codex") private var codexModel = ""
+    @AppStorage("chatModel.pi") private var piModel = ""
+    @AppStorage("piModels") private var piModels = Data()
 
     var body: some View {
-        let _ = (agentRaw, claudeModel, codexModel)  // redraw when a setting changes
+        let _ = (agentRaw, claudeModel, codexModel, piModel, piModels)  // redraw when a setting changes
         let agent = chat.agent
         Button { open.toggle() } label: {
             HStack(spacing: 4) {
@@ -304,28 +292,35 @@ struct AgentLine: View {
 /// Who does the work, its model, and a link to Settings › Agents.
 struct AgentCard: View {
     var chat: ClaudeChat
+    var previewModels: [ChatModel]? = nil
     let close: () -> Void
     @Environment(\.openSettings) private var openSettings
     @AppStorage("chatAgent") private var agentRaw = ChatAgent.claude.rawValue
     @AppStorage("chatModel.claude") private var claudeModel = ""
     @AppStorage("chatModel.codex") private var codexModel = ""
+    @AppStorage("chatModel.pi") private var piModel = ""
+    @AppStorage("piModels") private var piModels = Data()
     /// The agent this card just switched to: the card says a new conversation started.
     @State private var switched: ChatAgent?
     private var status: AgentsStatus { AgentsStatus.shared }
 
     var body: some View {
-        let _ = (agentRaw, claudeModel, codexModel)
+        let _ = (agentRaw, claudeModel, codexModel, piModel, piModels)
         let agent = chat.agent
         VStack(alignment: .leading, spacing: 12) {
-            Text("Who does the work").font(Theme.sans(11.5, .semibold)).foregroundStyle(Theme.muted)
+            Text("Choose your agent").font(Theme.sans(11.5, .semibold)).foregroundStyle(Theme.muted)
             VStack(spacing: 6) {
                 ForEach(ChatAgent.allCases) { a in row(a, selected: a == agent) }
             }
             VStack(alignment: .leading, spacing: 6) {
                 Text("Model").font(Theme.sans(11.5, .semibold)).foregroundStyle(Theme.muted)
-                if agent.models.count > 1 { ModelSegments(agent: agent) }
-                Text(agent.model.hint).font(Theme.sans(11.5)).foregroundStyle(Theme.muted)
-                    .fixedSize(horizontal: false, vertical: true)
+                if agent == .pi {
+                    PiModelPicker(selection: $piModel, previewModels: previewModels)
+                } else {
+                    if agent.models.count > 1 { ModelSegments(agent: agent) }
+                    Text(agent.model.hint).font(Theme.sans(11.5)).foregroundStyle(Theme.muted)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
             if let switched, switched == agent {
                 Text("\(switched.name) starts a new conversation. The last one stays in Past conversations.")
@@ -342,9 +337,7 @@ struct AgentCard: View {
                 close()
                 openSettings()
             } label: {
-                (Text(status.othersLine.map { "\($0) can also open your library. " } ?? "Other agents can open your library too. ")
-                    .foregroundStyle(Theme.muted)
-                 + Text("Agents…").foregroundStyle(Theme.accentInk).fontWeight(.medium))
+                Text("Settings").foregroundStyle(Theme.accentInk).fontWeight(.medium)
                     .font(Theme.sans(12))
                     .multilineTextAlignment(.leading)
                     .fixedSize(horizontal: false, vertical: true)
@@ -356,7 +349,7 @@ struct AgentCard: View {
         .padding(12)
         .frame(width: 320)
         .animation(Theme.motion, value: switched)
-        .onAppear { status.checkOnce() }
+        .onAppear { if previewModels == nil { status.checkOnce() } }
     }
 
     private func row(_ a: ChatAgent, selected: Bool) -> some View {
@@ -386,6 +379,70 @@ struct AgentCard: View {
         .buttonStyle(.plain)
         .disabled(!there || (chat.running && !selected))
         .help(chat.running && !selected ? "Wait until Takes is done to switch" : "")
+    }
+}
+
+/// Search and pick in the agent card itself, without a second menu.
+struct PiModelPicker: View {
+    @Binding var selection: String
+    var previewModels: [ChatModel]? = nil
+    @AppStorage("piModels") private var cached = Data()
+    @State private var query = ""
+    @State private var failed = false
+    @State private var highlighted: String?
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        let _ = cached
+        let models = previewModels ?? PiModels.list
+        let rows = PiModels.matching(models, query: query)
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                Image(systemName: "magnifyingglass").foregroundStyle(Theme.muted)
+                TextField("Search models or providers", text: $query).textFieldStyle(.plain)
+                    .focused($focused)
+                    .onSubmit { if let highlighted, rows.contains(where: { $0.id == highlighted }) { selection = highlighted } }
+            }
+            .padding(8).background(Theme.canvas, in: RoundedRectangle(cornerRadius: 7))
+            ScrollViewReader { proxy in
+              ScrollView {
+                VStack(spacing: 2) {
+                    ForEach(rows) { model in
+                        Button { selection = model.id; highlighted = model.id; focused = true } label: {
+                            HStack(spacing: 8) {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(model.id.isEmpty ? "pi default" : model.name).foregroundStyle(Theme.ink)
+                                    Text(model.id.isEmpty ? model.name : model.hint).font(Theme.sans(10.5)).foregroundStyle(Theme.muted)
+                                }.frame(maxWidth: .infinity, alignment: .leading)
+                                if model.id == selection {
+                                    Image(systemName: "checkmark").foregroundStyle(Theme.accent)
+                                }
+                            }
+                            .padding(8).background(model.id == highlighted ? Theme.accentSoft : .clear, in: RoundedRectangle(cornerRadius: 7))
+                            .contentShape(Rectangle())
+                        }.buttonStyle(.plain)
+                        .id(model.id)
+                        .accessibilityAddTraits(model.id == selection ? .isSelected : [])
+                    }
+                    if rows.isEmpty { Text("No matching models.").foregroundStyle(Theme.muted).padding(8) }
+                }
+              }.frame(height: 190)
+              .onChange(of: highlighted) { _, id in if let id { proxy.scrollTo(id) } }
+            }
+            if failed {
+                Text("Could not load pi models. Check pi sign-in, then try again.").foregroundStyle(Theme.muted)
+                Button("Try again") { Task { failed = !(await PiModels.refresh()) } }
+            }
+        }
+        .font(Theme.sans(11.5))
+        .onAppear { focused = true; DispatchQueue.main.async { focused = true } }
+        .onChange(of: query) { _, _ in highlighted = rows.first?.id }
+        .onChange(of: rows.map(\.id), initial: true) { _, _ in
+            highlighted = query.isEmpty && rows.contains(where: { $0.id == selection }) ? selection : rows.first?.id
+        }
+        .onKeyPress(.downArrow) { highlighted = PiModels.next(in: rows, from: highlighted, by: 1); return .handled }
+        .onKeyPress(.upArrow) { highlighted = PiModels.next(in: rows, from: highlighted, by: -1); return .handled }
+        .task { if previewModels == nil { failed = !(await PiModels.refresh()) } }
     }
 }
 
@@ -468,11 +525,13 @@ struct AgentsPage: View {
     @AppStorage("chatAgent") private var agentRaw = ChatAgent.claude.rawValue
     @AppStorage("chatModel.claude") private var claudeModel = ""
     @AppStorage("chatModel.codex") private var codexModel = ""
+    @AppStorage("chatModel.pi") private var piModel = ""
+    @AppStorage("piModels") private var piModels = Data()
     @AppStorage(ChatMCP.allKey) private var allMCP = false
     private var status: AgentsStatus { AgentsStatus.shared }
 
     var body: some View {
-        let _ = (claudeModel, codexModel)
+        let _ = (claudeModel, codexModel, piModel, piModels)
         ScrollView {
             VStack(alignment: .leading, spacing: 22) {
                 VStack(alignment: .leading, spacing: 6) {
@@ -573,7 +632,7 @@ struct AgentsPage: View {
                 .contentShape(Rectangle())
             } content: {
                 for m in a.models {
-                    MenuButton(m.name, checked: m == a.model) {
+                    MenuButton(a == .pi && !m.id.isEmpty ? "\(m.name) · \(m.hint)" : m.name, checked: m == a.model) {
                         UserDefaults.standard.set(m.id, forKey: a.modelKey)
                     }
                 }

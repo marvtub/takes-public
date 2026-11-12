@@ -47,6 +47,13 @@ extension Snap {
 
 @MainActor
 struct StyleLinkTests {
+    /// The guide card shows prose, not the "# Bold Captions style" title the heading above repeats (2026-11-07).
+    @Test func theGuidePreviewLeavesOutTheTitle() {
+        let p = LibrarySection.preview("# Bold Captions style\n\nThe look for fast vertical videos.\n## Type\nBig caps.")
+        #expect(p == "The look for fast vertical videos.\nType\nBig caps.")
+        #expect(LibrarySection.preview("Parts are in `src/`, **bold** ones first.") == "Parts are in src/, bold ones first.")
+    }
+
     @Test func aLinkIsNamedAfterItsSite() {
         #expect(StyleLink(in: "like this https://www.tiktok.com/@a/video/1 please")?.site == "TikTok")
         #expect(StyleLink(in: "https://www.instagram.com/reel/abc/")?.site == "Instagram reel")

@@ -15,10 +15,15 @@ let package = Package(
         .package(url: "https://github.com/huggingface/swift-transformers", exact: "1.3.0")
     ],
     targets: [
+        .target(name: "TakesEmbedCLI"),
         .target(name: "EmbeddingGemma2", dependencies: [
             .product(name: "MLX", package: "mlx-swift"),
             .product(name: "MLXNN", package: "mlx-swift"),
             .product(name: "Tokenizers", package: "swift-transformers")]),
-        .executableTarget(name: "TakesEmbed", dependencies: ["EmbeddingGemma2", .product(name: "MLX", package: "mlx-swift")],
-                          swiftSettings: [.swiftLanguageMode(.v5)])
+        .executableTarget(name: "TakesEmbed", dependencies: ["TakesEmbedCLI", "EmbeddingGemma2", .product(name: "MLX", package: "mlx-swift")],
+                          swiftSettings: [.swiftLanguageMode(.v5)]),
+        .testTarget(name: "TakesEmbedCLITests", dependencies: ["TakesEmbedCLI"]),
+        .testTarget(name: "TakesEmbedTests", dependencies: ["TakesEmbed"],
+                    swiftSettings: [.swiftLanguageMode(.v5)]),
+        .testTarget(name: "EmbeddingGemma2Tests", dependencies: ["EmbeddingGemma2"])
     ])

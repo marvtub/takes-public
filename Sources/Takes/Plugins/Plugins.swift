@@ -39,15 +39,100 @@ struct TakesPlugin: Identifiable {
     /// What its board chat (hub.boardChat(id)) hears (2026-10-10, Ideas). With one, the phone can
     /// open that chat too, as board:<id>, before the board was ever shown on the Mac.
     var chatContext: (@MainActor () -> String)? = nil
+    /// What one of its family chats hears (hub.boardChat("<id>.<key>"), 2026-11-10: a chat per goal), given the key.
+    var chatFamily: (@MainActor (String) -> String)? = nil
     /// Runs once when the app starts, for work on a schedule that must not wait for the board
     /// (2026-10-13, a weekly check). The plugin shows the schedule on its board.
     var start: (@MainActor (AppModel) -> Void)? = nil
-    /// Cards under a chat's last message (2026-10-19): the plugin returns a view for the chats it knows, nil for the
-    /// rest. The chat panel draws it below the transcript, so a card can carry buttons that act on the board.
-    var chatFoot: (@MainActor (ClaudeChat) -> AnyView?)? = nil
+    /// Its part of the vertical post's card, under "Goes to" (2026-11-06, the admin trial reels): the
+    /// session, the vertical edit on show, the caption, the app.
+    var vertical: (@MainActor (_ session: URL, _ media: URL?, _ caption: String, _ app: AppModel) -> AnyView)? = nil
     /// Takes posts the post itself at its time (2026-10-25, the admin Zernio plugin): its part of the
     /// Schedule panel, the header button's label, and a layer over the window.
     var autopost: AutopostHook? = nil
+    /// Its part of the Plan board, in place of the "Ready, waiting for a slot" list (2026-10-30,
+    /// the admin Ready posts feed).
+    var planReady: (@MainActor (_ c: PlanReadyContext) -> AnyView)? = nil
+    /// Off until the user turns it on (2026-11-06, the admin Mods prototype). Takes marks it off the
+    /// first time this build sees it; after that the Plugins board's switch decides, as for the rest.
+    var startsOff = false
+    /// Its part of a named place in the window (2026-11-06, the admin Mods slots: "performance",
+    /// "plan", "home"), with how to open a takes:// link there. Nil: nothing in that place now.
+    var slot: (@MainActor (_ name: String, _ open: @escaping (URL) -> Void) -> AnyView?)? = nil
+    /// A short note every chat hears, or nil for none now (2026-11-07, the admin Mods: where the
+    /// mods live and how to change Takes's own sidebar).
+    var agentNote: (@MainActor () -> String?)? = nil
+    /// Named board sections. A plugin may reorder them or put a mod around the original native part.
+    var sections: (@MainActor (_ board: String, _ available: [String], _ snapshots: BoardSnapshotSource,
+                               _ open: @escaping (URL) -> Void, _ native: @escaping (String) -> AnyView) -> AnyView?)? = nil
+    /// Its slots and sections still draw in Public view (2026-11-08): the admin Mods then draws only
+    /// the shipped mods, which are what users see.
+    var drawsInPublicView = false
+}
+
+/// A board builds data only on request. A source may finish on the utility worker.
+@MainActor struct BoardSnapshotSource {
+    typealias Values = [String: [String: Any]]
+    let load: (@escaping (Values) -> Void) -> Void
+    init(_ snapshots: @escaping () -> Values) { load = { done in done(snapshots()) } }
+    init(load: @escaping (@escaping (Values) -> Void) -> Void) { self.load = load }
+}
+
+/// Transparent to the board's own stack: no extra layout or spacing when no plugin handles it.
+struct BoardSections<Content: View>: View {
+    let board: String
+    let available: [String]
+    var snapshots: () -> [String: [String: Any]] = { [:] }
+    var snapshotSource: BoardSnapshotSource? = nil
+    var open: (URL) -> Void = { _ in }
+    @ViewBuilder var content: (String) -> Content
+    @Environment(\.boardSectionsOverride) private var override
+    @AppStorage(Plugins.removedKey) private var pluginsRemoved = ""
+
+    var body: some View {
+        let _ = pluginsRemoved
+        let source = snapshotSource ?? BoardSnapshotSource(snapshots)
+        if let override {
+            override(board, available, source, open, { AnyView(content($0)) })
+        } else if Plugins.drawing.contains(where: { $0.sections != nil }),
+           let custom = Plugins.sections(board, available: available, snapshots: source, open: open,
+                                         native: { AnyView(content($0)) }) {
+            custom
+        } else {
+            ForEach(available, id: \.self) { content($0) }
+        }
+    }
+}
+
+typealias BoardSectionsHook = @MainActor (String, [String], BoardSnapshotSource, @escaping (URL) -> Void,
+                                         @escaping (String) -> AnyView) -> AnyView
+private struct BoardSectionsOverrideKey: EnvironmentKey { static let defaultValue: BoardSectionsHook? = nil }
+extension EnvironmentValues {
+    /// Offscreen verification can supply its own mod store, without touching the app's running store.
+    var boardSectionsOverride: BoardSectionsHook? {
+        get { self[BoardSectionsOverrideKey.self] }
+        set { self[BoardSectionsOverrideKey.self] = newValue }
+    }
+}
+
+/// A snapshot of values already read by the board, with the same field names as its source file.
+enum BoardSectionData {
+    static func json<T: Encodable>(_ value: T) -> [String: Any] {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        guard let encoded = try? encoder.encode(value),
+              let object = try? JSONSerialization.jsonObject(with: encoded) as? [String: Any] else { return [:] }
+        return object
+    }
+}
+
+/// What the Plan board hands a plugin's part of it: the plan, what the board counts, and how to
+/// open a post on its session's Post tab.
+struct PlanReadyContext {
+    let root: URL
+    let plan: PostingPlan
+    let stats: ConsistencyStats
+    let openPost: (URL) -> Void
 }
 
 /// A plugin that posts for you. The Schedule panel and the header button ask it about each post;
@@ -59,6 +144,13 @@ struct AutopostHook {
     let label: @MainActor (_ session: URL, _ platform: PostPlatform, _ content: PostFile.Content) -> AutopostLabel?
     /// Over the whole window, like the first take's card.
     let layer: @MainActor (_ app: AppModel) -> AnyView
+    /// The same on the phone's Schedule panel (2026-10-30): its routes, with no screen in the list.
+    var phone: PhoneHook? = nil
+    /// It sends this post and marks it posted itself once it is live: the queue's 15 s settle
+    /// leaves it alone, so a failure is not hidden as posted.
+    var sends: @Sendable (_ content: PostFile.Content) -> Bool = { _ in false }
+    /// It could not post this one: the Plan counts do not count it as out.
+    var failed: @Sendable (_ content: PostFile.Content) -> Bool = { _ in false }
 }
 
 /// The post and the time on show in the Schedule panel. `save` writes that time to the post (after
@@ -160,8 +252,22 @@ enum Plugins {
     static let removedKey = "pluginsRemoved"
     /// Plugins start installed: a removal is what is saved.
     static var removed: Set<String> {
-        Set((UserDefaults.standard.string(forKey: removedKey) ?? "").split(separator: ",").map(String.init))
+        _ = seededOff
+        return Set((UserDefaults.standard.string(forKey: removedKey) ?? "").split(separator: ",").map(String.init))
     }
+    /// The plugins that start off and were marked off once (so a later switch-on sticks).
+    static let seenOffKey = "pluginsSeenOff"
+    /// Once per launch: a startsOff plugin this Mac has not seen yet goes on the removed list.
+    private static let seededOff: Void = {
+        let d = UserDefaults.standard
+        let seen = Set((d.string(forKey: seenOffKey) ?? "").split(separator: ",").map(String.init))
+        let new = built.filter { $0.startsOff && !seen.contains($0.id) }.map(\.id)
+        guard !new.isEmpty else { return }
+        var r = Set((d.string(forKey: removedKey) ?? "").split(separator: ",").map(String.init))
+        r.formUnion(new)
+        d.set(r.sorted().joined(separator: ","), forKey: removedKey)
+        d.set(seen.union(new).sorted().joined(separator: ","), forKey: seenOffKey)
+    }()
     static func isInstalled(_ id: String) -> Bool { !removed.contains(id) }
     static func setInstalled(_ id: String, _ on: Bool) {
         var r = removed
@@ -170,6 +276,11 @@ enum Plugins {
     }
     /// The plugins with a board of their own.
     static var boards: [TakesPlugin] { all.filter { $0.board != nil } }
+    /// The installed plugins that draw in slots and board sections: `all`, and in Public view also a
+    /// hidden one that draws what users see (`drawsInPublicView`).
+    static var drawing: [TakesPlugin] {
+        PublicView.on ? built.filter { !removed.contains($0.id) && (!adminOnly($0) || $0.drawsInPublicView) } : all
+    }
     static func named(_ id: String) -> TakesPlugin? { all.first { $0.id == id } }
     /// An installed plugin whose board chat the phone may open.
     static func chatPlugin(_ id: String) -> TakesPlugin? { named(id).flatMap { $0.chatContext == nil ? nil : $0 } }
@@ -181,8 +292,23 @@ enum Plugins {
     static var postSides: [PostSide] { all.flatMap(\.postSides) }
     /// The plugin that posts for you, if one is on.
     static var autopost: AutopostHook? { all.lazy.compactMap(\.autopost).first }
+    /// The same while Public view hides it: its watcher still runs (`start` goes by `built`).
+    static var builtAutopost: AutopostHook? { built.lazy.filter { isInstalled($0.id) }.compactMap(\.autopost).first }
+    static var vertical: (@MainActor (URL, URL?, String, AppModel) -> AnyView)? { all.lazy.compactMap(\.vertical).first }
+    static var planReady: (@MainActor (PlanReadyContext) -> AnyView)? { all.lazy.compactMap(\.planReady).first }
+    /// What the plugins put in a named place, or nil for nothing (no spacing either).
+    @MainActor static func slot(_ name: String, open: @escaping (URL) -> Void = { _ in }) -> AnyView? {
+        let views = drawing.compactMap { $0.slot?(name, open) }
+        return views.isEmpty ? nil : AnyView(VStack(alignment: .leading, spacing: 12) { ForEach(views.indices, id: \.self) { views[$0] } })
+    }
+    /// What the plugins tell every chat.
+    @MainActor static var agentNotes: [String] { all.compactMap { $0.agentNote?() } }
+    @MainActor static func sections(_ board: String, available: [String], snapshots: BoardSnapshotSource,
+                                    open: @escaping (URL) -> Void = { _ in }, native: @escaping (String) -> AnyView) -> AnyView? {
+        drawing.compactMap(\.sections).first.flatMap { $0(board, available, snapshots, open, native) }
+    }
     static var recordHooks: [RecordHook] { all.compactMap(\.record) }
-    static var phoneHooks: [PhoneHook] { all.compactMap(\.phone) }
+    static var phoneHooks: [PhoneHook] { all.compactMap(\.phone) + all.compactMap(\.autopost?.phone) }
     /// The hook that has the stage for this session, if one has.
     @MainActor static func recordStage(_ session: URL?) -> RecordHook? {
         guard let session else { return nil }
@@ -193,6 +319,14 @@ enum Plugins {
     /// ~/Documents: on another Mac even a look there makes macOS ask for the folder.
     static var own: Bool { !PrivatePlugins.list.isEmpty }
     /// Only in the user's build: the public copy leaves Plugins/Private out (2026-10-08).
+    /// The help as the plugin's page says it: without the "(⇧⌘R)" at its end, since the line under it
+    /// names the shortcut ("Its own board in the sidebar, ⇧⌘R"). Tooltips keep it.
+    nonisolated static func pageHelp(_ help: String) -> String {
+        guard help.hasSuffix(")"), let open = help.range(of: " (⇧⌘", options: .backwards),
+              help.distance(from: open.upperBound, to: help.endIndex) <= 2 else { return help }
+        return String(help[..<open.lowerBound])
+    }
+
     static func adminOnly(_ p: TakesPlugin) -> Bool { PrivatePlugins.list.contains { $0.id == p.id } }
     /// Admin-only things the screen shows (2026-10-22): The user's build, not in Public view. `own`
     /// stays the check for his data and paths, which Public view does not change.
@@ -291,7 +425,7 @@ struct PluginsBoard: View {
             .background(Capsule().fill(admin ? Theme.accentSoft : Theme.hover))
     }
 
-    private func isOn(_ p: TakesPlugin) -> Bool { !removed.split(separator: ",").contains(Substring(p.id)) }
+    private func isOn(_ p: TakesPlugin) -> Bool { _ = removed; return Plugins.isInstalled(p.id) }
 
     private func listRow(_ p: TakesPlugin, selected: Bool) -> some View {
         let on = isOn(p)
@@ -322,7 +456,7 @@ struct PluginsBoard: View {
                     VStack(alignment: .leading, spacing: 4) {
                         Text(p.title).font(Theme.display(26)).foregroundStyle(Theme.ink)
                         if Plugins.showsAdmin { scope(p).padding(.bottom, 2) }
-                        Text(p.help).font(Theme.sans(12.5)).foregroundStyle(Theme.muted)
+                        Text(p.board != nil ? Plugins.pageHelp(p.help) : p.help).font(Theme.sans(12.5)).foregroundStyle(Theme.muted)
                             .fixedSize(horizontal: false, vertical: true)
                     }
                     Spacer(minLength: 16)

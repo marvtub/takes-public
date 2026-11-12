@@ -5,6 +5,156 @@ import Testing
 @testable import Takes
 
 struct ReleaseTests {
+    @Test func failedReleaseRemovesItsTemporaryFiles() throws {
+        let fm = FileManager.default
+        let repo = URL(filePath: #filePath).deletingLastPathComponent().appending(path: "../..")
+        let script = repo.appending(path: "scripts/public/release.sh").standardizedFileURL
+        guard fm.fileExists(atPath: script.path) else { return } // The public export excludes release machinery.
+        let root = fm.temporaryDirectory.appending(path: "takes-release-\(UUID().uuidString)")
+        let bin = root.appending(path: "bin")
+        let home = root.appending(path: "home")
+        let source = root.appending(path: "source")
+        let temporary = root.appending(path: "temporary")
+        try fm.createDirectory(at: bin, withIntermediateDirectories: true)
+        try fm.createDirectory(at: home, withIntermediateDirectories: true)
+        try fm.createDirectory(at: source, withIntermediateDirectories: true)
+        try fm.createDirectory(at: temporary, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: root) }
+
+        let mktemp = bin.appending(path: "mktemp")
+        try """
+        #!/bin/bash
+        set -eu
+        dir="$RELEASE_TEST_TMP/release-run"
+        mkdir "$dir"
+        printf '%s\n' "$dir"
+        """.write(to: mktemp, atomically: true, encoding: .utf8)
+        let git = bin.appending(path: "git")
+        try """
+        #!/bin/bash
+        set -e
+        case "${3:-} ${4:-}" in
+          "worktree add")
+            work="$7"
+            mkdir -p "$work/scripts/public"
+            printf 'raise SystemExit(1)\n' > "$work/scripts/public/export.py"
+            ;;
+          "worktree remove")
+            target="${!#}"
+            rm -rf "$target"
+            ;;
+        esac
+        """.write(to: git, atomically: true, encoding: .utf8)
+        let gh = bin.appending(path: "gh")
+        try "#!/bin/bash\nexit 1\n".write(to: gh, atomically: true, encoding: .utf8)
+        for file in [mktemp, git, gh] {
+            try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: file.path)
+        }
+
+        let process = Process()
+        process.executableURL = URL(filePath: "/bin/bash")
+        process.arguments = [script.path]
+        process.environment = [
+            "HOME": home.path,
+            "PATH": "\(bin.path):/usr/bin:/bin",
+            "RELEASE_TEST_TMP": temporary.path,
+            "TAKES_REPO": source.path,
+        ]
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        try process.run()
+        process.waitUntilExit()
+
+        #expect(process.terminationStatus != 0)
+        #expect(!fm.fileExists(atPath: temporary.appending(path: "release-run").path))
+    }
+
+    @Test func aBrokenMCPBundleStopsBeforeTheReleaseIsPublished() throws {
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
+        let path = root.appending(path: "scripts/public/release.sh")
+        guard FileManager.default.fileExists(atPath: path.path) else { return } // The public copy omits this admin script.
+        let fm = FileManager.default
+        let fixture = fm.temporaryDirectory.appending(path: "takes-release-\(UUID().uuidString)")
+        defer { try? fm.removeItem(at: fixture) }
+        let checkout = fixture.appending(path: "checkout/scripts/public")
+        let source = fixture.appending(path: "source")
+        let publicRepo = fixture.appending(path: "takes-public")
+        let commands = fixture.appending(path: "commands")
+        for directory in [checkout, source, publicRepo.appending(path: ".git"), commands] {
+            try fm.createDirectory(at: directory, withIntermediateDirectories: true)
+        }
+
+        try #"""
+import sys
+if "--check-notes" in sys.argv:
+    print("### Fixes\n- Test release")
+else:
+    print("Clean: test export")
+"""#.write(to: checkout.appending(path: "export.py"), atomically: true, encoding: .utf8)
+        try #"""
+import os
+from pathlib import Path
+Path(os.environ["MCPB_CALLED"]).write_text("called")
+raise SystemExit(23)
+"""#.write(to: checkout.appending(path: "mcpb.py"), atomically: true, encoding: .utf8)
+        try #"""
+#!/bin/bash
+mkdir -p build.noindex/Takes.app build.noindex/Takes.dSYM
+"""#.write(to: publicRepo.appending(path: "build.sh"), atomically: true, encoding: .utf8)
+
+        func command(_ name: String, _ body: String) throws {
+            let file = commands.appending(path: name)
+            try body.write(to: file, atomically: true, encoding: .utf8)
+            try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: file.path)
+        }
+        try command("git", #"""
+#!/bin/bash
+if [[ " $* " == *" worktree add "* ]]; then
+  args=("$@")
+  work=${args[$((${#args[@]} - 2))]}
+  mkdir -p "$work"
+  cp -R "$FIXTURE_CHECKOUT/." "$work/"
+elif [[ " $* " == *" rev-parse "* ]]; then
+  echo deadbee
+fi
+"""#)
+        try command("gh", #"""
+#!/bin/bash
+printf '%s\n' "$*" >> "$GH_CALLS"
+exit 1
+"""#)
+        try command("uvx", #"""
+#!/bin/bash
+touch "${@: -1}"
+"""#)
+        try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: publicRepo.appending(path: "build.sh").path)
+
+        let process = Process()
+        let stdout = Pipe(), stderr = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/bin/bash")
+        process.arguments = [path.path]
+        process.standardOutput = stdout
+        process.standardError = stderr
+        var environment = ProcessInfo.processInfo.environment
+        environment["HOME"] = fixture.appending(path: "home").path
+        environment["PATH"] = "\(commands.path):\(environment["PATH"] ?? "/usr/bin:/bin")"
+        environment["TAKES_REPO"] = source.path
+        environment["FIXTURE_CHECKOUT"] = fixture.appending(path: "checkout").path
+        environment["GH_CALLS"] = fixture.appending(path: "gh-calls").path
+        environment["MCPB_CALLED"] = fixture.appending(path: "mcpb-called").path
+        process.environment = environment
+        try process.run()
+        process.waitUntilExit()
+
+        let error = String(decoding: stderr.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        let calls = (try? String(contentsOf: fixture.appending(path: "gh-calls"), encoding: .utf8)) ?? ""
+        #expect(process.terminationStatus == 1)
+        #expect(fm.fileExists(atPath: fixture.appending(path: "mcpb-called").path))
+        #expect(error.contains("MCP bundle failed: the release was not published"))
+        #expect(!calls.contains("release create"))
+    }
+
     @Test func commandQuotesTheRepoAndRunsMainsScript() {
         let c = Releaser.command("/Users/a b/it's")
         #expect(c.contains("git -C '/Users/a b/it'\\''s' fetch -q origin"))

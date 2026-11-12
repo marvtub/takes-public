@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <!-- Paper tear: a transition out of a full-frame page (a cover, a newspaper, a card). The page rips in two
+         down a jagged line through the middle, with a white torn fibre edge on both halves. The halves twist and
+         fall away to the sides, and the shot is under them.
+         Inputs next to this file: footage.mp4 (the shot that shows under the page) and cover.png (the page: a
+         still of the frame before the tear, at the frame size; e.g. the last frame of a Press front layer).
+         Full frame: render it as mp4 and lay it over the cut. The frame size is data-width / data-height on #root.
+         Edit TEAR, LOOK and AT below. -->
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+    <style>
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
+      #root { position: relative; width: 100%; height: 100%; overflow: hidden; background: #000; }
+      #root video, .half, .half img, .rim { position: absolute; inset: 0; width: 100%; height: 100%; }
+      #root video { object-fit: cover; }
+      .half { filter: drop-shadow(0 calc(var(--u) * 14px) calc(var(--u) * 26px) rgba(0,0,0,.5)); }
+      .rim { background: var(--fibre); }
+      .half img { object-fit: cover; }
+    </style>
+  </head>
+  <body>
+    <div id="root" data-composition-id="main" data-start="0" data-duration="1.8" data-width="1080" data-height="1920">
+      <video id="footage" class="clip" src="footage.mp4" muted playsinline data-start="0" data-track-index="0"></video>
+      <div class="half" id="L"><div class="rim"></div><img src="cover.png" /></div>
+      <div class="half" id="R"><div class="rim"></div><img src="cover.png" /></div>
+    </div>
+    <script>
+      // The tear: where it runs (part of the width at the top and at the bottom), how jagged (px at 1080) and
+      // how wide the white fibre edge is.
+      const TEAR = { top: 0.47, bottom: 0.56, jag: 26, fibre: 9, seed: 5 };
+      const LOOK = { fibre: "#f7f4ec" };
+      // When (seconds): the rip starts, how long until the halves are gone.
+      const AT = { rip: 0.3, for: 0.6 };
+
+      const root = document.getElementById("root");
+      const FRAME = { w: Number(root.dataset.width), h: Number(root.dataset.height) };
+      const U = Math.min(FRAME.w, FRAME.h) / 1080;
+      root.style.setProperty("--u", U); root.style.setProperty("--fibre", LOOK.fibre);
+      // A jagged line from top to bottom: big wobble plus small teeth.
+      let s = TEAR.seed; const rnd = () => ((s = (s * 16807) % 2147483647) / 2147483647);
+      const pts = [];
+      for (let y = 0, i = 0; y <= FRAME.h + 1; y += 18 * U, i++) {
+        const base = (TEAR.top + (TEAR.bottom - TEAR.top) * (y / FRAME.h)) * FRAME.w;
+        const wob = Math.sin(y / (210 * U) + 1.3) * 40 * U + Math.sin(y / (90 * U)) * 14 * U;
+        pts.push([base + wob + (rnd() - 0.5) * TEAR.jag * U, Math.min(y, FRAME.h)]);
+      }
+      const poly = (side, off) => {
+        const edge = pts.map(([x, y]) => `${x + off}px ${y}px`);
+        return side === "L" ? `polygon(0 0, ${edge.join(", ")}, 0 ${FRAME.h}px)` : `polygon(${FRAME.w}px 0, ${edge.join(", ")}, ${FRAME.w}px ${FRAME.h}px)`;
+      };
+      // Each half: the white rim reaches a little past the tear, the picture stops a little short of it,
+      // with its own small random teeth so the two edges do not match exactly.
+      const f = TEAR.fibre * U;
+      const L = document.getElementById("L"), R = document.getElementById("R");
+      L.querySelector(".rim").style.clipPath = poly("L", f * 0.6); L.querySelector("img").style.clipPath = poly("L", -f * 0.5);
+      R.querySelector(".rim").style.clipPath = poly("R", -f * 0.6); R.querySelector("img").style.clipPath = poly("R", f * 0.5);
+      L.style.transformOrigin = "0% 100%"; R.style.transformOrigin = "100% 100%";
+      window.__timelines = window.__timelines || {};
+      const tl = gsap.timeline({ paused: true });
+      // A first small pull (the paper gives), then the halves twist and fall off to the sides.
+      tl.to(L, { x: -14 * U, rotation: -1.2, duration: 0.08, ease: "power1.out" }, AT.rip);
+      tl.to(R, { x: 14 * U, rotation: 1.2, duration: 0.08, ease: "power1.out" }, AT.rip);
+      tl.to(L, { x: -FRAME.w * 0.75, y: FRAME.h * 0.08, rotation: -14, duration: AT.for, ease: "power2.in" }, AT.rip + 0.08);
+      tl.to(R, { x: FRAME.w * 0.75, y: FRAME.h * 0.05, rotation: 12, duration: AT.for * 0.92, ease: "power2.in" }, AT.rip + 0.1);
+      tl.set([L, R], { opacity: 0 }, AT.rip + AT.for + 0.12);
+      tl.set({}, {}, Number(root.dataset.duration));
+      window.__timelines["main"] = tl;
+      tl.seek(0);
+    </script>
+  </body>
+</html>

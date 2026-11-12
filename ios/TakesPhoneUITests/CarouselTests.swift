@@ -13,6 +13,16 @@ extension ParityTests {
         XCTAssertTrue(app.buttons["Carousel"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.descendants(matching: .any)["Slide 1 of 4"].waitForExistence(timeout: 5))
         shot(app, "carousel-1-linkedin")
+        // A comment on a slide (2026-10-31): the button on the slide, a tap for the whole slide, then the text.
+        app.buttons["Comment on slide 1"].tapWhenReady()
+        app.descendants(matching: .any)["Slide 1 of 4"].firstMatch.tap()
+        let field = app.textFields["What should change?"].firstMatch
+        XCTAssertTrue(field.waitForExistence(timeout: 5))
+        field.typeText("Bigger title")
+        app.buttons["Save"].tapWhenReady()
+        XCTAssertTrue(logged { $0["comment"] as? String == "Bigger title" && $0["slide"] as? Int == 1 && $0["place"] as? String == "linkedin" }, "\(log())")
+        XCTAssertTrue(app.staticTexts["Comments on the slides"].waitForExistence(timeout: 5))
+        shot(app, "carousel-1b-slide-comment")
         app.buttons["Add a slide"].tap()
         XCTAssertTrue(logged { ($0["/api/carousel"] as? [String: String])?["action"] == "add" }, "\(log())")
         // Each slide has a layout and the set a look (2026-10-29).

@@ -47,5 +47,37 @@ class Music(unittest.TestCase):
         self.assertEqual(len(t.t_list_music({"query": "chasing"})["sounds"]), 1)
 
 
+    def test_tags(self):
+        t.t_list_music({})
+        song, fx = "Music/26428_Chasing the Truth.mp3", "SFX/47458_Whoosh.mp3"
+        r = t.t_tag_sounds({"files": [song, "@library/audio/" + fx], "add": ["Education", " calm  piano "]})
+        self.assertEqual(r["tags"][song], ["Education", "calm piano"])
+        self.assertEqual(r["all_tags"], {"Education": 2, "calm piano": 2})
+        # Case-insensitive: one tag, first spelling kept; remove drops it.
+        t.t_tag_sounds({"files": [fx], "add": ["education", "Whoosh"], "remove": ["CALM PIANO"]})
+        self.assertEqual(t.load_sound_tags()[fx], ["Education", "Whoosh"])
+        listed = t.t_list_music({"tag": "WHOOSH"})
+        self.assertEqual([x["file"] for x in listed["sounds"]], [fx])
+        self.assertEqual(listed["tags"]["Education"], 2)
+        self.assertEqual([x["file"] for x in t.t_list_music({"query": "whoo"})["sounds"]], [fx])
+        self.assertEqual(next(x for x in listed["sounds"])["tags"], ["Education", "Whoosh"])
+        # tags=[] clears; an empty list is not stored.
+        t.t_tag_sounds({"files": [song], "tags": []})
+        self.assertNotIn(song, json.load(open(t.sound_tags_path())))
+        with self.assertRaises(ValueError):
+            t.t_tag_sounds({"files": ["Music/nope.mp3"], "add": ["x"]})
+        with self.assertRaises(ValueError):
+            t.t_tag_sounds({"files": ["../../etc/hosts"], "add": ["x"]})
+
+    def test_tags_never_overwrite_a_broken_file(self):
+        t.t_list_music({})
+        with open(t.sound_tags_path(), "w") as f:
+            f.write("{broken")
+        self.assertEqual(t.t_list_music({})["tags"], {})
+        with self.assertRaises(ValueError):
+            t.t_tag_sounds({"files": ["SFX/47458_Whoosh.mp3"], "add": ["x"]})
+        self.assertEqual(open(t.sound_tags_path()).read(), "{broken")
+
+
 if __name__ == "__main__":
     unittest.main()

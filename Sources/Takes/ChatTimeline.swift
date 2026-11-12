@@ -47,6 +47,12 @@ enum StepWords {
             calls = []
         }
         for m in tools {
+            if m.isActionNote {
+                flush()
+                out.append(ChatStep(id: m.id, tool: "activity", details: [], count: 1, done: m.done,
+                                    failed: m.failed == true, search: false, run: m.text, finished: m.text, chips: []))
+                continue
+            }
             let (tool, detail) = split(m.text)
             // A failed call stands alone: it is the dead end, not one of the run.
             if let last = calls.last, last.1 == tool, m.failed != true, last.0.failed != true,
@@ -208,13 +214,20 @@ struct StepTimeline: View {
     /// The run ended while on screen: the blue check pops in. An old one shows it still.
     @State private var justFinished = false
 
+    private var activity: Bool { tools.contains(where: \.isActionNote) }
+
+    static func defaultOpen(_ tools: [ChatMessage], active: Bool, latest: Bool) -> Bool {
+        let activity = tools.contains(where: \.isActionNote)
+        return active || tools.contains { !$0.done } || (activity ? tools.contains { $0.failed == true } : latest)
+    }
+
     var body: some View {
-        let steps = StepWords.steps(tools)
-        let working = active || steps.contains { !$0.done }
-        let shown = open ?? (working || latest)
+        let working = active || tools.contains { !$0.done }
+        let shown = open ?? Self.defaultOpen(tools, active: active, latest: latest)
         VStack(alignment: .leading, spacing: 4) {
             header(working: working, shown: shown)
             if shown {
+                let steps = StepWords.steps(tools)
                 VStack(alignment: .leading, spacing: 0) {
                     ForEach(steps) { step in
                         StepRow(step: step, live: working).transition(.stepIn)
@@ -231,8 +244,8 @@ struct StepTimeline: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .animation(.easeOut(duration: 0.35), value: steps.count)
-        .animation(.easeOut(duration: 0.26), value: steps.map(\.done))
+        .animation(.easeOut(duration: 0.35), value: tools.count)
+        .animation(.easeOut(duration: 0.26), value: tools.map(\.done))
         .animation(.easeOut(duration: 0.26), value: working)
         .animation(Theme.motion, value: shown)
         .onChange(of: working) { was, now in if was && !now { justFinished = true } }
@@ -262,7 +275,7 @@ struct StepTimeline: View {
                 } else {
                     HStack(spacing: 0) {
                         Text(doneTitle).font(Theme.sans(12.5, .medium)).foregroundStyle(Theme.muted)
-                        Text(" · \(tools.count) step\(tools.count == 1 ? "" : "s")")
+                        Text(" · \(tools.count) \(activity ? "update" : "step")\(tools.count == 1 ? "" : "s")")
                             .font(Theme.sans(12.5)).foregroundStyle(Theme.faint)
                     }
                     .transition(.labelSwap)
@@ -272,10 +285,11 @@ struct StepTimeline: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .help(shown ? "Hide the steps" : "Show every step")
+        .help(shown ? "Hide the details" : "Show every update and step")
     }
 
     private var doneTitle: String {
+        if activity { return "Activity" }
         guard let start = tools.first?.at, let stop = end ?? tools.last?.at else { return "Worked" }
         return "Worked for \(StepWords.time(stop.timeIntervalSince(start)))"
     }

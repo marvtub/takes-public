@@ -4,6 +4,7 @@ import MLXNN
 
 /// Pinned Gemma4 Conformer; follows the official Transformers masking, including padded queries.
 final class AudioModel {
+    private static let attentionContextLeft = 13
     let dtype: DType
     private let weights: [String:MLXArray]
     private let clips: [String:(Float,Float,Float,Float)]
@@ -12,7 +13,7 @@ final class AudioModel {
         guard let c=root?["audio_config"] as? [String:Any], c["model_type"] as? String == "gemma4_audio",
               c["hidden_size"] as? Int == 1024, c["num_hidden_layers"] as? Int == 12,
               c["num_attention_heads"] as? Int == 8, c["attention_chunk_size"] as? Int == 12,
-              c["attention_context_left"] as? Int == 13, c["attention_context_right"] as? Int == 0,
+              c["attention_context_left"] as? Int == Self.attentionContextLeft, c["attention_context_right"] as? Int == 0,
               c["conv_kernel_size"] as? Int == 5, c["output_proj_dims"] as? Int == 1536,
               c["subsampling_conv_channels"] as? [Int] == [128,32], c["use_clipped_linears"] as? Bool == true,
               c["residual_weight"] as? Double == 0.5, c["rms_norm_eps"] as? Double == 1e-6,
@@ -75,6 +76,10 @@ final class AudioModel {
         f=clinear(silu(clinear(f,p+"ffw_layer_1")),p+"ffw_layer_2")
         return x+norm(clip(f,min:Float(-1e10),max:Float(1e10)),p+"post_layer_norm")*0.5
     }
+    static func attentionAllows(query:Int,key:Int,count:Int,mask:[Int32]) -> Bool {
+        let distance=query-key
+        return query<count && key>=0 && key<count && mask[key]==1 && distance>=0 && distance<attentionContextLeft
+    }
     private func attention(_ x:MLXArray,_ p:String,mask:[Int32]) -> MLXArray {
         let n=x.dim(1),blocks=(n+11)/12,total=blocks*12
         var q=clinear(x,p+"q_proj").asType(.float32).reshaped(1,n,8,128)
@@ -87,14 +92,14 @@ final class AudioModel {
         let key=padded(k,widths:[0,IntOrPair((12,11)),0,0])[0...,indices].transposed(0,3,1,4,2)
         let value=padded(v,widths:[0,IntOrPair((12,11)),0,0])[0...,indices].transposed(0,3,1,2,4)
         let freq=exp(MLXArray(0..<512).asType(.float32)*Float(-log(10000.0)/511))
-        let pos=MLXArray(stride(from:12,through:0,by:-1)).asType(.float32).reshaped(13,1)*freq
-        let rel=linear(concatenated([sin(pos),cos(pos)],axis:-1).asType(dtype),p+"relative_k_proj").reshaped(13,8,128).asType(.float32).transposed(1,2,0)
-        var bd=matmul(q.reshaped(1,8,total,128),rel).reshaped(1,8,blocks,12,13)
+        let pos=MLXArray(stride(from:Self.attentionContextLeft-1,through:0,by:-1)).asType(.float32).reshaped(Self.attentionContextLeft,1)*freq
+        let rel=linear(concatenated([sin(pos),cos(pos)],axis:-1).asType(dtype),p+"relative_k_proj").reshaped(Self.attentionContextLeft,8,128).asType(.float32).transposed(1,2,0)
+        var bd=matmul(q.reshaped(1,8,total,128),rel).reshaped(1,8,blocks,12,Self.attentionContextLeft)
         bd=padded(bd,widths:[0,0,0,0,IntOrPair((0,12))]).reshaped(1,8,blocks,300)[.ellipsis,..<288].reshaped(1,8,blocks,12,24)
         var logits=tanh((matmul(q,key)+bd)/50)*50
         let allowed=(0..<blocks).flatMap { b in (0..<12).flatMap { row in (0..<24).map { column -> Int32 in
-            let query=b*12+row,key=b*12+column-12,dist=query-key
-            return query<n && key>=0 && key<n && mask[key]==1 && dist>=0 && dist<12 ? 1:0
+            let query=b*12+row,key=b*12+column-12
+            return Self.attentionAllows(query:query,key:key,count:n,mask:mask) ? 1:0
         } } }
         let condition=MLXArray(allowed).asType(.bool).reshaped(1,1,blocks,12,24)
         logits=which(condition,logits,MLXArray(Float(-1e9)))

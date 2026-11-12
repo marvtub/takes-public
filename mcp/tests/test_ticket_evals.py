@@ -146,10 +146,11 @@ class TicketEvals(unittest.TestCase):
     # ---- 1b. Page is live and indexed ----
 
     def test_page_live_and_indexed(self):
-        # T-11: /linkedin-video is live but not in Google: its indexing ticket comes first.
+        # T-11: /linkedin-video is live but not in Google: Request indexing comes first.
         c, ok = self.checks(self.good(page="/linkedin-video"))
         self.assertFalse(ok)
-        self.assertEqual(c["Page is live and indexed"]["why"], "/linkedin-video is not in Google yet: its indexing ticket comes first")
+        self.assertEqual(c["Page is live and indexed"]["why"],
+                         "/linkedin-video is not in Google yet: call indexing and Request indexing first")
         # T-9: no page at all.
         c, ok = self.checks(self.good(page=""))
         self.assertFalse(ok)
@@ -164,7 +165,24 @@ class TicketEvals(unittest.TestCase):
         self.assertTrue(c["Page is live and indexed"]["pass"])
         c, _ = self.checks(self.good(page="/linkedin-video", new_page=True))
         self.assertFalse(c["Page is live and indexed"]["pass"])  # live already: it is an edit, and not indexed
-        self.assertEqual(c["Page is live and indexed"]["why"], "/linkedin-video is not in Google yet: its indexing ticket comes first")
+        self.assertEqual(c["Page is live and indexed"]["why"],
+                         "/linkedin-video is not in Google yet: call indexing and Request indexing first")
+
+    def test_found_step_for_a_held_page_passes(self):
+        # 2026-11-05 (U10 review): indexing holds a page 14 days after an ask and says to add links with a found step.
+        # That step names the held page, so the page check lets it past; any other lever still waits.
+        step = self.good(lever="found", page="/linkedin-video", link_from=["/teleprompter"])
+        c, _ = self.checks(step)
+        self.assertFalse(c["Page is live and indexed"]["pass"])  # never asked: ask first
+        t.t_indexing({"requested": ["/linkedin-video"], "at": "2026-10-19"})
+        c, _ = self.checks(step)
+        self.assertTrue(c["Page is live and indexed"]["pass"])
+        self.assertIn("asked Oct 19", c["Page is live and indexed"]["why"])
+        c, _ = self.checks(self.good(page="/linkedin-video"))
+        self.assertFalse(c["Page is live and indexed"]["pass"])  # an answer step waits for Google
+        self.now = datetime(2026, 11, 3, 10, 0).astimezone()  # 15 days after the ask: ask again first
+        c, _ = self.checks(step)
+        self.assertFalse(c["Page is live and indexed"]["pass"])
 
     def test_daily_findings_keeps_the_page_rows(self):
         os.remove(t.work_path("pages.json"))

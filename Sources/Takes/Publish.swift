@@ -101,6 +101,7 @@ extension SessionDoc {
     func trashTakeFiles(_ files: Set<String>) {
         for t in meta.takes where files.contains(t.file) {
             try? FileManager.default.trashItem(at: fileURL(t), resultingItemURL: nil)
+            try? FileManager.default.trashItem(at: CursorLog.file(for: fileURL(t)), resultingItemURL: nil)
         }
         meta.takes.removeAll { files.contains($0.file) }
         save()

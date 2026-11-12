@@ -1,0 +1,13 @@
+{
+  "name": "Screen zoom",
+  "description": "The screen recording zooms in before each click and the view follows the pointer, then eases back out. The pointer zooms with the screen and can be the Mac arrow, a white dot or your own picture, at any size.",
+  "when": "Screen demos where small buttons and text matter: tutorials, product walkthroughs, bug reports. Needs a screen take recorded with the cursor log (take-NN-screen.events.json) for auto and for following the pointer.",
+  "needs": [
+    "a cut that shows a screen take (kind: screen)",
+    "auto: true, or your own zooms (spans) on what the voice talks about",
+    "optional: how close (level), the pointer's look and size"
+  ],
+  "kind": "Full frame",
+  "shape": "any",
+  "shipped": true
+}

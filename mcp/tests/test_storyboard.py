@@ -201,6 +201,25 @@ class Storyboard(Base):
         t.put_clip(y, "generated/a.mp4")
         self.assertEqual(y, {"video": "generated/a.mp4"})
 
+    def test_every_storyboard_writer_holds_the_edit_lock(self):
+        """A clip landing through edit_shot (or the app's pick) while set_storyboard or a sketch lands is not lost."""
+        lock = os.path.join(self.s, "storyboard", ".edit")
+        seen = []
+        read, write = t.read_storyboard, t.write_storyboard
+
+        def check(fn):
+            def wrapped(*a):
+                seen.append((fn.__name__, t.lock_held(lock)))
+                return fn(*a)
+            return wrapped
+        with mock.patch.object(t, "read_storyboard", check(read)), mock.patch.object(t, "write_storyboard", check(write)):
+            t.t_set_storyboard({"session": self.s, "shots": [{"say": "Hi.", "sketch": "A man at a desk."}]})
+            self.assertEqual(set(seen), {("read_storyboard", True), ("write_storyboard", True)})
+            seen.clear()
+            t.sketch_run(self.s, retry=True)
+        self.assertIn("image", read(self.s)["shots"][0])
+        self.assertEqual({held for name, held in seen if name == "write_storyboard"}, {True})
+
 
 class StoryboardIds(Base):
     def test_ids_stay_and_sections_order_the_shots(self):

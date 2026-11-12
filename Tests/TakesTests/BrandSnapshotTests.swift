@@ -294,6 +294,46 @@ struct BrandSnapshotTests {
         }
     }
 
+    /// Comments > Library > How it learns (2026-11-01), filled and before the first run.
+    @MainActor @Test func learningTab() throws {
+        guard let dir = ProcessInfo.processInfo.environment["TAKES_SNAPSHOT"] else { return }
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().appending(path: "../../assets")
+        for f in (try? FileManager.default.contentsOfDirectory(at: root.appending(path: "fonts"), includingPropertiesForKeys: nil)) ?? []
+        where f.pathExtension == "ttf" { CTFontManagerRegisterFontsForURL(f as CFURL, .process, nil) }
+        for filled in [true, false] {
+            let lib = FileManager.default.temporaryDirectory.appending(path: "learning-\(UUID().uuidString)")
+            try FileManager.default.createDirectory(at: CopilotStore.suggestions(lib), withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: lib) }
+            if filled {
+                let weeks = [("2026-09-28", 0.22, 0.25, 0.81), ("2026-10-05", 0.69, 0.03, 0.87), ("2026-10-12", 0.13, 0.0, 0.82),
+                             ("2026-10-19", 0.4, 0.17, 0.91), ("2026-10-26", 0.0, 0.35, 0.74), ("2026-11-02", 0.5, 0.1, 0.9)]
+                    .map { #"{"week": "\#($0.0)", "decided": 10, "approved": 3, "edited": 3, "bad_comment": 2, "wrong_post": 1, "expired": 0, "as_is": \#($0.1), "bad": \#($0.2), "kept": \#($0.3)}"# }
+                let json = """
+                {"updated": "2026-11-02T12:00:00Z", "waiting": 0, "learned": 108, "weeks": [\(weeks.joined(separator: ","))],
+                 "gate": {"phrases": 6, "bad_drafts": 49, "caught": 5, "his_blocked": 0},
+                 "recent": [{"at": "2026-11-01T12:00:00Z", "outcome": "rule", "text": "Warm and plain beats dry and clever. He declines compressed one-liners that sound smart or cynical."},
+                            {"at": "2026-11-01T12:00:00Z", "outcome": "phrase", "text": "everyone skips", "why": "He declined or flagged a draft with these words."}],
+                 "judge": {"agree": 36, "of": 60, "good": 30, "bad": 30, "kappa": 0.2, "trusted": false}}
+                """
+                try json.write(to: CommentEval.url(lib), atomically: true, encoding: .utf8)
+            }
+            let store = CopilotStore()
+            store.scan(lib)
+            for (name, appearance) in [("light", NSAppearance.Name.aqua), ("dark", .darkAqua)] {
+                let host = NSHostingView(rootView: CopilotLearning(store: store).environment(\.colorScheme, name == "dark" ? .dark : .light)
+                    .frame(width: 760, height: 900).background(Theme.paper))
+                host.appearance = NSAppearance(named: appearance)
+                let win = NSWindow(contentRect: NSRect(x: -3000, y: -3000, width: 760, height: 900), styleMask: .borderless, backing: .buffered, defer: false)
+                win.contentView = host
+                for _ in 0..<30 { host.layoutSubtreeIfNeeded(); RunLoop.main.run(until: Date().addingTimeInterval(0.1)) }
+                let rep = try #require(host.bitmapImageRepForCachingDisplay(in: host.bounds))
+                host.cacheDisplay(in: host.bounds, to: rep)
+                let data = try #require(rep.representation(using: .png, properties: [:]))
+                try data.write(to: URL(fileURLWithPath: dir).appending(path: "learning-\(filled ? "filled" : "empty")-\(name).png"))
+            }
+        }
+    }
+
     /// The Skipped tab: flat rows, the buttons hidden until the pointer comes.
     @MainActor @Test func skippedTab() throws {
         guard let dir = ProcessInfo.processInfo.environment["TAKES_SNAPSHOT"] else { return }

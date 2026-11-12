@@ -695,7 +695,7 @@ private struct ReviewCard: View {
                     .keyboardShortcut(noteFocused ? nil : KeyboardShortcut(KeyEquivalent(Character("\(i + 1)")), modifiers: []))
                 }
             }
-            AskBox(placeholder: "Or say why and press Return to decline", text: $note, focus: $noteFocused,
+            AskBox(placeholder: wrongPost ? "Or say why and press Return to decline" : "Or say which words or why, and press Return", text: $note, focus: $noteFocused,
                    send: { if !note.trimmingCharacters(in: .whitespaces).isEmpty { decline(s, .other) } }, cancel: { mode = .none; note = "" }, autofocus: false)
             Text(typed ? "Return declines with this note. A reason button adds the reason to it." : "Pick a reason, or type why. Esc closes.")
                 .font(Theme.sans(11.5)).foregroundStyle(Theme.faint)
@@ -705,7 +705,7 @@ private struct ReviewCard: View {
     // "other" declines at once too, a note is optional (2026-10-09): it used to only focus the
     // note box, so the click looked like it did nothing.
     private func decline(_ s: Suggestion, _ r: DeclineReason) {
-        store.decline(s, wrongPost: wrongPost, reason: r, note: note)
+        store.decline(s, wrongPost: wrongPost, reason: r, note: note, variant: pick)
         mode = .none
         note = ""
     }
@@ -1100,6 +1100,7 @@ private struct PostedMetric: View {
     let label: String
     let value: Double
     var decimals = 0
+    var suffix = ""
     let note: String
     @State private var shown = 0.0
     @State private var hover = false
@@ -1113,7 +1114,7 @@ private struct PostedMetric: View {
                     .scaleEffect(hover ? 1.12 : 1)
                 SectionLabel(text: label)
             }
-            Text(String(format: "%.\(decimals)f", value * shown))
+            Text(String(format: "%.\(decimals)f", value * shown) + suffix)
                 .font(Theme.display(32)).foregroundStyle(Theme.ink)
                 .contentTransition(.numericText(value: value * shown))
                 .monospacedDigit()
@@ -1135,7 +1136,8 @@ private struct PostedMetric: View {
 
 /// The files each draft run reads, as a list; the one picked opens beside it to read, edit and
 /// comment on, like a file in the Assets library. Before (2026-10-04), the lessons filled the
-/// tab and the target list and style guide opened in another app.
+/// tab and the target list and style guide opened in another app. The style guide left the list
+/// on 2026-11-07: the lessons, learned from his signals, replace it (it said 3-6 sentences).
 struct CopilotDoc: Identifiable, Hashable {
     let id: String
     let title: String
@@ -1149,8 +1151,6 @@ struct CopilotDoc: Identifiable, Hashable {
             CopilotDoc(id: "lessons", title: "Lessons", note: "Your rules, read first", url: CopilotStore.lessons(root)),
             CopilotDoc(id: "targets", title: "Target list", note: "Whose posts to find",
                        url: li.appending(path: "commenting-targets.md")),
-            CopilotDoc(id: "style", title: "Style guide", note: "How you sound",
-                       url: li.appending(path: "comment-style-guide.md")),
             CopilotDoc(id: "best", title: "Best comments", note: "Comments that did well",
                        url: li.appending(path: "comment-library.md")),
         ]
@@ -1174,6 +1174,7 @@ struct CopilotLibrary: View {
     @State private var tokens: [String: Int] = [:]
 
     private static let decisions = "decisions"
+    private static let learning = "learning"
 
     var body: some View {
         HStack(spacing: 0) {
@@ -1183,6 +1184,8 @@ struct CopilotLibrary: View {
                 Group {
                     if pick == Self.decisions {
                         CopilotDecisions(store: store)
+                    } else if pick == Self.learning {
+                        CopilotLearning(store: store)
                     } else if let d = CopilotDoc.all(root).first(where: { $0.id == pick }) ?? CopilotDoc.all(root).first {
                         CopilotDocView(doc: d, root: CopilotStore.folder(root)) { tokens[d.id] = $0 }
                             .id(d.id)
@@ -1206,6 +1209,7 @@ struct CopilotLibrary: View {
             }
             row(Self.decisions, icon: "checklist", "Your decisions", "What you changed",
                 tokens[Self.decisions])
+            row(Self.learning, icon: "chart.line.uptrend.xyaxis", "How it learns", "Is it getting better", nil)
             Spacer()
         }
         .padding(16)
@@ -1273,9 +1277,15 @@ private struct CopilotDocView: View {
                 if let q = c.quote { reveal = (q, (reveal?.token ?? 0) + 1) }
             }
             Group {
-                if reading {
+                if reading, text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    // An empty file read as a blank page looked broken: say so, and how to start it.
+                    Text("Nothing here yet. Switch to Edit to write the first lines.")
+                        .font(Theme.sans(13)).foregroundStyle(Theme.muted)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading).padding(24)
+                } else if reading {
                     MarkdownReader(text: text, size: 14.5, highlights: comments.filter(\.open).compactMap(\.quote),
-                                   reveal: reveal, onSelect: { selection = $0 }, onComment: start)
+                                   reveal: reveal, onSelect: { selection = $0 }, onComment: start,
+                                   faces: doc.id == "targets" ? root.appending(path: "targets") : nil)
                 } else {
                     Prompter(text: $text, contentKey: doc.url.path, fontSize: 15, scrolling: false, speed: 0,
                              editable: true, resetToken: 0,
@@ -1328,7 +1338,8 @@ private struct CopilotDocView: View {
         HStack(spacing: 10) {
             VStack(alignment: .leading, spacing: 1) {
                 Text(doc.title).font(Theme.sans(14, .semibold))
-                Text("\(doc.url.lastPathComponent) · about \(TokenCount.label(TokenCount.of(text))) tokens")
+                Text(text.isEmpty ? "\(doc.url.lastPathComponent) · empty"
+                     : "\(doc.url.lastPathComponent) · about \(TokenCount.label(TokenCount.of(text))) tokens")
                     .font(Theme.mono(10.5)).foregroundStyle(Theme.faint).help(doc.url.path)
             }
             Spacer()
@@ -1437,6 +1448,154 @@ private struct CopilotDecisions: View {
                 }
                 .builderBorder()
             }
+        }
+    }
+}
+
+/// Is the copilot getting better (2026-11-01)? The numbers from comments/eval.json: how many drafts
+/// The user takes as is per week, how much of a draft his edits keep, what waits to be learned, how
+/// the replay judge agrees with his past decisions, and the newest lessons. Read only.
+struct CopilotLearning: View {
+    @ObservedObject var store: CopilotStore
+    @State private var eval: CommentEval?
+    @State private var loaded = false
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                if let e = eval {
+                    content(e)
+                } else if loaded {
+                    BoardEmpty(badge: "chart.line.uptrend.xyaxis", title: "Nothing measured yet",
+                               text: "The next Find learns your decisions first and fills this in: drafts taken as is per week, what your edits change, and the newest lessons.")
+                }
+            }
+            .frame(maxWidth: 680, alignment: .leading)
+            .padding(20)
+        }
+        // A small file: read it when the tab shows and when a decision changes the suggestions.
+        .onAppear(perform: reload)
+        .onChange(of: store.items) { reload() }
+    }
+
+    private func reload() {
+        eval = store.root.flatMap(CommentEval.load)
+        loaded = true
+    }
+
+    @ViewBuilder private func content(_ e: CommentEval) -> some View {
+        Text("Every edit, decline and note is learned before the next draft. Each run of the copilot updates these numbers.")
+            .font(Theme.sans(11.5)).foregroundStyle(Theme.faint)
+            .fixedSize(horizontal: false, vertical: true)
+        HStack(spacing: 12) {
+            let now = e.asIsNow, before = e.asIsBefore
+            PostedMetric(index: 0, icon: "checkmark", tint: Theme.accent, label: "taken as is · last week",
+                         value: (now?.asIs ?? 0) * 100, suffix: "%",
+                         note: before.flatMap(\.asIs).map { "was \(Int(($0 * 100).rounded()))% before" } ?? "of the drafts you approved")
+            PostedMetric(index: 1, icon: "pencil", tint: Theme.accent, label: "kept by your edits",
+                         value: (now?.kept ?? 0) * 100, suffix: "%", note: "of each draft you approved")
+            PostedMetric(index: 2, icon: "tray", tint: e.waiting > 0 ? Theme.warn : Theme.accent, label: "waiting to learn",
+                         value: Double(e.waiting), note: "\(e.learned) learned so far")
+        }
+        if e.weeks.count > 1 { chart(e.weeks) }
+        checks(e)
+        if !e.recent.isEmpty {
+            VStack(alignment: .leading, spacing: 8) {
+                SectionLabel(text: "newest lessons")
+                ForEach(e.recent) { r in
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack(spacing: 6) {
+                            Tag(text: r.outcome == "phrase" ? "phrase" : "lesson", accent: r.outcome == "phrase")
+                            if let at = r.at, let d = ISO8601DateFormatter().date(from: at) {
+                                Text(d.formatted(.dateTime.month(.abbreviated).day())).font(Theme.mono(10.5)).foregroundStyle(Theme.faint)
+                            }
+                        }
+                        Text(r.text ?? "").font(Theme.sans(12.5)).foregroundStyle(Theme.ink)
+                            .fixedSize(horizontal: false, vertical: true)
+                        if r.outcome == "phrase", let why = r.why {
+                            Text(why).font(Theme.sans(11.5)).foregroundStyle(Theme.muted).lineLimit(2)
+                        }
+                    }
+                    .builderBorder()
+                }
+            }
+        }
+    }
+
+    /// Taken as is (bars) and declined as a bad comment (line), per week.
+    private func chart(_ weeks: [CommentEval.Week]) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 14) {
+                SectionLabel(text: "per week")
+                Spacer()
+                key(Theme.accent.opacity(0.55), "taken as is", line: false)
+                key(Theme.warn, "bad comment", line: true)
+            }
+            Chart {
+                ForEach(weeks) { w in
+                    if let d = w.date {
+                        BarMark(x: .value("Week", d, unit: .weekOfYear), y: .value("As is", (w.asIs ?? 0) * 100))
+                            .foregroundStyle(Theme.accent.opacity(w == weeks.last ? 0.75 : 0.45))
+                            .cornerRadius(3)
+                    }
+                }
+                ForEach(weeks) { w in
+                    if let d = w.date, let b = w.bad {
+                        LineMark(x: .value("Week", d.addingTimeInterval(3.5 * 86400)), y: .value("Bad", b * 100))
+                            .foregroundStyle(Theme.warn)
+                            .lineStyle(StrokeStyle(lineWidth: 2, lineCap: .round))
+                            .interpolationMethod(.monotone)
+                    }
+                }
+            }
+            .chartYScale(domain: 0...100)
+            .chartYAxis {
+                AxisMarks(position: .leading, values: [0, 50, 100]) { v in
+                    AxisGridLine().foregroundStyle(Theme.border)
+                    AxisValueLabel { Text("\(v.as(Int.self) ?? 0)%").foregroundStyle(Theme.muted) }
+                }
+            }
+            .chartXAxis {
+                AxisMarks(values: .stride(by: .weekOfYear)) { _ in
+                    AxisValueLabel(format: .dateTime.month(.abbreviated).day())
+                }
+            }
+            .frame(height: 160)
+        }
+        .font(Theme.mono(10))
+        .card(padding: 16)
+    }
+
+    private func checks(_ e: CommentEval) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            SectionLabel(text: "checks")
+            line("checkmark.seal", judgeText(e.judge))
+            if let g = e.gate {
+                line("text.badge.xmark", "Phrase gate: \(g.phrases) \(g.phrases == 1 ? "phrase" : "phrases"). It turns down \(g.caught) of \(g.badDrafts) drafts you declined, and \(g.hisBlocked) of your own comments.")
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .card(padding: 14)
+    }
+
+    private func judgeText(_ j: CommentEval.Judge?) -> String {
+        guard let j, j.of > 0 else { return "Replay judge: not run yet. It checks the lessons against your past decisions." }
+        let k = j.kappa.map { String(format: "%.2f", $0) } ?? "–"
+        return "Replay judge: agrees with \(j.agree) of your \(j.of) past decisions (kappa \(k)). "
+            + (j.trusted ? "Trusted: a lesson that makes it agree less is refused." : "Not trusted yet: it needs kappa 0.6 with 8 good and 8 bad.")
+    }
+
+    private func line(_ icon: String, _ text: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Image(systemName: icon).font(.system(size: 11)).foregroundStyle(Theme.muted).frame(width: 16)
+            Text(text).font(Theme.sans(12.5)).foregroundStyle(Theme.ink).fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private func key(_ color: Color, _ text: String, line: Bool) -> some View {
+        HStack(spacing: 5) {
+            RoundedRectangle(cornerRadius: 1).fill(color).frame(width: line ? 12 : 7, height: line ? 2.5 : 9)
+            Text(text).font(Theme.mono(10)).foregroundStyle(Theme.muted)
         }
     }
 }

@@ -218,6 +218,8 @@ struct VerticalCard: View {
     var photos: ((VerticalPlace, CGFloat) -> AnyView)? = nil
     /// Under the card while the photos are on: what to know before posting them.
     var notes: [String] = []
+    /// A plugin's part of the card, under "Goes to" (Plugins.vertical: the admin trial reels).
+    var extra: AnyView? = nil
     @AppStorage("verticalPreview") private var previewRaw = VerticalPlace.tiktok.rawValue
     @AppStorage("linkedinName") private var name = "You"
     /// The app's own mode: the card below draws light like the feeds, the empty frame does not.
@@ -301,6 +303,10 @@ struct VerticalCard: View {
             }
             Divider()
             goesTo.padding(.horizontal, 20).padding(.vertical, 16)
+            if let extra {
+                Divider()
+                extra.padding(.horizontal, 20).padding(.vertical, 16)
+            }
             ForEach(notes, id: \.self) { n in
                 HStack(alignment: .top, spacing: 10) {
                     Image(systemName: "exclamationmark.circle.fill").foregroundStyle(Theme.warn)

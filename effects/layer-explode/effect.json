@@ -1,0 +1,17 @@
+{
+  "name": "Layer explode",
+  "description": "The shot shrinks into a card, turns in 3D on a dark ground, and comes apart into its layers like glass panes: the room, the title, the speaker, the sound. Each pane has a thin frame and a label, and the waveform plays along. Then the panes slide back and the card fills the frame.",
+  "when": "When you explain how a video or a design is built: 'every video is just layers'.",
+  "needs": [
+    "the title (two short lines)",
+    "the pane labels",
+    "the cut time where it starts",
+    "a cutout of the speaker (made in the steps)",
+    "a clean plate: the room without the speaker (plate.png)",
+    "the waveform (wave.js, made in the steps)"
+  ],
+  "kind": "Cut-out",
+  "length_s": 4,
+  "shape": "any",
+  "shipped": true
+}

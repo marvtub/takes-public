@@ -1,0 +1,14 @@
+{
+  "name": "Dolly zoom",
+  "description": "The 'Vertigo' move: the speaker stays the same size while the room behind them grows, as if the camera dollied back while the lens zoomed in. Then it snaps back.",
+  "when": "On a realisation or a shock: 'and then it hit me'.",
+  "needs": [
+    "the cut time where it starts",
+    "a cutout of the speaker (made in the steps)",
+    "a clean plate: the room without the speaker (plate.png)"
+  ],
+  "kind": "Cut-out",
+  "length_s": 2,
+  "shape": "any",
+  "shipped": true
+}

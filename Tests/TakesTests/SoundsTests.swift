@@ -48,6 +48,7 @@ struct SoundsTests {
             let u = URL(fileURLWithPath: "/x")
             #expect(!SoundsPane.isEffect(Sound(url: u, group: "Music", rel: "Music/a.mp3")))
             #expect(SoundsPane.isEffect(Sound(url: u, group: "SFX", rel: "SFX/whoosh.mp3")))
+            #expect(!SoundsPane.isEffect(Sound(url: u, group: "Made", rel: "Made/Piano v1.mp3")))
         }
     }
 
@@ -70,4 +71,37 @@ struct SoundsTests {
         #expect(b.contains("edits/a-v2.mp4 at 0:12") && b.contains("12.4 s") && b.contains("_library/audio/SFX/1_Whoosh.mp3"))
         #expect(SoundsPane.ask(fx, video: nil, session: session).contains("where it fits"))
     }
+
+    /// Made is always a tab, last, even before the first song: it is where you make one.
+    @Test func madeIsAlwaysATab() {
+        let u = URL(fileURLWithPath: "/x")
+        #expect(SoundsPane.groups([]) == ["Made"])
+        let lib = [Sound(url: u, group: "Made", rel: "Made/a.mp3"), Sound(url: u, group: "SFX", rel: "SFX/b.mp3"),
+                   Sound(url: u, group: "Music", rel: "Music/c.mp3"), Sound(url: u, group: "Loops", rel: "Loops/d.mp3")]
+        #expect(SoundsPane.groups(lib) == ["Music", "SFX", "Loops", "Made"])
+    }
+
+    /// Make asks the chat to run make_music with the words as typed.
+    @Test func makeAsksTheChat() {
+        let a = SoundsPane.makeAsk("piano over soft drum and bass")
+        #expect(a.contains("make_music") && a.contains("piano over soft drum and bass") && a.contains("credits"))
+    }
+
+    /// Tags (2026-11-08): one hidden file, shared with the server's tag_sounds.
+    @Test func tagsMergeSaveAndNeverOverwriteABrokenFile() throws {
+        #expect(SoundTags.clean("  calm   piano \n") == "calm piano")
+        #expect(SoundTags.clean(String(repeating: "a", count: 50)).count == 32)
+        #expect(SoundTags.merge(["Education"], add: ["education", "Calm"]) == ["Education", "Calm"])
+        #expect(SoundTags.merge(["Education", "Calm"], remove: ["CALM"]) == ["Education"])
+        #expect(SoundTags.merge([], add: ["education"], known: ["Education"]) == ["Education"])
+        #expect(SoundTags.counts([["Education", "Calm"], ["education"]]).map(\.name) == ["Education", "Calm"])
+        let dir = try Self.temp()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        #expect(SoundTags.load(dir) == [:])
+        #expect(SoundTags.save(["Made/a v1.mp3": ["Education"], "SFX/b.mp3": []], to: dir))
+        #expect(SoundTags.load(dir) == ["Made/a v1.mp3": ["Education"]])  // empty lists are not stored
+        try Data("{broken".utf8).write(to: SoundTags.url(dir))
+        #expect(SoundTags.load(dir) == nil)
+    }
+
 }

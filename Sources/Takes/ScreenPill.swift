@@ -200,11 +200,15 @@ private enum Pill {
 
 struct ScreenPillView: View {
     @Environment(AppModel.self) private var app
+    /// Note shortcuts in screen takes (KeyLog.swift). Off by default, remembered.
+    @AppStorage(KeyLog.defaultsKey) private var keys = false
+    /// Why ⌨ did not turn on, for a few seconds.
+    @State private var keysNote: String?
 
     var body: some View {
         HStack(spacing: 2) {
             switch app.phase {
-            case .idle: idle
+            case .idle: if let keysNote { note(keysNote) } else { idle }
             case .warming, .countdown, .starting: counting
             case .recording(let since): recording(since)
             case .finishing:
@@ -237,12 +241,38 @@ struct ScreenPillView: View {
         cameraMenu
         mic
         PillScreenMenu(screen: app.screen, on: app.mode.hasScreen)
+        round("keyboard", help: keys ? "Shortcuts: noted in screen takes (typing only as when, never the keys)" : "Shortcuts: note ⌘ keys and special keys in screen takes, and when you type (for the zoom)",
+              on: keys && app.mode.hasScreen) { toggleKeys() }
+            .opacity(app.mode.hasScreen ? 1 : 0.4)
+            .disabled(!app.mode.hasScreen)
         recordButton
         Button { ScreenPill.shared.hide() } label: {
             Image(systemName: "xmark").font(.system(size: 9, weight: .bold)).foregroundStyle(Pill.dim)
                 .frame(width: 22, height: 38).contentShape(Rectangle())
         }
         .buttonStyle(.plain).help("Close the pill: back to Takes (⌥⌘R)")
+    }
+
+    /// The first turn-on asks for Input Monitoring once. Not allowed: it stays off and says why.
+    private func toggleKeys() {
+        if keys { keys = false; return }
+        if KeyLog.ask() { keys = true; return }
+        keysNote = "Shortcuts need Input Monitoring for Takes"
+        Task { try? await Task.sleep(for: .seconds(6)); keysNote = nil }
+    }
+
+    private func note(_ text: String) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: "keyboard").font(.system(size: 13, weight: .semibold)).foregroundStyle(Pill.dim)
+            Text(text).font(Theme.sans(12.5, .medium)).foregroundStyle(Pill.ink).lineLimit(1)
+            Button("Settings") {
+                NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent")!)
+                keysNote = nil
+            }
+            .buttonStyle(.plain).font(Theme.sans(12.5, .semibold)).foregroundStyle(Theme.accent)
+            round("xmark", help: "Close", on: false) { keysNote = nil }
+        }
+        .padding(.leading, 12)
     }
 
     private var counting: some View {
@@ -272,6 +302,7 @@ struct ScreenPillView: View {
                 }
                 .frame(width: 52, alignment: .leading).padding(.leading, 6)
             }
+            PillKeysLit(screen: app.screen)
             round("arrow.counterclockwise", help: "Start over: this take goes away and the count runs again", on: false) {
                 app.restartTake()
             }
@@ -344,6 +375,18 @@ struct ScreenPillView: View {
         }
         .buttonStyle(.plain)
         .help(help)
+    }
+}
+
+/// ⌨ stays lit while the take notes shortcuts.
+private struct PillKeysLit: View {
+    @ObservedObject var screen: ScreenRecorder
+    var body: some View {
+        if screen.keysLive {
+            Image(systemName: "keyboard").font(.system(size: 13, weight: .semibold)).foregroundStyle(Pill.ink)
+                .frame(width: 38, height: 38).background(Pill.on, in: Circle())
+                .help("Noting shortcuts and when you type (never the keys)")
+        }
     }
 }
 

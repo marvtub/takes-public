@@ -1,0 +1,14 @@
+{
+  "name": "Head stack",
+  "description": "Small cream name tags drop from above with a speed blur and pile up on the speaker's head, each a little crooked. Some land on the shoulder. The pile rides on the head as it moves. Then a gust blows them all off.",
+  "when": "When you list many names, tools or labels people put on you: 'founder, editor, coach...'.",
+  "needs": [
+    "the tags, each with where it lands (head or shoulder)",
+    "the cut time where it starts",
+    "a cutout of the speaker, for the head track (made in the steps)"
+  ],
+  "kind": "Cut-out",
+  "length_s": 4,
+  "shape": "any",
+  "shipped": true
+}

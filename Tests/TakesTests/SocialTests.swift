@@ -1,4 +1,5 @@
 import Foundation
+import SwiftUI
 import Testing
 @testable import Takes
 
@@ -41,5 +42,83 @@ struct SocialTests {
         let f = DateFormatter(); f.dateFormat = "yyyy-MM-dd"
         let now = try #require(f.date(from: "2026-09-29"))
         #expect(Signal.daysOld("2026-09-27", now: now) == 2 && Signal.daysOld("2026-09-16", now: now) == 13)
+    }
+
+    /// X followers are optional: files from before 2026-11-05 have none.
+    @Test func xFollowersAreOptional() throws {
+        let old = try JSONDecoder().decode(SocialData.self, from: Data(Self.sample.utf8))
+        #expect(old.x_followers == nil)
+        let new = Self.sample.replacingOccurrences(of: #""top_x":[]"#,
+            with: #""top_x":[],"x_followers":[{"date":"2026-11-04","value":432},{"date":"2026-11-05","value":433}]"#)
+        let d = try JSONDecoder().decode(SocialData.self, from: Data(new.utf8))
+        #expect(d.x_followers?.last?.value == 433)
+    }
+
+    /// The YouTube channel decodes when the file has it; older files have none.
+    @Test func youtubeDecodes() throws {
+        let yt = #""youtube":{"subscribers":2449,"views":219048,"videos":85,"through":"2026-11-04","#
+            + #""subscriber_days":[{"date":"2026-11-04","value":2449}],"daily_views":[{"date":"2026-11-04","value":125}],"#
+            + #""monthly":[{"month":"2026-11","value":589}],"top":[],"recent":[{"title":"A","url":"","date":"2026-11-03","#
+            + #""reach":528,"engagements":4,"rate":0.8}]}"#
+        let d = try JSONDecoder().decode(SocialData.self, from: Data(Self.sample.replacingOccurrences(
+            of: #""top_x":[]"#, with: #""top_x":[],"# + yt).utf8))
+        #expect(d.youtube?.subscribers == 2449 && d.youtube?.recent.first?.reach == 528)
+    }
+
+    /// The X board with the real social.json, to look at. `TAKES_SNAPSHOT=/some/dir`.
+    @MainActor @Test func xBoardSnapshot() throws {
+        guard let dir = ProcessInfo.processInfo.environment["TAKES_SNAPSHOT"] else { return }
+        let root = FileManager.default.homeDirectoryForCurrentUser.appending(path: "Movies/Takes")
+        let data = try #require(SocialData.read(root))
+        let size = CGSize(width: 1000, height: 5200)
+        for (platform, (mode, dark)) in ["", "LinkedIn", "X", "YouTube"].flatMap({ p in [("dark", true), ("light", false)].map { (p, $0) } }) {
+            let view = ScrollView { SignalPage(data: data, platform: platform) { EmptyView() }.padding(24) }
+            let host = NSHostingView(rootView: AnyView(view.frame(width: size.width, height: size.height).background(Theme.canvas)
+                .environment(\.colorScheme, dark ? .dark : .light)))
+            host.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
+            host.frame = NSRect(origin: .zero, size: size)
+            let win = NSWindow(contentRect: NSRect(x: -4000, y: -4000, width: size.width, height: size.height),
+                               styleMask: .borderless, backing: .buffered, defer: false)
+            win.contentView = host
+            RunLoop.main.run(until: Date().addingTimeInterval(1.5))
+            host.layoutSubtreeIfNeeded()
+            let rep = try #require(host.bitmapImageRepForCachingDisplay(in: host.bounds))
+            host.cacheDisplay(in: host.bounds, to: rep)
+            try #require(rep.representation(using: .png, properties: [:]))
+                .write(to: URL(fileURLWithPath: dir).appending(path: "\(platform.isEmpty ? "all" : platform.lowercased())-board-\(mode).png"))
+        }
+    }
+
+    /// The whole board with the top bar and the posts table, in both looks.
+    @MainActor @Test func performanceSnapshot() throws {
+        guard let dir = ProcessInfo.processInfo.environment["TAKES_SNAPSHOT"] else { return }
+        let root = FileManager.default.homeDirectoryForCurrentUser.appending(path: "Movies/Takes")
+        let board = PerfBoard()
+        board.scanNow(root)
+        let size = CGSize(width: 1100, height: 6400)
+        UserDefaults.standard.set("", forKey: "perfPlatform")
+        for (mode, dark) in [("dark", true), ("light", false)] {
+            let view = PerformanceView(board: board, root: root) { _ in }
+            let host = NSHostingView(rootView: AnyView(view.frame(width: size.width, height: size.height)
+                .environment(\.colorScheme, dark ? .dark : .light)))
+            host.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
+            host.frame = NSRect(origin: .zero, size: size)
+            let win = NSWindow(contentRect: NSRect(x: -4000, y: -4000, width: size.width, height: size.height),
+                               styleMask: .borderless, backing: .buffered, defer: false)
+            win.contentView = host
+            RunLoop.main.run(until: Date().addingTimeInterval(1.5))
+            host.layoutSubtreeIfNeeded()
+            let rep = try #require(host.bitmapImageRepForCachingDisplay(in: host.bounds))
+            host.cacheDisplay(in: host.bounds, to: rep)
+            try #require(rep.representation(using: .png, properties: [:]))
+                .write(to: URL(fileURLWithPath: dir).appending(path: "performance-\(mode).png"))
+        }
+    }
+
+    @Test func postsTablePages() {
+        #expect(PerformanceView.pages(0) == 1)
+        #expect(PerformanceView.pages(10) == 1)
+        #expect(PerformanceView.pages(11) == 2)
+        #expect(PerformanceView.pages(21) == 3)
     }
 }

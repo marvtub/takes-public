@@ -131,6 +131,7 @@ struct PastChatsSheet: View {
     let close: () -> Void
     @State private var items: [PastChat]?
     @State private var failed: String?
+    @State private var deletions = PastChatDeletionState()
 
     var body: some View {
         VStack(spacing: 0) {
@@ -175,6 +176,7 @@ struct PastChatsSheet: View {
                 Image(systemName: "trash").font(.system(size: 13, weight: .medium)).foregroundStyle(Palette.faint).frame(width: 40, height: 44)
             }
             .buttonStyle(.press)
+            .disabled(deletions.contains(p.id))
             .accessibilityLabel("Delete \(p.title)")
         }
     }
@@ -203,8 +205,18 @@ struct PastChatsSheet: View {
     }
 
     private func forget(_ p: PastChat) {
+        guard deletions.begin(p.id) else { return }
         Brand.select()
-        withAnimation(Brand.quick) { items?.removeAll { $0.id == p.id } }
-        Task { if let e = await model.tryAct("/api/chat/history", ["id": sessionID], ["action": "forget", "file": p.file]) { failed = e } }
+        failed = nil
+        Task {
+            if let e = await model.tryAct("/api/chat/history", ["id": sessionID], ["action": "forget", "file": p.file]) {
+                deletions.finish(p.id, succeeded: false, items: &items, itemID: \.id)
+                failed = e
+            } else {
+                withAnimation(Brand.quick) {
+                    deletions.finish(p.id, succeeded: true, items: &items, itemID: \.id)
+                }
+            }
+        }
     }
 }

@@ -29,7 +29,11 @@ final class FileWatch {
             var ctx = FSEventStreamContext(version: 0, info: nil, retain: nil, release: nil, copyDescription: nil)
             let callback: FSEventStreamCallback = { _, _, count, paths, _, _ in
                 guard let list = unsafeBitCast(paths, to: NSArray.self) as? [String], count > 0 else { return }
-                DispatchQueue.main.async { FileWatch.collect(list) }
+                // Sorted here, on the stream's queue: a render or a job log sends hundreds of file events a
+                // second, and parsing their paths on the main thread cost 250 ms in 8 minutes (2026-11-06).
+                let changed = FileWatch.folders(list), jobs = FileWatch.jobSessions(list)
+                guard !changed.isEmpty || !jobs.isEmpty else { return }
+                DispatchQueue.main.async { FileWatch.collect(changed, jobs) }
             }
             // File events, so a chat save can be told apart from a real change (see `folders`).
             let flags = FSEventStreamCreateFlags(kFSEventStreamCreateFlagUseCFTypes | kFSEventStreamCreateFlagFileEvents)
@@ -66,10 +70,8 @@ final class FileWatch {
     private static var pendingJobs: Set<String> = []
     private static var due = false
 
-    /// Runs on the main queue (the stream callback sends it there).
-    private static func collect(_ paths: [String]) {
-        let changed = folders(paths), jobs = jobSessions(paths)
-        guard !changed.isEmpty || !jobs.isEmpty else { return }
+    /// Runs on the main queue (the stream callback sends it there, with the paths already sorted).
+    private static func collect(_ changed: Set<String>, _ jobs: Set<String>) {
         pending.formUnion(changed)
         pendingJobs.formUnion(jobs)
         guard !due else { return }

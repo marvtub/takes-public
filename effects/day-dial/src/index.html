@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <!-- Day dial: a clock hand sweeps once round the speaker's head and wipes the room away to warm paper. A
+         clock face draws on behind the head as the hand passes: a thin ring, hour numbers in a serif, a word in
+         every hour (italic, set round the ring) and a second word riding on the hand. The hand ends as a thin gold
+         line at 12. The speaker casts a soft shadow on the paper. Then the hand sweeps back and the room returns.
+         Inputs next to this file: footage.mp4 (the moment, at the frame size) and person.webm (its cutout).
+         Full frame: render it as mp4 and lay it over the cut. The frame size is data-width / data-height on #root.
+         Edit HEAD, WORDS, LOOK and AT below. -->
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+    <style>
+      @font-face { font-family: "Garamond"; src: url("fonts/EBGaramond.ttf"); font-weight: 400 800; }
+      @font-face { font-family: "Garamond"; src: url("fonts/EBGaramond-Italic.ttf"); font-weight: 400 800; font-style: italic; }
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
+      #root { position: relative; width: 100%; height: 100%; overflow: hidden; background: #000; }
+      #root video, .full { position: absolute; inset: 0; width: 100%; height: 100%; }
+      #root video { object-fit: cover; }
+      #paper { background: var(--paper); }
+      #dial { overflow: visible; }
+      #dial text { font-family: "Garamond", serif; fill: var(--ink); }
+      #dial .num { font-weight: 400; }
+      #dial .word { font-style: italic; }
+      #edge { pointer-events: none; }
+    </style>
+  </head>
+  <body>
+    <div id="root" data-composition-id="main" data-start="0" data-duration="3.4" data-width="1080" data-height="1920">
+      <video id="footage" class="clip" src="footage.mp4" muted playsinline data-start="0" data-track-index="0"></video>
+      <div id="sweep" class="full">
+        <div id="paper" class="full"></div>
+        <svg id="dial" class="full"></svg>
+        <div id="edge" class="full"></div>
+      </div>
+      <video id="person" class="clip" src="person.webm" muted playsinline data-start="0" data-track-index="1"></video>
+    </div>
+    <script>
+      // The middle of the dial: the speaker's head, as parts of the frame (0 to 1).
+      const HEAD = { x: 0.52, y: 0.29 };
+      // The word set in every hour, and the word that rides on the hand.
+      const WORDS = { hour: "day", hand: "dial" };
+      // Look. radius = the ring, as a part of the frame's short side. paper / ink / hand = colours.
+      // shadow = the speaker's shadow on the paper (px at a 1080 px short side).
+      const LOOK = { radius: 0.36, paper: "#efe8d8", ink: "#1f3a2b", hand: "#c8a24f", shadow: 26 };
+      // When (seconds): the sweep starts, how long it takes, when it sweeps back and how long that takes.
+      const AT = { sweep: 0.25, sweepFor: 0.75, back: 2.55, backFor: 0.45 };
+
+      const root = document.getElementById("root");
+      const FRAME = { w: Number(root.dataset.width), h: Number(root.dataset.height) };
+      const U = Math.min(FRAME.w, FRAME.h) / 1080;
+      root.style.setProperty("--paper", LOOK.paper); root.style.setProperty("--ink", LOOK.ink);
+      // The ring stays inside the frame: in a wide or square frame the head sits high, so the ring gets smaller.
+      const cx = HEAD.x * FRAME.w, cy = HEAD.y * FRAME.h, R = Math.min(LOOK.radius * Math.min(FRAME.w, FRAME.h), cy * 0.9);
+      const NS = "http://www.w3.org/2000/svg";
+      const svg = document.getElementById("dial");
+      svg.setAttribute("viewBox", `0 0 ${FRAME.w} ${FRAME.h}`);
+      const el = (tag, attrs, parent = svg) => { const e = document.createElementNS(NS, tag); for (const k in attrs) e.setAttribute(k, attrs[k]); parent.appendChild(e); return e; };
+      const pt = (deg, r) => [cx + r * Math.sin(deg * Math.PI / 180), cy - r * Math.cos(deg * Math.PI / 180)];
+
+      // The face: outer ring, inner ring, a spoke between every hour, numbers outside, words between the rings.
+      const sw = 2.2 * U;
+      const ring = el("circle", { cx, cy, r: R, fill: "none", stroke: LOOK.ink, "stroke-width": sw });
+      const inner = el("circle", { cx, cy, r: R * 0.74, fill: "none", stroke: LOOK.ink, "stroke-width": sw * 0.8 });
+      const parts = []; // every part with the angle where the hand reveals it
+      for (let h = 0; h < 12; h++) {
+        const a = h * 30 + 15; // spokes sit between the hours
+        const [x1, y1] = pt(a, R * 0.74), [x2, y2] = pt(a, R);
+        parts.push({ a, e: el("line", { x1, y1, x2, y2, stroke: LOOK.ink, "stroke-width": sw * 0.8 }) });
+        const n = h === 0 ? 12 : h, [nx, ny] = pt(h * 30, R * 1.11);
+        parts.push({ a: h * 30, e: Object.assign(el("text", { x: nx, y: ny, "text-anchor": "middle", "dominant-baseline": "central", class: "num", "font-size": 64 * U }), { textContent: n }) });
+        const [wx, wy] = pt(h * 30, R * 0.87);
+        // The words turn with the ring and stay upright-ish: the lower half is flipped so it never reads upside down.
+        const rot = h * 30 + (h > 3 && h < 9 ? 180 : 0) + 90 - 90;
+        const w = el("text", { x: wx, y: wy, "text-anchor": "middle", "dominant-baseline": "central", class: "word", "font-size": 46 * U, transform: `rotate(${h * 30 > 90 && h * 30 < 270 ? h * 30 + 180 : h * 30} ${wx} ${wy})` });
+        w.textContent = h === 0 ? "" : WORDS.hour;
+        parts.push({ a: h * 30, e: w });
+      }
+      // The hand: a thin gold line from the middle up past the frame edge, with the hand word riding on it.
+      const hand = el("g", {});
+      el("line", { x1: cx, y1: cy, x2: cx, y2: cy - Math.max(FRAME.w, FRAME.h) * 1.5, stroke: LOOK.hand, "stroke-width": 3 * U }, hand);
+      const hw = el("text", { x: cx, y: cy - R * 0.87, "text-anchor": "middle", "dominant-baseline": "central", class: "word", "font-size": 58 * U, transform: `rotate(-90 ${cx} ${cy - R * 0.87})` }, hand);
+      hw.textContent = WORDS.hand;
+      const C = 2 * Math.PI * R, Ci = 2 * Math.PI * R * 0.74;
+      [ring, inner].forEach((c, i) => { const L = i ? Ci : C; c.setAttribute("stroke-dasharray", L); c.setAttribute("stroke-dashoffset", L); c.setAttribute("transform", `rotate(-90 ${cx} ${cy})`); });
+      parts.forEach((p) => p.e.setAttribute("opacity", 0));
+
+      // The person's shadow on the paper.
+      const person = document.getElementById("person");
+      const sh = LOOK.shadow * U;
+      const sweep = document.getElementById("sweep"), edge = document.getElementById("edge");
+      const S = { deg: 0, back: 0, shade: 0 };
+      function draw() {
+        // The paper shows inside the swept wedge. Sweeping back, the room wins again from 12, anticlockwise.
+        const d = Math.max(0, Math.min(360, S.deg));
+        const m = `conic-gradient(from 0deg at ${cx}px ${cy}px, #000 0deg ${d}deg, transparent ${d}deg 360deg)`;
+        sweep.style.webkitMaskImage = sweep.style.maskImage = m;
+        // The leading edge: a dark band with light streaks just ahead of the hand, like a fast sweep.
+        const e = d, on = d > 0.5 && d < 359.5 ? 1 : 0;
+        edge.style.background = on ? `conic-gradient(from ${e - 26}deg at ${cx}px ${cy}px, rgba(0,0,0,0) 0deg, rgba(0,0,0,.42) 22deg, rgba(0,0,0,.0) 26deg, rgba(255,255,255,.18) 26.5deg, rgba(0,0,0,0) 34deg, rgba(0,0,0,0) 360deg)` : "none";
+        hand.setAttribute("transform", `rotate(${d} ${cx} ${cy})`);
+        parts.forEach((p) => p.e.setAttribute("opacity", d >= p.a + 4 ? 1 : d >= p.a - 6 ? (d - p.a + 6) / 10 : 0));
+        ring.setAttribute("stroke-dashoffset", C * (1 - d / 360));
+        inner.setAttribute("stroke-dashoffset", Ci * (1 - d / 360));
+        person.style.filter = S.shade > 0.01 ? `drop-shadow(${sh * 0.7}px ${sh}px ${sh * 1.2}px rgba(40,30,15,${0.42 * S.shade}))` : "none";
+      }
+      window.__timelines = window.__timelines || {};
+      const tl = gsap.timeline({ paused: true, onUpdate: draw });
+      tl.to(S, { deg: 360, duration: AT.sweepFor, ease: "power2.inOut" }, AT.sweep);
+      tl.to(S, { shade: 1, duration: AT.sweepFor * 0.6 }, AT.sweep + 0.1);
+      tl.to(S, { deg: 0, duration: AT.backFor, ease: "power2.inOut" }, AT.back);
+      tl.to(S, { shade: 0, duration: AT.backFor * 0.6 }, AT.back + AT.backFor * 0.4);
+      tl.set({}, {}, Number(root.dataset.duration));
+      window.__timelines["main"] = tl;
+      draw(); tl.seek(0);
+    </script>
+  </body>
+</html>

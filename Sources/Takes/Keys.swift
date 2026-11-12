@@ -37,7 +37,9 @@ enum KeyRouter {
 
     static func action(key: UInt16, modifiers: NSEvent.ModifierFlags, _ c: KeyContext) -> KeyAction? {
         guard modifiers.intersection([.command, .control, .option]).isEmpty else { return nil }
-        let media = !c.typing && c.videoOnStage && c.hasPlayer
+        // A video on the stage takes Space even while its player is not wired yet: else macOS
+        // beeps (2026-11-06). An audio file has a player but no video.
+        let media = !c.typing && c.hasPreview && (c.videoOnStage || c.hasPlayer)
         switch key {
         case Key.escape where c.countdown: return .toggleRecord
         case Key.space where c.recording || (!c.typing && !c.hasPreview): return .toggleScroll

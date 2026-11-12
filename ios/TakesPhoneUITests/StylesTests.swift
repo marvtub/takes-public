@@ -91,8 +91,6 @@ final class StylesTests: XCTestCase {
     }
 
     private func shot(_ app: XCUIApplication, _ name: String) {
-        let png = XCUIScreen.main.screenshot().pngRepresentation
-        let dir = ProcessInfo.processInfo.environment["TAKES_SHOTS"] ?? NSTemporaryDirectory()
-        try? png.write(to: URL(fileURLWithPath: dir).appendingPathComponent(name + ".png"))
+        writeScreenshot(XCUIScreen.main.screenshot(), named: name)
     }
 }

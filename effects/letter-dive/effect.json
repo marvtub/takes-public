@@ -1,0 +1,14 @@
+{
+  "name": "Letter dive",
+  "description": "A transition. The shot drops away to warm paper, a word types on in a big serif with the footage playing inside the letters, then the camera dives into one letter until it fills the frame and you are back in the shot.",
+  "when": "As a transition into a new part: the word names the part, and the dive takes you into it.",
+  "needs": [
+    "the word (short: 4 to 6 letters)",
+    "the letter to dive into",
+    "the cut time where it starts"
+  ],
+  "kind": "Full frame",
+  "length_s": 3,
+  "shape": "any",
+  "shipped": true
+}

@@ -13,6 +13,29 @@ struct PhoneHTTPTests {
         #expect(PhoneRequest.parse(head: "nonsense") == nil)
     }
 
+    /// A change the phone sends again (its answer was lost on a weak link) is done once, also
+    /// while the first copy still runs; a refused one may go again.
+    @Test func aRepeatedChangeIsDoneOnce() async {
+        actor Count { var n = 0; func up() { n += 1 } }
+        let once = PhoneOnce(), count = Count()
+        let work: @Sendable () async -> PhoneResponse = {
+            await count.up()
+            try? await Task.sleep(for: .milliseconds(50))
+            return .encode(["ok": true])
+        }
+        async let a = once.run("op-1", work)
+        async let b = once.run("op-1", work)
+        let (first, second) = await (a, b)
+        let third = await once.run("op-1", work)
+        #expect(await count.n == 1)
+        #expect([first.repeat, second.repeat].filter { $0 }.count == 1)
+        #expect(third.repeat)
+        let no: @Sendable () async -> PhoneResponse = { await count.up(); return .error(409, "changed") }
+        _ = await once.run("op-2", no)
+        #expect(await once.run("op-2", no).repeat == false)
+        #expect(await count.n == 3)
+    }
+
     @Test func decodesChunkedBodiesSplitAnywhere() {
         let wire = Data("4\r\nWiki\r\n6\r\npedia \r\nE\r\nin \r\n\r\nchunks.\r\n0\r\n\r\n".utf8)
         for cut in [1, 3, 7, 50] {
@@ -220,6 +243,15 @@ struct PhoneCommentTests {
         // The Styles board's chat has its lane, and the note names the board.
         #expect(PhoneServer.lane("board:styles") == "styles")
         #expect(PhoneServer.origin(["text": "x", "from": "Styles"]).contains("Styles board"))
+    }
+
+    @Test func commentsTabHearsWhenTheFindingOrPostingChatStartsOrEnds() {
+        let day = Date(timeIntervalSince1970: 1_000)
+        let idle = PhoneServer.copilotSignature(changed: day, redrafting: false, finding: false, posting: false)
+        #expect(PhoneServer.copilotSignature(changed: day, redrafting: false, finding: true, posting: false) != idle)
+        #expect(PhoneServer.copilotSignature(changed: day, redrafting: false, finding: false, posting: true) != idle)
+        #expect(PhoneServer.copilotSignature(changed: day, redrafting: true, finding: false, posting: false) != idle)
+        #expect(PhoneServer.copilotSignature(changed: day, redrafting: false, finding: false, posting: false) == idle)
     }
 
     @MainActor @Test func postVariantsAndHooksFromThePhone() throws {

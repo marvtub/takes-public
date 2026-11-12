@@ -113,7 +113,7 @@ private struct MomentView: UIViewRepresentable {
     final class Box: UIView {
         override static var layerClass: AnyClass { AVPlayerLayer.self }
         var playerLayer: AVPlayerLayer { layer as! AVPlayerLayer }
-        var token: Any?
+        var observers: PreviewObservers?
     }
 
     func makeUIView(context: Context) -> Box {
@@ -126,12 +126,18 @@ private struct MomentView: UIViewRepresentable {
         AVAudioSession.sharedInstance().use(.ambient, .mixWithOthers)
         let from = CMTime(seconds: start, preferredTimescale: 600)
         let end = CMTime(seconds: start + length, preferredTimescale: 600)
-        v.token = p.addBoundaryTimeObserver(forTimes: [NSValue(time: end)], queue: .main) { [weak p] in
+        let timeObserver = p.addBoundaryTimeObserver(forTimes: [NSValue(time: end)], queue: .main) { [weak p] in
             p?.seek(to: from, toleranceBefore: .zero, toleranceAfter: .zero)
         }
-        NotificationCenter.default.addObserver(forName: AVPlayerItem.didPlayToEndTimeNotification, object: p.currentItem, queue: .main) { [weak p] _ in
+        let endObserver = NotificationCenter.default.addObserver(forName: AVPlayerItem.didPlayToEndTimeNotification, object: p.currentItem, queue: .main) { [weak p] _ in
             p?.seek(to: from); p?.play()
         }
+        v.observers = PreviewObservers(
+            timeObserver: timeObserver,
+            endObserver: endObserver,
+            removeTimeObserver: { p.removeTimeObserver($0) },
+            removeEndObserver: { NotificationCenter.default.removeObserver($0) }
+        )
         p.seek(to: from, toleranceBefore: .zero, toleranceAfter: .zero) { _ in p.play() }
         v.playerLayer.player = p
         return v
@@ -140,7 +146,8 @@ private struct MomentView: UIViewRepresentable {
     func updateUIView(_ v: Box, context: Context) {}
 
     static func dismantleUIView(_ v: Box, coordinator: ()) {
-        if let t = v.token { v.playerLayer.player?.removeTimeObserver(t) }
+        v.observers?.dismantle()
+        v.observers = nil
         v.playerLayer.player?.pause()
         v.playerLayer.player = nil
     }

@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <!-- Voice note: a chat voice message pops up beside your round photo. Its waveform records in from the left,
+         bar by bar, from what you actually say (wave.js), with a gold line at the recording edge. A label types in
+         under it, the send button is pressed, "Delivered" ticks on, and the message flies off up and away.
+         Inputs next to this file: footage.mp4 (the moment, at the frame size), avatar.png (your round photo) and
+         wave.js (from `python3 wave.py <the take> <start> <length> wave.js 26`: the loudness of each bar).
+         Full frame: render it as mp4 and lay it over the cut. The frame size is data-width / data-height on #root.
+         Edit LABEL, PLACE, LOOK and AT below. -->
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+    <script src="wave.js"></script>
+    <style>
+      @font-face { font-family: "Inter"; src: url("fonts/InterVariable.ttf"); font-weight: 100 900; }
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
+      #root { position: relative; width: 100%; height: 100%; overflow: hidden; background: #000; font-family: "Inter", sans-serif; }
+      #root video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+      #msg { position: absolute; display: flex; align-items: center; gap: calc(var(--u) * 16px); opacity: 0; }
+      #bubble { display: flex; align-items: center; gap: calc(var(--u) * 22px); background: var(--cream); border-radius: calc(var(--u) * 30px);
+                padding: calc(var(--u) * 22px) calc(var(--u) * 18px) calc(var(--u) * 22px) calc(var(--u) * 22px); box-shadow: 0 calc(var(--u) * 10px) calc(var(--u) * 30px) rgba(0,0,0,.4); }
+      .play { width: calc(var(--u) * 78px); height: calc(var(--u) * 78px); border-radius: 50%; background: var(--green); display: grid; place-items: center; }
+      .play svg { width: 42%; height: 42%; margin-left: 8%; }
+      #bars { position: relative; display: flex; align-items: center; gap: calc(var(--u) * 6px); height: calc(var(--u) * 110px); }
+      #bars i { display: block; width: calc(var(--u) * 7px); border-radius: 99px; }
+      #edge { position: absolute; top: 0; bottom: 0; width: calc(var(--u) * 4px); background: var(--gold); }
+      .time { font-size: calc(var(--u) * 40px); font-weight: 500; color: #1c2a22; font-variant-numeric: tabular-nums; }
+      #send { width: calc(var(--u) * 70px); height: calc(var(--u) * 70px); border-radius: 50%; background: var(--gold); display: grid; place-items: center; position: relative; }
+      #send svg { width: 52%; height: 52%; }
+      #ring { position: absolute; inset: calc(var(--u) * -12px); border-radius: 50%; background: rgba(255,255,255,.55); opacity: 0; z-index: -1; }
+      .av { width: calc(var(--u) * 84px); height: calc(var(--u) * 84px); border-radius: 50%; background: url(avatar.png) center / cover; flex: none; }
+      .pill { position: absolute; background: var(--cream); color: #1c2a22; border-radius: 999px; font-weight: 600; white-space: pre;
+              box-shadow: 0 calc(var(--u) * 4px) calc(var(--u) * 12px) rgba(0,0,0,.3); opacity: 0; }
+      #label { font-size: calc(var(--u) * 36px); padding: calc(var(--u) * 6px) calc(var(--u) * 22px); }
+      #done { font-size: calc(var(--u) * 19px); padding: calc(var(--u) * 4px) calc(var(--u) * 14px); color: #3c4a40; }
+    </style>
+  </head>
+  <body>
+    <div id="root" data-composition-id="main" data-start="0" data-duration="3.0" data-width="1080" data-height="1920">
+      <video id="footage" class="clip" src="footage.mp4" muted playsinline data-start="0" data-track-index="0"></video>
+      <div id="msg">
+        <div id="bubble">
+          <div class="play"><svg viewBox="0 0 10 12"><path d="M0 0 L10 6 L0 12 Z" fill="#f3efe4"/></svg></div>
+          <div id="bars"><div id="edge"></div></div>
+          <div class="time">0:00</div>
+          <div id="send"><div id="ring"></div><svg viewBox="0 0 24 24"><path d="M12 20V5M5 11.5 12 4.5l7 7" stroke="#1d3a2b" stroke-width="2.8" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+        </div>
+        <div class="av"></div>
+      </div>
+      <div id="label" class="pill"></div>
+      <div id="done" class="pill">Delivered ✓</div>
+    </div>
+    <script>
+      // The label that types in under the message.
+      const LABEL = "Voice note";
+      // Where the message sits: its left edge and top as parts of the frame.
+      const PLACE = { x: 0.035, y: 0.1 };
+      const LOOK = { cream: "#f1ece0", green: "#1d3a2b", gold: "#c9a54f", light: "#b9bdb1" };
+      // When (seconds): pop in, recording runs (how long), label types, send press, delivered, fly off.
+      const AT = { in: 0.25, rec: 0.35, recFor: 1.1, label: 0.6, send: 1.6, done: 1.85, out: 2.5 };
+
+      const root = document.getElementById("root");
+      const FRAME = { w: Number(root.dataset.width), h: Number(root.dataset.height) };
+      const U = Math.min(FRAME.w, FRAME.h) / 1080;
+      Object.entries({ "--u": U, "--cream": LOOK.cream, "--green": LOOK.green, "--gold": LOOK.gold }).forEach(([k, v]) => root.style.setProperty(k, v));
+      const msg = document.getElementById("msg");
+      // Square and wide frames: the head fills the top, so the message sits lower, over the chest.
+      if (FRAME.w >= FRAME.h * 0.9) PLACE.y = Math.max(PLACE.y, 0.62);
+      Object.assign(msg.style, { left: PLACE.x * FRAME.w + "px", top: PLACE.y * FRAME.h + "px" });
+      const W = window.WAVE || Array.from({ length: 26 }, (_, i) => 0.3 + 0.6 * Math.abs(Math.sin(i * 1.7)));
+      const barsEl = document.getElementById("bars"), edge = document.getElementById("edge");
+      const bars = W.map((v) => { const b = document.createElement("i"); b.style.height = Math.max(0.12, v) * 110 * U + "px"; barsEl.insertBefore(b, edge); return b; });
+      const barStep = 13 * U;
+      // Pills under the bubble's right side (fixed geometry: the bubble is about 690 px wide at 1080).
+      const label = document.getElementById("label"), done = document.getElementById("done");
+      const bx = PLACE.x * FRAME.w, by = PLACE.y * FRAME.h + 155 * U;
+      Object.assign(label.style, { right: FRAME.w - (bx + 690 * U) + "px", top: by + 18 * U + "px" });
+      Object.assign(done.style, { right: FRAME.w - (bx + 690 * U) + "px", top: by - 14 * U + "px" });
+      function draw() {
+        const t = tl.time();
+        const p = Math.max(0, Math.min(1, (t - AT.rec) / AT.recFor));
+        const n = p * bars.length;
+        bars.forEach((b, i) => (b.style.background = i < n ? LOOK.green : LOOK.light));
+        edge.style.left = Math.min(bars.length, n) * barStep + "px";
+        edge.style.opacity = p > 0 && p < 1 ? 1 : p >= 1 ? 1 : 0;
+        const k = Math.max(0, Math.min(LABEL.length, Math.floor((t - AT.label) / 0.05)));
+        label.textContent = LABEL.slice(0, k) || " ";
+      }
+      window.__timelines = window.__timelines || {};
+      const tl = gsap.timeline({ paused: true, onUpdate: draw });
+      tl.fromTo(msg, { opacity: 0, scale: 0.6, x: 120 * U, transformOrigin: "100% 50%" }, { opacity: 1, scale: 1, x: 0, duration: 0.3, ease: "back.out(1.8)" }, AT.in);
+      tl.fromTo(label, { opacity: 0, y: -10 * U }, { opacity: 1, y: 0, duration: 0.15 }, AT.label);
+      tl.fromTo("#ring", { opacity: 0.9, scale: 0.6 }, { opacity: 0, scale: 1.25, duration: 0.35, ease: "power2.out", immediateRender: false }, AT.send);
+      tl.fromTo("#send", { scale: 1 }, { scale: 0.86, duration: 0.07, yoyo: true, repeat: 1, immediateRender: false }, AT.send);
+      tl.fromTo(done, { opacity: 0, scale: 0.7 }, { opacity: 1, scale: 1, duration: 0.18, ease: "back.out(2)" }, AT.done);
+      tl.to(msg, { x: FRAME.w * 0.5, y: -FRAME.h * 0.12, scale: 0.7, opacity: 0, duration: 0.32, ease: "power3.in" }, AT.out);
+      tl.to([label, done], { opacity: 0, duration: 0.2 }, AT.out + 0.1);
+      tl.set({}, {}, Number(root.dataset.duration));
+      window.__timelines["main"] = tl;
+      draw(); tl.seek(0);
+    </script>
+  </body>
+</html>

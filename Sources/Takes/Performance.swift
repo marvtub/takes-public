@@ -22,14 +22,15 @@ final class PerfBoard: ObservableObject {
     private var scanned = false
 
     /// FSEvents names the changed folders, not files: social.json shows up as <root>/_library and a
-    /// session.json as its session folder (two levels under the root).
+    /// session.json as its session folder (two levels under the root). Folders deeper in _library
+    /// (Site work, comments, rules) are other boards' files: each one read every session.json again.
     static func matters(_ paths: [String], root: URL) -> Bool {
         let r = root.standardizedFileURL.pathComponents
         return paths.count > 20 || paths.contains { p in
             let c = URL(fileURLWithPath: p).standardizedFileURL.pathComponents
             guard c.count >= r.count, Array(c.prefix(r.count)) == r else { return false }
             let rest = c.dropFirst(r.count)
-            return rest.isEmpty || rest.first == "_library" || (rest.count == 2 && !rest.first!.hasPrefix("_"))
+            return rest.isEmpty || Array(rest) == ["_library"] || (rest.count == 2 && !rest.first!.hasPrefix("_"))
         }
     }
 
@@ -58,6 +59,14 @@ final class PerfBoard: ObservableObject {
                 self.scanned = true
             }
         }
+    }
+
+    /// The same read on this thread, for the board's picture tests.
+    func scanNow(_ root: URL) {
+        items = Self.find(root)
+        socialStamp = Store.modified(SocialData.file(root))
+        social = SocialData.read(root)
+        scanned = true
     }
 
     private static func find(_ root: URL) -> [PerfItem] {
@@ -142,11 +151,15 @@ struct PerformanceView: View {
     let handle: (URL) -> Void
     @AppStorage("perfPlatform") private var platform = ""
     @AppStorage("perfSort") private var sort = "newest"
+    @AppStorage(Plugins.removedKey) private var pluginsRemoved = ""
+    /// The page of the posts table, from 0. Ten posts a page.
+    @State private var page = 0
+    static let perPage = 10
     @State private var fresh = false
     @State private var hideFresh: Task<Void, Never>?
 
     private var shown: [PerfItem] {
-        let list = platform.isEmpty ? board.items : board.items.filter { $0.post.label == platform }
+        let list = current.isEmpty ? board.items : board.items.filter { $0.post.label == current }
         switch sort {
         case "reach": return list.sorted { ($0.post.latest?.reach ?? -1) > ($1.post.latest?.reach ?? -1) }
         case "rate": return list.sorted { rate($0) > rate($1) }
@@ -164,25 +177,47 @@ struct PerformanceView: View {
             topBar
             Rule()
             ScrollView {
-                Group {
+                VStack(alignment: .leading, spacing: 0) {
+                    // A plugin's part at the top (2026-11-06, the admin Mods slot). It draws nothing
+                    // when it has nothing; pluginsRemoved makes the board look again on a switch.
+                    let _ = pluginsRemoved
+                    if let slot = Plugins.slot("performance", open: handle) { slot.padding(.bottom, 18) }
                     if let social = board.social {
-                        SignalPage(data: social, platform: platform) { takes }
+                        SignalPage(data: social, platform: current, extraData: { postsSnapshot }) { takes }
                     } else {
                         VStack(alignment: .leading, spacing: 18) {
                             Text("No social dashboard yet. Ask Takes to run generate_dashboard.py; it writes _library/social.json for this board.")
                                 .font(Theme.sans(12.5)).foregroundStyle(Theme.muted)
-                            takes
+                            BoardSections(board: "performance", available: ["performance.posts"],
+                                          snapshots: { ["performance.posts": postsSnapshot] }, open: handle) { _ in takes }
                         }
                     }
                 }
                 .padding(18)
-                .id(platform)
+                .id(current)
                 .transition(.page)
             }
-            .animation(.page, value: platform)
+            .animation(.page, value: current)
         }
         .background(Theme.paper)
         .onAppear { Perf.mark("performance"); board.scan(root) }
+    }
+
+    /// The rows and totals on the current platform, including rows on later pages.
+    var postsSnapshot: [String: Any] {
+        let list = shown
+        let latest = list.compactMap(\.post.latest)
+        let reach = latest.compactMap(\.reach).reduce(0, +)
+        let engagement = latest.map(\.engagement).reduce(0, +)
+        return ["platform": current, "sort": sort, "page": min(page, Self.pages(list.count) - 1), "per_page": Self.perPage,
+                "posts": list.count, "with_numbers": latest.count, "reach": reach, "engagement": engagement,
+                "rate": reach > 0 ? Double(engagement) / Double(reach) * 100 : 0,
+                "rows": list.map { item -> [String: Any] in
+                    var row: [String: Any] = ["title": item.title, "path": item.session.path,
+                                               "platform": item.post.label]
+                    row["post"] = BoardSectionData.json(item.post)
+                    return row
+                }]
     }
 
     /// The posts from Takes sessions, with the numbers Claude saved.
@@ -192,7 +227,7 @@ struct PerformanceView: View {
                 Text("Nothing published yet. Mark a session published, or let Takes do it when a post goes live.")
                     .font(Theme.sans(12.5)).foregroundStyle(Theme.muted)
             } else if shown.isEmpty {
-                Text("No \(platform) posts from your sessions yet.")
+                Text("No \(current) posts from your sessions yet.")
                     .font(Theme.sans(12.5)).foregroundStyle(Theme.muted)
             } else {
                 VStack(alignment: .leading, spacing: 14) {
@@ -205,22 +240,30 @@ struct PerformanceView: View {
 
     // MARK: Top bar
 
-    /// LinkedIn and X always (the dashboard has both), then any other platform a session posted to.
+    /// LinkedIn and X always (the dashboard has both), YouTube when it has the channel, then any
+    /// other network a session posted to. Not "Published" (a post with no platform) or "Vertical"
+    /// (one video for three networks): those tabs had no charts, only a row or two (2026-11-05).
+    /// Their posts stay under All.
     private var platforms: [String] {
         var seen = board.social == nil ? [] : ["LinkedIn", "X"]
-        for i in board.items where !seen.contains(i.post.label) { seen.append(i.post.label) }
+        if board.social?.youtube != nil { seen.append("YouTube") }
+        for i in board.items where i.post.platform != nil && !["Vertical", "vertical"].contains(i.post.label)
+            && !seen.contains(i.post.label) { seen.append(i.post.label) }
         return seen
     }
+
+    /// The tab in use: a saved tab that no longer exists is All.
+    private var current: String { platforms.contains(platform) ? platform : "" }
 
     private var topBar: some View {
         HStack(spacing: 10) {
             Text("Performance").font(Theme.sans(16, .bold))
-            Button("All") { platform = "" }.buttonStyle(BracketButtonStyle(active: platform.isEmpty))
+            Button("All") { platform = "" }.buttonStyle(BracketButtonStyle(active: current.isEmpty))
             ForEach(platforms, id: \.self) { p in
-                Button { platform = platform == p ? "" : p } label: {
+                Button { platform = current == p ? "" : p } label: {
                     HStack(spacing: 5) { PlatformLogo(platform: p, size: 13); Text(p) }
                 }
-                .buttonStyle(BracketButtonStyle(active: platform == p))
+                .buttonStyle(BracketButtonStyle(active: current == p))
             }
             Spacer(minLength: 12)
             if fresh {
@@ -300,12 +343,33 @@ struct PerformanceView: View {
             .padding(.bottom, 8)
             header
             Rule()
-            ForEach(shown) { i in
+            let list = shown, pages = Self.pages(list.count), at = min(page, pages - 1)
+            ForEach(list.dropFirst(at * Self.perPage).prefix(Self.perPage)) { i in
                 PerfRowView(item: i) { open(i) }
                 Rule()
             }
+            if pages > 1 {
+                HStack(spacing: 8) {
+                    Text("\(at * Self.perPage + 1)–\(min((at + 1) * Self.perPage, list.count)) of \(list.count)")
+                        .font(Theme.mono(10.5)).foregroundStyle(Theme.muted).monospacedDigit()
+                    Spacer()
+                    Button { page = at - 1 } label: { Image(systemName: "chevron.left") }
+                        .buttonStyle(BracketButtonStyle(active: false)).disabled(at == 0).opacity(at == 0 ? 0.4 : 1)
+                        .help("Newer page")
+                    Text("Page \(at + 1) of \(pages)").font(Theme.sans(11.5)).foregroundStyle(Theme.muted).monospacedDigit()
+                    Button { page = at + 1 } label: { Image(systemName: "chevron.right") }
+                        .buttonStyle(BracketButtonStyle(active: false)).disabled(at == pages - 1).opacity(at == pages - 1 ? 0.4 : 1)
+                        .help("Next page")
+                }
+                .padding(.horizontal, 8).padding(.top, 10)
+            }
         }
+        .onChange(of: sort) { page = 0 }
+        .onChange(of: current) { page = 0 }
     }
+
+    /// How many pages a list of n posts fills; at least one.
+    static func pages(_ n: Int) -> Int { max(1, (n + perPage - 1) / perPage) }
 
     private var header: some View {
         HStack(spacing: 10) {

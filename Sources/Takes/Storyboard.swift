@@ -473,9 +473,15 @@ struct StoryboardPane: View {
         let have = Set(images.keys)
         let (b, new) = await Task.detached(priority: .userInitiated) { () -> (Storyboard?, [String: NSImage]) in
             guard let b = Storyboard.read(session) else { return (nil, [:]) }
-            var new: [String: NSImage] = [:]
-            for name in b.shots.compactMap(\.image) where !have.contains(name) && new[name] == nil {
-                new[name] = Self.sketch(Storyboard.folder(session).appending(path: name))
+            // Sketches decode side by side: about 10 ms each, and a board has a dozen or more.
+            let names = Set(b.shots.compactMap(\.image)).subtracting(have)
+            let new = await withTaskGroup(of: (String, NSImage?).self) { group in
+                for name in names {
+                    group.addTask { (name, Self.sketch(Storyboard.folder(session).appending(path: name))) }
+                }
+                var new: [String: NSImage] = [:]
+                for await (name, image) in group { new[name] = image }
+                return new
             }
             return (b, new)
         }.value

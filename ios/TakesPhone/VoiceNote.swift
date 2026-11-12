@@ -117,12 +117,18 @@ private final class Capture: @unchecked Sendable {
     private let engine = AVAudioEngine()
     private var request: SFSpeechAudioBufferRecognitionRequest?
     private var task: SFSpeechRecognitionTask?
+    #if os(iOS)
+    /// The audio category before dictation. A take playing with sound in take review (ClipLoop)
+    /// set .playback once; left on .record, the rest of the take played silent (2026-11-06).
+    private var before: (AVAudioSession.Category, AVAudioSession.Mode, AVAudioSession.CategoryOptions)?
+    #endif
 
     func start(recognizer: SFSpeechRecognizer,
                level: @escaping @Sendable (CGFloat) -> Void,
                heard: @escaping @Sendable (String, Bool) -> Void) throws {
         #if os(iOS)
         let session = AVAudioSession.sharedInstance()
+        before = (session.category, session.mode, session.categoryOptions)
         try session.setCategory(.record, mode: .measurement, options: .duckOthers)
         try session.setActive(true, options: .notifyOthersOnDeactivation)
         #endif
@@ -155,7 +161,12 @@ private final class Capture: @unchecked Sendable {
         task = nil
         request = nil
         #if os(iOS)
-        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        let session = AVAudioSession.sharedInstance()
+        if let (category, mode, options) = before { try? session.setCategory(category, mode: mode, options: options) }
+        before = nil
+        // A loop playing with sound keeps the session: deactivating it stops the video's sound. Otherwise
+        // deactivate as before, so Music or a podcast comes back.
+        if ClipLoop.withSound == 0 { try? session.setActive(false, options: .notifyOthersOnDeactivation) }
         #endif
     }
 

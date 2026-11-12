@@ -1,6 +1,6 @@
 ---
 name: takes-video-edit
-description: "Edit a video recorded in Takes, starting from the Takes session (takes MCP): rough_cut and cut_take for the cuts, render_edit and publish_edit to build and save each version from its recipe, HyperFrames for the motion graphics over it. Start here for any video in Takes, also when the HyperFrames skills are installed. Use when the user asks to edit, cut, trim, caption, reframe (for example to 9:16), clean up the audio of, fix the words said in, add a voice-over to, or make a thumbnail for a take or a video in Takes, or asks for a new version of an edit after review comments."
+description: "Edit a video recorded in Takes, starting from the Takes session (takes MCP): rough_cut and cut_take for the cuts, render_edit and publish_edit to build and save each version from its recipe, HyperFrames for the motion graphics over it (Raea, when switched on, for fast full-picture renders and 3D). Start here for any video in Takes, also when the HyperFrames or Raea skills are installed. Use when the user asks to edit, cut, trim, caption, reframe (for example to 9:16), clean up the audio of, fix the words said in, add a voice-over to, or make a thumbnail for a take or a video in Takes, or asks for a new version of an edit after review comments."
 ---
 
 # Takes video edit
@@ -38,9 +38,13 @@ time in a chat; `get_rules area=edit,thumbnail` gives them all. A rule the user 
    use plain, readable defaults (see below).
 6. **Music and sound effects:** mix them into a new version of the edit with ffmpeg, under the
    voice. Takes plays only the file: it never adds a song or an effect while a video plays, so
-   what the user hears is what posts. Find files with `list_music`. The Sound page's Use button
+   what the user hears is what posts. Find files with `list_music` (`tag` narrows it to the user's
+   tags, such as Education; tag new finds with `tag_sounds`). The Sound page's Use button
    sends you the file, and for an effect the video and second. No song asked for: suggest two
-   or three from `list_music` and ask first.
+   or three from `list_music` and ask first. Nothing fits, or the user describes a song:
+   `make_music` makes one with ElevenLabs (seconds = the edit's length) into the Made tab;
+   one track per ask, and say the credits it used. Clicks in a screen recording get the real mouse click
+   of the click ring effect (`list_effects click-ring`), not a click made in code.
 7. **Find footage by meaning:** `search_media` searches the whole library on this Mac: clips by
    what they show ("walking outside", "close-up of a phone"), stills, and the words in transcripts
    ("where I talk about pricing"). Hits have `path` and, for video and speech, `at` in seconds.
@@ -159,7 +163,7 @@ skill owns the edit; HyperFrames makes only the layers that go over it.
 - **Style first:** `get_library session=<session>` gives the style's tokens (colours, fonts) and its
   saved parts (title cards, lower thirds, captions). Start from a saved part when one fits. Write
   new ones in the style's tokens.
-- **Where:** the composition goes in `_edit/<name>/`. Read the `hyperframes-core` skill before you
+- **Where:** the composition goes in `_edit/<name>/`. Read the `hyperframes` skill before you
   write its HTML. For captions, read the word times from `_edit/<name>/words.json`.
 - **Render with alpha** so the footage shows through: `npx hyperframes render --format mov
   --quality looks --output <file>.mov` (or `--format webm`). Put that command in the recipe's
@@ -168,13 +172,36 @@ skill owns the edit; HyperFrames makes only the layers that go over it.
 - **Never open the user's screen:** `npx hyperframes preview --background --no-open`. Look at
   stills of the render, not at the Studio.
 - **Effects, only on request:** Takes ships ready-made effects (over-the-shoulder cards, glass graph,
-  freeze-frame sticker, tier list, text behind, colour grade) on the Styles board. Use one only when
+  freeze-frame sticker, tier list, text behind, colour grade, a camera bubble that steps aside in pauses)
+  on the Styles board. Use one only when
   the user names it or asks for one: `list_effects effect=<slug>` gives its README and source. Copy
   `src/` into `_edit/<name>/` and change the copy; set its frame (`data-width`/`data-height`) to the
   edit's size, since each effect lays itself out for 9:16, 4:5, 1:1 or 16:9. Never add an effect by yourself, and do not let
   them shape a design the user did not ask for. Asked for ideas, you may name one that fits.
 - **Keep what works:** after the user likes a part, `save_to_library` with the render, a one-line
   `note` and `source_dir` (the composition), so the next video starts from it.
+
+## Fast full-picture renders and 3D (Raea, optional)
+
+Raea (Plugins › Skills › Raea, off until the user switches it on) renders React/TypeScript
+compositions on the GPU without a browser. Read the `raea` skill before you write one (`raea-bevy`
+for 3D). HyperFrames stays the default for layers over the cut. Use Raea only when one of these is true:
+
+- **Heavy graphics over long footage:** a minute or more of captions, cards and lower thirds over a
+  talking head. HyperFrames screenshots every frame of the footage in Chrome; Raea decodes it on
+  the GPU (19 s of 1080x1920 with captions: 4.3 s against 19.7 s). Short or footage-free graphics
+  are no faster in Raea: use HyperFrames.
+- **Real 3D:** extruded type, product turntables, lit scenes, splats.
+- **The user asks for Raea.**
+
+Raea has **no transparent output** (a transparent background renders black), so it makes the
+whole picture, not a layer. The composition plays the same cut clip the recipe uses
+(`<Video muted src=...>` on the `_work/` clip from `cut_take` or `rough_cut`) with the graphics on
+it. Render it as a step (`{run: ["raea", "render", "edit.tsx", "-o", "picture.mp4"], cwd:
+"_edit/<name>", makes: ["picture.mp4"]}`) and lay it in `over` without alpha (`{file, at: 0}`), so
+it covers the cut while `render_edit` keeps the voice, music, sound and loudness. Check stills of the
+render as always. Not installed (no `raea` command): tell the user to switch on Raea in Takes ›
+Plugins › Skills; never run raea's own installer.
 
 ## Reframe, grade, captions
 

@@ -12,7 +12,7 @@ struct TakesApp: App {
     @NSApplicationDelegateAdaptor private var delegate: AppDelegate
     @State private var app = AppModel()
 
-    init() { Theme.registerFonts() }
+    init() { Theme.registerFonts(); LaunchProbe.step("fonts") }
 
     var body: some Scene {
         Window("Takes", id: "main") {
@@ -183,16 +183,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         _ = NSWindow.keepFullScreenOnEscape
         ScreenFind.shared.install()
         MediaSearch.shared.start()
-        // Design check without screen-recording rights and without taking focus: post
-        // "de.marvinaziz.takes.snapshot" (object = output path) and Takes draws its window into a PNG.
-        DistributedNotificationCenter.default().addObserver(forName: .init("de.marvinaziz.takes.snapshot"),
-                                                            object: nil, queue: .main) { n in
-            guard let out = n.object as? String,
-                  let frame = NSApp.windows.first(where: { $0.isVisible && $0.contentView != nil })?.contentView?.superview,
-                  let rep = frame.bitmapImageRepForCachingDisplay(in: frame.bounds) else { return }
-            frame.cacheDisplay(in: frame.bounds, to: rep)
-            try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: out))
-        }
+        MainActor.assumeIsolated { LaunchProbe.step("launched") }
+        // Snapshot tests render their own views. Never expose the running window or a file writer
+        // to unauthenticated cross-process requests (2026-10-31).
     }
 }
 
@@ -270,11 +263,12 @@ struct ContentView: View {
                 .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
                 .animation(nil, value: savedColumns)
                 .modifier(DrawerOffset(open: drawer, target: showsSidebar ? 1 : 0, width: sidebarWidth))
-            BoardRail()
+            // A mod may draw the rail and the sidebar (2026-11-07, admin Mods); Takes's own until one has drawn.
+            Group { if let rail = Plugins.slot("rail") { rail } else { BoardRail() } }
                 .padding(.top, Chrome.bar)
                 .frame(maxHeight: .infinity, alignment: .top)
             if sidebarMounted {
-                Sidebar(library: library)
+                Group { if let side = Plugins.slot("sidebar") { side } else { Sidebar(library: library) } }
                     .padding(.top, Chrome.bar)
                     .frame(width: sidebarWidth)
                     .frame(maxHeight: .infinity)
@@ -322,6 +316,7 @@ struct ContentView: View {
         .onChange(of: library.current?.url) { app.noteSpot() }
         .onChange(of: tab) { app.noteSpot() }
         .onAppear {
+            LaunchProbe.step("window")
             app.trail.visit(app.spotNow)
             drawer = showsSidebar ? 1 : 0
             sidebarMounted = showsSidebar
@@ -945,7 +940,8 @@ struct SessionList: View {
 }
 
 /// A project's line in the sidebar: a chevron that folds it, the name, the count, a + on hover.
-private struct ProjectHeader: View {
+/// Also the admin sidebar mod's `project_header` part (ModsShell.swift).
+struct ProjectHeader: View {
     let name: String
     let count: Int
     let folded: Bool
@@ -967,13 +963,13 @@ private struct ProjectHeader: View {
             if renaming {
                 TextField("Project", text: $newName)
                     .textFieldStyle(.plain)
-                    .font(Theme.sans(12, .semibold))
+                    .nativeText(font: Theme.sans(12, .semibold))
                     .focused(naming)
                     .onSubmit(commit)
                     .onExitCommand(perform: cancel)
                     .onChange(of: naming.wrappedValue) { _, on in if !on { commit() } }
             } else {
-                Text(name).font(Theme.sans(12, .semibold)).foregroundStyle(hover ? Theme.ink : Theme.muted).lineLimit(1)
+                Text(name).nativeText(font: Theme.sans(12, .semibold), color: hover ? Theme.ink : Theme.muted).lineLimit(1)
                 Image(systemName: "chevron.right").font(.system(size: 7.5, weight: .bold))
                     .foregroundStyle(Theme.faint)
                     .rotationEffect(.degrees(folded ? 0 : 90))
@@ -988,7 +984,7 @@ private struct ProjectHeader: View {
                 .buttonStyle(IconButtonStyle())
                 .help("New session in \(name)")
             } else if folded {
-                Text("\(count)").font(Theme.sans(11.5)).monospacedDigit().foregroundStyle(Theme.faint)
+                Text("\(count)").nativeText(font: Theme.sans(11.5), color: Theme.faint).monospacedDigit()
             }
         }
         .padding(.horizontal, 10).frame(height: 24)
@@ -1032,6 +1028,12 @@ struct DetailView: View {
     @Environment(\.colorScheme) private var scheme
     /// The full-window tabs opened in this session so far. They stay mounted.
     @State private var opened = KeptTabs()
+    /// The Record stage, once it has shown (it never leaves after that).
+    @State private var recorderMounted = false
+    /// The session whose script and takes the Record column holds. Under a full-window tab they
+    /// are built a moment after the switch, not in the click: out of sight they cost a session
+    /// switch 25-75 ms (2026-11-07). Record itself builds them at once.
+    @State private var recordColumn: URL?
     @State private var stageSize = CGSize.zero
     /// How far the notch prompter reaches down into the stage.
     @State private var notchReach: CGFloat = 0
@@ -1112,6 +1114,15 @@ struct DetailView: View {
     /// below the takes for the chat button.
     private var belowTakes: Bool { cover == nil && rightTab != "assets" && rightTab != "sounds" }
 
+    /// The Record stage is in the tree when it shows, or once it has shown (never removed then).
+    nonisolated static func mountsRecorder(cover: String?, shown: Bool) -> Bool { shown || cover == nil }
+    /// Whether the Record column shows the session's script and takes: always when you see it,
+    /// and under a full-window tab once `recordColumnDelay` has passed in that session.
+    nonisolated static func recordColumnBuilt(covered: Bool, built: URL?, session: URL) -> Bool {
+        !covered || built == session
+    }
+    static let recordColumnDelay = Duration.milliseconds(600)
+
     nonisolated static func covers(_ tab: String, previewing: Bool) -> Bool {
         ["post", "storyboard", "broll", "write"].contains(tab) || (["assets", "sounds"].contains(tab) && !previewing)
     }
@@ -1126,11 +1137,16 @@ struct DetailView: View {
             }
             ZStack {
                 // The recorder stays mounted under the cover: removing the camera preview
-                // while the camera stops or starts deadlocks AVFoundation.
-                split
-                    .pageFade(cover == nil)
-                    .liveLayer(cover == nil)
-                    .accessibilityHidden(cover != nil)
+                // while the camera stops or starts deadlocks AVFoundation. It comes the first
+                // time Record shows, not before: at a launch on a covering tab it was a third of
+                // the first frame, and 180 of its framework loads (ZBenchLaunch, 2026-11-06).
+                if Self.mountsRecorder(cover: cover, shown: recorderMounted) {
+                    split
+                        .pageFade(cover == nil)
+                        .liveLayer(cover == nil)
+                        .accessibilityHidden(cover != nil)
+                        .onAppear { recorderMounted = true }
+                }
                 // A tab stays mounted once opened, hidden under the others: going back to it is
                 // instant, with no rebuild, no rescan and no fade (2026-10-02). A new session
                 // starts fresh.
@@ -1180,7 +1196,14 @@ struct DetailView: View {
             // A hidden tab keeps its views: typing must not go on in its text field.
             NSApp.keyWindow?.makeFirstResponder(nil)
         }
-        .onChange(of: cover) { _, c in if let c { opened.open(c, in: library.current?.url) } }
+        .onChange(of: cover) { _, c in
+            if let c { opened.open(c, in: library.current?.url) } else { recordColumn = library.current?.url }
+        }
+        .task(id: library.current?.url) {
+            guard let u = library.current?.url, recordColumn != u else { return }
+            if cover != nil { try? await Task.sleep(for: Self.recordColumnDelay) }
+            if !Task.isCancelled { recordColumn = u }
+        }
         .onChange(of: library.current?.url) { opened = KeptTabs(session: library.current?.url, tabs: cover.map { [$0] } ?? []) }
         // Nothing extra stays mounted while a take records.
         .onChange(of: app.isRecording) { _, on in if on { opened = KeptTabs() } }
@@ -1304,6 +1327,8 @@ struct DetailView: View {
                                 AssetsPane(doc: doc)
                             } else if rightTab == "sounds" && cover == nil && !app.isRecording {
                                 SoundsPane(doc: doc)
+                            } else if !Self.recordColumnBuilt(covered: cover != nil, built: recordColumn, session: doc.url) {
+                                Theme.paper
                             } else {
                                 ScriptPane(doc: doc)
                                 Rule()
@@ -1936,67 +1961,120 @@ struct EmptySessionView: View {
 
     var body: some View {
         let _ = Perf.body("EmptySessionView")
-        ScrollView {
-            VStack(alignment: .leading, spacing: 26) {
-                VStack(alignment: .leading, spacing: 12) {
-                    Mascot(size: 96).padding(.bottom, 4)
-                    (Text("Ready when you are.\n").foregroundStyle(Theme.ink)
-                     + Text("Just hit record.").foregroundStyle(Theme.accent))
-                        .font(Theme.display(42))
-                        .lineSpacing(2)
-                    Text("Takes makes the session for you and names it from your script.")
-                        .font(Theme.sans(15)).foregroundStyle(Theme.muted)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                HStack(spacing: 10) {
-                    Button { app.toggleRecord() } label: {
-                        HStack(spacing: 7) {
-                            Circle().frame(width: 9, height: 9)
-                            Text("Record")
-                            Text("⌘R").font(Theme.mono(10.5)).opacity(0.75)
-                        }
-                    }
-                    .buttonStyle(AccentButtonStyle(kind: .solid))
-                    Button { library.createSession() } label: {
-                        HStack(spacing: 7) { Text("New Session"); Text("⌘N").font(Theme.mono(10.5)).foregroundStyle(Theme.muted) }
-                    }
-                    .buttonStyle(AccentButtonStyle(kind: .quiet))
-                }
-                if !library.sessions.isEmpty {
-                    VStack(alignment: .leading, spacing: 8) {
-                        SectionLabel(number: "01", text: "continue")
-                        VStack(spacing: 0) {
-                            ForEach(Array(library.sessions.prefix(4).enumerated()), id: \.element.id) { i, s in
-                                if i > 0 { Rule() }
-                                Button { library.selectedSessions = [s.url] } label: {
-                                    HStack(spacing: 10) {
-                                        VStack(alignment: .leading, spacing: 3) {
-                                            Text(s.title).font(Theme.sans(13, .medium)).lineLimit(1)
-                                            Text("\(s.createdAt.formatted(.relative(presentation: .named))) · \(s.takeCount) take\(s.takeCount == 1 ? "" : "s")")
-                                                .font(Theme.mono(10.5)).foregroundStyle(Theme.muted)
-                                        }
-                                        Spacer()
-                                        Text("↗").foregroundStyle(Theme.accent)
-                                    }
-                                    .padding(.horizontal, 12).padding(.vertical, 9)
-                                    .contentShape(Rectangle())
-                                }
-                                .buttonStyle(HoverRowStyle())
-                            }
-                        }
-                        .background(Theme.paper, in: RoundedRectangle(cornerRadius: Theme.radius))
-                        .overlay(RoundedRectangle(cornerRadius: Theme.radius).strokeBorder(Theme.border))
-                    }
-                }
-                Text("Tip: ask Takes to “create a Takes session with this script”. It shows up here.")
-                    .font(Theme.sans(12)).foregroundStyle(Theme.muted)
-                    .builderBorder()
+        let last = library.sessions.first
+        StartPanel(last: last?.title, lastPath: last?.url.path,
+                   // A plugin's part at the top (2026-11-06, the admin Mods slot "home").
+                   top: Plugins.slot("home", open: { app.follow($0) }),
+                   record: { app.toggleRecord() },
+                   new: { library.createSession() },
+                   open: { if let u = last?.url { library.selectedSessions = [u] } })
+    }
+}
+
+/// The start panel (2026-11-10): the mascot, one line and Record in the middle, the last session at the foot.
+/// Its three parts are named sections (2026-11-11, board "start"), so a mod can hide, move or redraw them live.
+struct StartPanel: View {
+    var last: String?
+    /// The last session's folder, for a mod's open_session.
+    var lastPath: String? = nil
+    var top: AnyView? = nil
+    var record: () -> Void = {}
+    var new: () -> Void = {}
+    var open: () -> Void = {}
+
+    static let title = "Ready when you are."
+    /// The sections on screen, in Takes's order: the middle group, then the foot.
+    nonisolated static func sectionIDs(last: Bool) -> (middle: [String], foot: [String]) {
+        (["start.hero", "start.actions"], last ? ["start.continue"] : [])
+    }
+    private var snapshots: [String: [String: Any]] {
+        let session: [String: Any] = ["title": last ?? NSNull(), "path": lastPath ?? NSNull()]
+        return ["start.hero": ["title": Self.title, "last": session],
+                "start.actions": ["record_key": "⌘R", "new_key": "⌘N", "last": session],
+                "start.continue": ["label": "Continue", "title": last ?? NSNull(), "path": lastPath ?? NSNull()]]
+    }
+
+    var body: some View {
+        let ids = Self.sectionIDs(last: last != nil)
+        VStack(spacing: 24) {
+            if let top { top.frame(maxWidth: .infinity, alignment: .leading) }
+            Spacer(minLength: 0)
+            VStack(spacing: 24) {
+                BoardSections(board: "start", available: ids.middle, snapshots: { snapshots }) { section($0) }
             }
-            .frame(maxWidth: 380, alignment: .leading)
-            .padding(36)
-            .frame(maxWidth: .infinity, minHeight: 0)
+            Spacer(minLength: 0)
+            if !ids.foot.isEmpty {
+                BoardSections(board: "start", available: ids.foot, snapshots: { snapshots }) { section($0) }
+            }
         }
+        .frame(maxWidth: 380)
+        .padding(36)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Theme.surface)
+    }
+
+    @ViewBuilder private func section(_ id: String) -> some View {
+        switch id {
+        case "start.hero":
+            VStack(spacing: 24) {
+                Mascot(size: 96)
+                Text(Self.title)
+                    .font(Theme.display(32)).foregroundStyle(Theme.ink)
+                    .multilineTextAlignment(.center)
+            }
+        case "start.actions":
+            VStack(spacing: 4) {
+                Button(action: record) {
+                    HStack(spacing: 8) {
+                        Circle().fill(Theme.danger).frame(width: 9, height: 9)
+                        Text("Record")
+                        Text("⌘R").font(Theme.sans(11.5, .medium)).opacity(0.75)
+                    }
+                    .padding(.horizontal, 6).frame(minHeight: 40)
+                }
+                .buttonStyle(AccentButtonStyle(kind: .solid))
+                Button(action: new) {
+                    HStack(spacing: 6) {
+                        Text("or write first").font(Theme.sans(13, .medium))
+                        Text("⌘N").font(Theme.sans(11.5))
+                    }
+                    .foregroundStyle(Theme.muted)
+                    .padding(.horizontal, 12).frame(minHeight: 36)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+        case "start.continue":
+            Button(action: open) {
+                HStack(spacing: 12) {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("Continue").font(Theme.sans(12, .medium)).foregroundStyle(Theme.muted)
+                        Text(last ?? "").font(Theme.sans(13, .semibold)).foregroundStyle(Theme.ink).lineLimit(1)
+                    }
+                    Spacer(minLength: 0)
+                    Image(systemName: "arrow.up.right")
+                        .font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.accentInk)
+                        .frame(width: 36, height: 36)
+                        .background(Theme.accentSoft, in: Circle())
+                }
+                .padding(.leading, 16).padding(.trailing, 8).frame(minHeight: 56)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(StartCardStyle())
+        default: EmptyView()
+        }
+    }
+}
+
+private struct StartCardStyle: ButtonStyle {
+    @State private var hover = false
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .background(RoundedRectangle(cornerRadius: 16).fill(hover ? Theme.raised : Theme.paper))
+            .overlay(RoundedRectangle(cornerRadius: 16).strokeBorder(Theme.border))
+            .scaleEffect(configuration.isPressed ? 0.97 : 1)
+            .onHover { hover = $0 }
+            .animation(Theme.motion, value: hover)
     }
 }
 
@@ -3259,6 +3337,11 @@ struct Prompter: NSViewRepresentable {
             let page = dark ? darkPage ?? Theme.stageNS : Theme.paperNS
             tv.backgroundColor = page
             tv.enclosingScrollView?.backgroundColor = page
+            // A clear page draws nothing. Filled, clear copies over what is under it: the notch's
+            // black went see-through under the text, and the menu bar showed (2026-10-30).
+            let draws = page.alphaComponent > 0
+            tv.drawsBackground = draws
+            tv.enclosingScrollView?.drawsBackground = draws
             tv.selectedTextAttributes = [.backgroundColor: NSColor(Theme.accent).withAlphaComponent(dark ? 0.45 : 0.22)]
         }
         if context.coordinator.fontApplied != fontSize || context.coordinator.styleApplied != style {

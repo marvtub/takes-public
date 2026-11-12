@@ -92,13 +92,29 @@ struct SkillsTests {
         #expect(throws: SkillShelf.Problem.self) { try SkillShelf.add(folder: home.appending(path: "nothing"), to: home) }
     }
 
+    /// A skill the pack's repo dropped goes when the pack updates; the user's own skill stays.
+    @Test func anUpdateDropsWhatTheRepoRemoved() throws {
+        let home = temp(); defer { try? FileManager.default.removeItem(at: home) }
+        let pack = SkillPack.hyperframes
+        for n in ["hyperframes", "hyperframes-core"] {
+            let s = try #require(SkillShelf.read(try skill(temp(), n)))
+            try SkillShelf.install(s, source: pack.repo, to: home)
+        }
+        _ = try skill(home, "grill-me")
+        SkillShelf.prune(pack, keeping: ["hyperframes", "reverse-any-video"], in: [home])
+        let fm = FileManager.default
+        #expect(fm.fileExists(atPath: home.appending(path: "hyperframes/SKILL.md").path))
+        #expect(!fm.fileExists(atPath: home.appending(path: "hyperframes-core").path))
+        #expect(fm.fileExists(atPath: home.appending(path: "grill-me/SKILL.md").path))
+    }
+
     /// A pack is one switch: on when Takes installed any of its skills, the user's own when they
     /// put its main skill there, and off takes only what Takes installed.
     @Test func aPackIsOneSwitch() throws {
         let home = temp(); defer { try? FileManager.default.removeItem(at: home) }
         let pack = SkillPack.hyperframes
         #expect(SkillShelf.status(of: pack, in: home) == .missing)
-        for n in ["hyperframes", "hyperframes-core"] {
+        for n in ["hyperframes", "hyperframes-cli"] {
             let s = try #require(SkillShelf.read(try skill(temp(), n)))
             try SkillShelf.install(s, source: pack.repo, to: home)
         }
@@ -135,12 +151,37 @@ struct SkillsTests {
     /// prompt finder is there. All public since 2026-10-13.
     @Test func theCatalogIsWhole() throws {
         let names = SkillShelf.list(in: Self.shipped(repo))
-        #expect(Set(names.map(\.name)).isSuperset(of: ["takes-video-edit", "takes-storyboard", "takes-image-prompt"]))
+        #expect(Set(names.map(\.name)).isSuperset(of: ["takes-video-edit", "takes-storyboard", "takes-image-prompt", "takes-ai-video"]))
         for s in names {
             #expect(!s.description.isEmpty, "\(s.name) needs a description")
             #expect(s.name == s.folder.lastPathComponent, "\(s.name) sits in a folder of another name")
         }
         #expect(FileManager.default.fileExists(atPath: Self.shipped(repo).appending(path: "takes-image-prompt/scripts/find_prompts.py").path))
+    }
+
+    /// The newest raea release's tag, from GitHub's list (canaries count).
+    @Test func readsRaeasNewestTag() {
+        let json = #"[{"tag_name":"v0.1.0-canary.2","prerelease":true},{"tag_name":"v0.1.0-canary.1"}]"#
+        #expect(RaeaEngine.tag(fromReleases: Data(json.utf8)) == "v0.1.0-canary.2")
+        #expect(RaeaEngine.tag(fromReleases: Data("[]".utf8)) == nil)
+        #expect(RaeaEngine.tag(fromReleases: Data(#"{"message":"rate limit"}"#.utf8)) == nil)
+    }
+
+    /// Off removes only the engine Takes installed, with its link; a raea the user installed stays.
+    @Test func raeaOffKeepsTheUsersOwnEngine() throws {
+        let fm = FileManager.default
+        let root = temp(); defer { try? fm.removeItem(at: root) }
+        let home = root.appending(path: ".raea"), bin = root.appending(path: "bin").path
+        try fm.createDirectory(at: home.appending(path: "bin"), withIntermediateDirectories: true)
+        try "x".write(to: home.appending(path: "bin/raea"), atomically: true, encoding: .utf8)
+        try fm.createDirectory(atPath: bin, withIntermediateDirectories: true)
+        try fm.createSymbolicLink(atPath: bin + "/raea", withDestinationPath: home.appending(path: "bin/raea").path)
+        try RaeaEngine.remove(home: home, bin: bin)
+        #expect(fm.fileExists(atPath: home.path))
+        try "takes".write(to: home.appending(path: RaeaEngine.marker), atomically: true, encoding: .utf8)
+        try RaeaEngine.remove(home: home, bin: bin)
+        #expect(!fm.fileExists(atPath: home.path))
+        #expect((try? fm.destinationOfSymbolicLink(atPath: bin + "/raea")) == nil)
     }
 }
 
@@ -194,7 +235,21 @@ struct SkillsNet {
         let home = FileManager.default.temporaryDirectory.appending(path: "skillsnet-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: home) }
         let names = try await SkillShelf.install(SkillPack.hyperframes, to: home)
-        #expect(names.contains("hyperframes") && names.contains("hyperframes-core"))
+        #expect(names.contains("hyperframes") && names.contains("hyperframes-cli"))
         #expect(SkillShelf.status(of: SkillPack.hyperframes, in: home) == .installed)
+    }
+
+    /// The real raea repo keeps its skills where the pack looks, and its newest release installs
+    /// and runs on this Mac.
+    @Test(.enabled(if: ProcessInfo.processInfo.environment["TAKES_NET"] != nil)) func downloadsRaea() async throws {
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory.appending(path: "raeanet-\(UUID().uuidString)")
+        defer { try? fm.removeItem(at: root) }
+        let names = try await SkillShelf.add(gitHub: SkillPack.raea.link, to: root.appending(path: "skills"))
+        #expect(names.contains("raea") && names.contains("raea-bevy"))
+        let home = root.appending(path: ".raea"), bin = root.appending(path: "bin").path
+        try await RaeaEngine.install(home: home, bin: bin)
+        #expect(RaeaEngine.version(in: home) != nil && RaeaEngine.ours(home))
+        #expect(Setup.run(bin + "/raea", ["--help"]).1.contains("raea render"))
     }
 }

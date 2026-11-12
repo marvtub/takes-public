@@ -4,7 +4,7 @@ import SwiftUI
 /// Plugins › Sound FX (2026-10-19; public 2026-10-22): sound effects made in code on demand, for the
 /// chat's edits. earshot (github.com/Leonxlnx/earshot, MIT) does the work from its own venv; the takes
 /// server's sfx_sounds, make_sfx and design_sfx call it (mcp/takes_mcp.py, Sound FX). Off here, the
-/// server lists none of them. The card installs earshot in two parts: the 201 ready sounds (about
+/// server lists none of them. The card installs earshot in two parts: the 215 ready sounds (about
 /// 300 MB, no models) and sound design (torch and two models, about 2 GB more).
 ///
 /// The page leads with the sounds, not the install (2026-10-22, designed on the canvas first): before
@@ -78,7 +78,7 @@ struct SoundFXPage: View {
     private var hero: some View {
         VStack(alignment: .leading, spacing: 22) {
             VStack(alignment: .leading, spacing: 10) {
-                Text("201 SOUNDS · MADE IN CODE").font(Theme.sans(10.5, .semibold)).tracking(0.8)
+                Text("215 SOUNDS · MADE IN CODE").font(Theme.sans(10.5, .semibold)).tracking(0.8)
                     .foregroundStyle(hex(0xBFD4FF))
                     .padding(.horizontal, 9).padding(.vertical, 4)
                     .background(Capsule().fill(hex(0x7FB2FF).opacity(0.16)))
@@ -539,7 +539,7 @@ struct SFXGroup {
         SFXGroup(name: "Hits", kind: .hit, categories: ["impact", "pro_impact", "sub_drop", "pro_sub_drop"]),
         SFXGroup(name: "Clicks and taps", kind: .click, categories: ["click", "pro_click", "tap", "pro_tap", "hover_tick", "pro_hover_tick", "toggle"]),
         SFXGroup(name: "Glitch and shimmer", kind: .glitch, categories: ["glitch", "pro_glitch", "shimmer", "pro_shimmer"]),
-        SFXGroup(name: "Typing", kind: .typing, categories: ["typing_key", "pro_typing_key", "pro_typing_run"]),
+        SFXGroup(name: "Typing", kind: .typing, categories: ["typing_run", "typing_key", "pro_typing_key", "pro_typing_run"]),
         SFXGroup(name: "Pops", kind: .pop, categories: ["pop", "pro_pop", "pro_pop_in"]),
         SFXGroup(name: "Risers", kind: .riser, categories: ["riser", "pro_riser", "downlifter"]),
         SFXGroup(name: "Notifications", kind: .notify, categories: ["notify", "pro_notify"]),
@@ -550,7 +550,7 @@ struct SFXGroup {
     static func of(_ category: String) -> SFXGroup { all.first { $0.categories.contains(category) } ?? more }
 }
 
-/// One sound in earshot's bank (`sfx list --json`).
+/// One sound in earshot's bank (`sfx list --json`), or one of Takes' real recordings (assets/sfx/recordings.json).
 struct SFXSound: Identifiable, Decodable, Equatable {
     let id: String
     let category: String
@@ -558,6 +558,8 @@ struct SFXSound: Identifiable, Decodable, Equatable {
     let onset_s: Double
     let peak_s: Double
     let end_s: Double
+    /// A recording's own name ("Mouse click"); bank sounds take theirs from the id.
+    var label: String? = nil
 
     var group: SFXGroup { SFXGroup.of(category) }
     var kind: SFXKind {
@@ -590,6 +592,7 @@ struct SFXSound: Identifiable, Decodable, Equatable {
 
     /// "pro_click/snap" → "Snap"; "fit/hit/bamboo_tok" → "Bamboo tok".
     var name: String {
+        if let label { return label }
         let last = id.split(separator: "/").last.map(String.init) ?? id
         let words = last.replacingOccurrences(of: "_", with: " ")
         let n = words.prefix(1).uppercased() + words.dropFirst()
@@ -681,7 +684,30 @@ struct SFXRow: Identifiable, Equatable {
     }
 }
 
-/// earshot's bank, read once from `sfx list --json`.
+/// Takes' real recordings (assets/sfx/recordings.json, CC0 sounds from Freesound): they sit in the library next to
+/// earshot's bank and play from their own file, with nothing to render. Ids start with "rec/".
+enum SFXRecordings {
+    static func isRecording(_ id: String) -> Bool { id.hasPrefix("rec/") }
+    /// Beside takes-bank.json: the app's Resources/SFX, or the repo's assets/sfx.
+    nonisolated static let dir: URL? = SoundFXSetup.takesBank.map { URL(fileURLWithPath: $0).deletingLastPathComponent() }
+
+    struct Entry: Decodable { let file: String; let sound: SFXSound
+        enum K: String, CodingKey { case file }
+        init(from d: Decoder) throws { file = try d.container(keyedBy: K.self).decode(String.self, forKey: .file); sound = try SFXSound(from: d) }
+    }
+    nonisolated static let entries: [Entry] = {
+        struct List: Decodable { let sounds: [Entry] }
+        guard let dir, let data = try? Data(contentsOf: dir.appending(path: "recordings.json")) else { return [] }
+        return (try? JSONDecoder().decode(List.self, from: data))?.sounds ?? []
+    }()
+    static var sounds: [SFXSound] { entries.map(\.sound) }
+    static func file(_ id: String) -> URL? {
+        guard let dir, let e = entries.first(where: { $0.sound.id == id }) else { return nil }
+        return dir.appending(path: e.file)
+    }
+}
+
+/// earshot's bank, read once from `sfx list --json`, with Takes' recordings first.
 @MainActor
 final class SoundBank: ObservableObject {
     static let shared = SoundBank()
@@ -718,7 +744,7 @@ final class SoundBank: ObservableObject {
             await MainActor.run {
                 self.loading = false
                 if let list {
-                    self.set(list)
+                    self.set(SFXRecordings.sounds + list)
                     SoundFXPlayer.shared.makeAhead(self.rows.map(\.id), python: python)
                 } else {
                     self.error = "Takes could not read the sounds. Turn Sound FX off and on, or install it again."
@@ -753,7 +779,7 @@ final class SoundFXPlayer: ObservableObject {
     /// One process: starting earshot costs more than most sounds.
     func makeAhead(_ ids: [String], python: String) {
         guard !ahead else { return }
-        let todo = ids.filter { !FileManager.default.fileExists(atPath: Self.file($0).path) }
+        let todo = ids.filter { !SFXRecordings.isRecording($0) && !FileManager.default.fileExists(atPath: Self.file($0).path) }
         guard !todo.isEmpty else { return }
         ahead = true
         Task.detached(priority: .background) {
@@ -788,6 +814,7 @@ final class SoundFXPlayer: ObservableObject {
 
     func toggle(_ id: String, python: String) {
         if playing == id || loading == id { stop(); loading = nil; return }
+        if SFXRecordings.isRecording(id) { if let f = SFXRecordings.file(id) { play(id, f) }; return }
         let file = Self.file(id)
         if FileManager.default.fileExists(atPath: file.path) { play(id, file); return }
         stop()
@@ -837,6 +864,14 @@ final class SoundFXSetup: ObservableObject {
     nonisolated static let dir = ("~/Library/Application Support/Takes/earshot" as NSString).expandingTildeInPath
     /// The pinned earshot: a new version is a change here, tested first.
     nonisolated static let source = "earshot @ https://github.com/Leonxlnx/earshot/archive/925ebe56a1b755e5d354ab642bb8f344440cfa9c.tar.gz"
+
+    /// Takes' own sounds (assets/sfx/takes-bank.json): earshot recipes with Takes' settings, loaded on top
+    /// of earshot's bank. In the app: Resources/SFX. In tests and `swift run`: the repo's assets/sfx.
+    nonisolated static let takesBank: String? = {
+        let dirs = [Bundle.main.resourceURL?.appending(path: "SFX"),
+                    URL(fileURLWithPath: #filePath).deletingLastPathComponent().appending(path: "../../../assets/sfx").standardized]
+        return dirs.compactMap { $0?.appending(path: "takes-bank.json").path }.first { FileManager.default.fileExists(atPath: $0) }
+    }()
 
     static var candidates: [String] {
         var c = [dir + "/.venv/bin/python"]
@@ -959,6 +994,7 @@ final class SoundFXSetup: ObservableObject {
         var env = ProcessInfo.processInfo.environment
         env["EARSHOT_OFFLINE"] = "1"
         if env["EARSHOT_HOME"] == nil, python.hasPrefix(dir) { env["EARSHOT_HOME"] = dir + "/home" }
+        if env["EARSHOT_BANK"] == nil, let bank = takesBank { env["EARSHOT_BANK"] = bank }
         p.environment = env
         let out = Pipe()
         p.standardOutput = out

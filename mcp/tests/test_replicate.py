@@ -37,7 +37,7 @@ class Replicate(unittest.TestCase):
         open(os.path.join(self.s, "still.png"), "wb").write(b"png")
         self.out = os.path.join(self.root, "out.mp4")
         open(self.out, "wb").write(b"fake mp4")
-        self.calls, self.started, self.failure = [], [], None
+        self.calls, self.started, self.failure, self.blips, self.running = [], [], None, 0, False
         self.real_http, self.real_start = t.rep_http, t.start_replicate
 
         def fake(method, path, body=None, upload=None):
@@ -49,9 +49,16 @@ class Replicate(unittest.TestCase):
                 return {"urls": {"get": "https://api.replicate.com/v1/files/" + os.path.basename(upload)}}
             if path.endswith("/predictions"):
                 return {"id": "p1", "status": "starting", "urls": {"get": "https://api.replicate.com/v1/predictions/p1"}}
+            if path.endswith("/predictions/p1/cancel"):
+                return {"id": "p1", "status": "canceled"}
             if path.endswith("/predictions/p1"):
+                if self.blips:
+                    self.blips -= 1
+                    raise t.RepBlip("Replicate did not answer: timed out")
                 if self.failure:
                     return {"id": "p1", "status": "failed", "error": self.failure}
+                if self.running:
+                    return {"id": "p1", "status": "processing"}
                 return {"id": "p1", "status": "succeeded", "output": ["https://replicate.delivery/x/out.mp4"], "metrics": {"predict_time": 61.2}}
             if path == "/account":
                 return {"username": "user"}
@@ -150,6 +157,69 @@ class Replicate(unittest.TestCase):
         job = self.run_job()
         self.assertEqual(job["status"], "error")
         self.assertIn("NSFW", job["error"])
+
+    def test_a_network_blip_while_it_runs_is_asked_again(self):
+        """The prediction goes on (and bills) through a blip or the Mac's sleep: one failed poll is not the end."""
+        self.blips = 3
+        t.t_replicate({"session": self.s, "prompt": "x"})
+        job = self.run_job()
+        self.assertEqual(job["status"], "done", job.get("error"))
+        self.assertFalse(any(c[1].endswith("/cancel") for c in self.calls))
+
+    def test_a_prediction_takes_gives_up_on_is_cancelled(self):
+        self.blips, real = 99, t.REP_POLL_RETRY
+        t.REP_POLL_RETRY = 0
+        try:
+            t.t_replicate({"session": self.s, "prompt": "x"})
+            job = self.run_job()
+        finally:
+            t.REP_POLL_RETRY = real
+        self.assertEqual(job["status"], "error")
+        self.assertIn("did not answer", job["error"])
+        self.assertEqual(self.calls[-1][:2], ("POST", "/predictions/p1/cancel"))
+
+    def test_a_blip_past_the_deadline_still_gets_its_answer(self):
+        """The Mac sleeps past 40 min and the first ask on wake fails: the next answer says done, so the clip lands."""
+        self.blips, real = 1, t.REP_TIMEOUT
+        t.REP_TIMEOUT = -1
+        try:
+            t.t_replicate({"session": self.s, "prompt": "x"})
+            job = self.run_job()
+        finally:
+            t.REP_TIMEOUT = real
+        self.assertEqual(job["status"], "done", job.get("error"))
+        self.assertFalse(any(c[1].endswith("/cancel") for c in self.calls))
+
+    def test_a_prediction_still_running_at_the_deadline_is_cancelled(self):
+        self.running, real = True, t.REP_TIMEOUT
+        t.REP_TIMEOUT = -1
+        try:
+            t.t_replicate({"session": self.s, "prompt": "x"})
+            job = self.run_job()
+        finally:
+            t.REP_TIMEOUT = real
+        self.assertEqual(job["status"], "error")
+        self.assertIn("did not finish", job["error"])
+        self.assertEqual(self.calls[-1][:2], ("POST", "/predictions/p1/cancel"))
+
+    def test_only_no_answer_5xx_and_429_count_as_a_blip(self):
+        import io
+        import urllib.error
+        import urllib.request
+        real = urllib.request.urlopen
+        for err, blip in ((urllib.error.URLError("offline"), True),
+                          (urllib.error.HTTPError("https://x.test", 503, "busy", {}, io.BytesIO(b"{}")), True),
+                          (urllib.error.HTTPError("https://x.test", 429, "slow", {}, io.BytesIO(b"{}")), True),
+                          (urllib.error.HTTPError("https://x.test", 401, "no", {}, io.BytesIO(b"{}")), False)):
+            def fail(req, timeout=None, err=err):
+                raise err
+            urllib.request.urlopen = fail
+            try:
+                with self.assertRaises(ValueError) as e:
+                    self.real_http("GET", "/predictions/p1")
+            finally:
+                urllib.request.urlopen = real
+            self.assertEqual(isinstance(e.exception, t.RepBlip), blip, err)
 
     def test_default_models_keep_their_order_and_the_first_is_used(self):
         self.assertEqual(t.rep_models(), ["bytedance/seedance-2.5"])

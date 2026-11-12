@@ -1,0 +1,18 @@
+{
+  "name": "Banknote",
+  "description": "A hard cut to a banknote. The speaker is the engraved portrait in the oval, still talking, drawn in green wavy lines that get thicker where the picture is dark. A big number types in digit by digit, with a title, a seal with the name, a red serial and a line of fine print.",
+  "when": "When you say a money number or a result: revenue, a price, 'this course made 120,000'.",
+  "needs": [
+    "the number, and the same number in words",
+    "the title line",
+    "the name and role on the seal",
+    "the serial and the fine print",
+    "the cut time where it starts",
+    "a cutout of the speaker (made in the steps)",
+    "the engraving data (lum.js, made in the steps)"
+  ],
+  "kind": "Cut-out",
+  "length_s": 3,
+  "shape": "any",
+  "shipped": true
+}

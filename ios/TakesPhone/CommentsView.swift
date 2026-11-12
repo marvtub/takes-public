@@ -148,7 +148,7 @@ struct CommentCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             if let p = comment.place {
-                Label(p, systemImage: comment.rect == nil ? "film" : "viewfinder")
+                Label(p, systemImage: comment.rect != nil ? "viewfinder" : comment.slide != nil ? "rectangle.portrait" : "film")
                     .font(.caption.monospacedDigit().weight(.medium)).foregroundStyle(Palette.accent)
             }
             if let q = comment.quote {
@@ -171,9 +171,11 @@ struct CommentCard: View {
                     Button("Send") {
                         let t = reply
                         Task {
-                            await model.reply(sessionID, comment: comment.id, text: t)
-                            reply = ""; replying = false
-                            await changed()
+                            let state = OutboxAcknowledgement.reply(
+                                sent: await model.reply(sessionID, comment: comment.id, text: t), draft: t)
+                            reply = state.draft
+                            replying = state.editing
+                            if state.accepted { await changed() }
                         }
                     }
                     .buttonStyle(.pill(small: true))
@@ -188,7 +190,11 @@ struct CommentCard: View {
                 Button("Reply") { withAnimation(Brand.spring) { replying.toggle() } }
                     .buttonStyle(.pill(.quiet, small: true))
                 Button(comment.open ? "Resolve" : "Reopen") {
-                    Task { await model.resolve(sessionID, comment: comment.id, comment.open); await changed() }
+                    Task {
+                        if await model.resolve(sessionID, comment: comment.id, comment.open) {
+                            await changed()
+                        }
+                    }
                 }
                 .buttonStyle(.pill(comment.open ? .soft : .quiet, small: true))
             }

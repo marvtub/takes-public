@@ -44,6 +44,21 @@ struct MarkdownReaderTests {
         #expect(text.contains("1.\tFirst"))
     }
 
+    /// The target list: a LinkedIn name in the first column gets a round face before it (initials
+    /// when no photo is saved); other columns and other links stay plain.
+    @Test func targetListFaces() {
+        let md = "| Name | Link |\n|---|---|\n| [Rachel Woods](https://www.linkedin.com/in/woodsrach/) | [x](https://www.linkedin.com/in/x/) |\n| [Doc](https://example.com) | a |\n"
+        let empty = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        let s = MarkdownText.attributed(md, faces: empty)
+        let text = s.string as NSString
+        let r = text.range(of: "Rachel Woods")
+        #expect(r.location >= 2 && s.attribute(.attachment, at: r.location - 2, effectiveRange: nil) is NSTextAttachment)
+        #expect(text.components(separatedBy: "\u{FFFC}").count == 2)
+        #expect(MarkdownText.attributed(md).string.contains("\u{FFFC}") == false)
+        #expect(MarkdownText.handle(URL(string: "https://www.linkedin.com/in/Some-Person/")!) == "some-person")
+        #expect(MarkdownText.handle(URL(string: "https://www.linkedin.com/company/x/")!) == nil)
+    }
+
     @Test func tableCells() {
         #expect(MarkdownText.attributed("| a | `x|y` | c \\| d |\n|---|---|---|\n").string == "a\nx|y\nc | d\n\n")
     }
@@ -70,7 +85,8 @@ struct MarkdownReaderTests {
                 tv.textContainerInset = NSSize(width: 40, height: 32)
                 tv.isVerticallyResizable = true
                 tv.backgroundColor = Theme.paperNS
-                tv.textStorage?.setAttributedString(MarkdownText.attributed(md, size: 14.5))
+                let faces = ProcessInfo.processInfo.environment["TAKES_FACES"].map { URL(fileURLWithPath: $0) }
+                tv.textStorage?.setAttributedString(MarkdownText.attributed(md, size: 14.5, faces: faces))
                 tv.layoutManager?.ensureLayout(for: tv.textContainer!)
                 tv.sizeToFit()
                 let h = min(2400, (tv.layoutManager?.usedRect(for: tv.textContainer!).height ?? 400) + 64)

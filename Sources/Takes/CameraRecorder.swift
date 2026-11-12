@@ -83,33 +83,64 @@ final class CameraRecorder: NSObject, ObservableObject, AVCaptureFileOutputRecor
     func boot() async {
         let cam = await AVCaptureDevice.requestAccess(for: .video)
         let mic = await AVCaptureDevice.requestAccess(for: .audio)
+        let found = await withCheckedContinuation { c in Self.discovery.async { c.resume(returning: Self.look()) } }
         await MainActor.run {
             if !cam || !mic {
                 permissionProblem = "Allow \(!cam ? "Camera" : "")\(!cam && !mic ? " and " : "")\(!mic ? "Microphone" : "") in System Settings → Privacy & Security."
             }
             ready = true
-            refreshDevices()
+            use(found)
             configure()
             apply()
+            LaunchProbe.step("camera")
         }
     }
 
+    struct Devices {
+        var video: [AVCaptureDevice] = [], audio: [AVCaptureDevice] = []
+        var defaultVideo: String?, defaultAudio: String?
+    }
+
+    /// Device lists are made here, never on main: the first look loads AVFoundation's device
+    /// plugins and took 120–230 ms, the second freeze after each launch (2026-11-06). Serial, so
+    /// the newest look lands last.
+    static let discovery = DispatchQueue(label: "takes.camera.devices", qos: .userInitiated)
+
+    /// Tests swap in a fake look.
+    nonisolated(unsafe) static var look: () -> Devices = discover
+
+    nonisolated static func discover() -> Devices {
+        Devices(
+            video: AVCaptureDevice.DiscoverySession(
+                deviceTypes: [.builtInWideAngleCamera, .continuityCamera, .external, .deskViewCamera],
+                mediaType: .video, position: .unspecified).devices,
+            audio: AVCaptureDevice.DiscoverySession(
+                deviceTypes: [.microphone, .external], mediaType: .audio, position: .unspecified).devices,
+            defaultVideo: AVCaptureDevice.default(for: .video)?.uniqueID,
+            defaultAudio: AVCaptureDevice.default(for: .audio)?.uniqueID)
+    }
+
+    /// A camera or mic came or went: look again off main, then pick on main.
     func refreshDevices() {
-        videoDevices = AVCaptureDevice.DiscoverySession(
-            deviceTypes: [.builtInWideAngleCamera, .continuityCamera, .external, .deskViewCamera],
-            mediaType: .video, position: .unspecified).devices
-        audioDevices = AVCaptureDevice.DiscoverySession(
-            deviceTypes: [.microphone, .external], mediaType: .audio, position: .unspecified).devices
+        Self.discovery.async { [weak self] in
+            let found = Self.look()
+            DispatchQueue.main.async { self?.use(found) }
+        }
+    }
+
+    private func use(_ found: Devices) {
+        videoDevices = found.video
+        audioDevices = found.audio
         if output.isRecording { return }
         if let p = preferredVideo, videoDevices.contains(where: { $0.uniqueID == p }) {
             videoID = p
         } else if !videoDevices.contains(where: { $0.uniqueID == videoID }) {
-            videoID = AVCaptureDevice.default(for: .video)?.uniqueID ?? videoDevices.first?.uniqueID
+            videoID = found.defaultVideo ?? videoDevices.first?.uniqueID
         }
         if let p = preferredAudio, audioDevices.contains(where: { $0.uniqueID == p }) {
             audioID = p
         } else if !audioDevices.contains(where: { $0.uniqueID == audioID }) {
-            audioID = AVCaptureDevice.default(for: .audio)?.uniqueID ?? audioDevices.first?.uniqueID
+            audioID = found.defaultAudio ?? audioDevices.first?.uniqueID
         }
     }
 

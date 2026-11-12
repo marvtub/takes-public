@@ -63,7 +63,9 @@ struct SessionsView: View {
                             Text("No sessions yet. Tap the pencil for a new one.")
                                 .font(.inter(.footnote)).foregroundStyle(Palette.faint)
                                 .padding(.horizontal, 12).padding(.top, 14)
-                        } else if !search.isEmpty && sections.isEmpty {
+                        } else if SessionSearchState.showsNoMatch(
+                            query: search, hasLiveMatches: !sections.isEmpty, hasArchivedMatches: !archived.isEmpty
+                        ) {
                             Text("No session matches \u{201C}\(search)\u{201D}.")
                                 .font(.inter(.footnote)).foregroundStyle(Palette.faint)
                                 .padding(.horizontal, 12).padding(.top, 14)

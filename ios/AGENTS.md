@@ -21,6 +21,8 @@ Mac over HTTPS on Tailscale (`API.swift`). The Mac side is `Sources/Takes/Phone.
 - `install.sh` builds and stages: the phone shows Update, and the tap installs it. Use
   `install.sh --now` only when the user asks.
 - A free Apple ID signs the app for 7 days. `refresh.sh` (an hourly LaunchAgent) renews it.
+- Call `ios/xcodebuild.sh`, never bare `xcodebuild`: it waits while the Mac is locked. A build while
+  locked deletes the Apple ID from Xcode, and every phone build then fails with "No Accounts".
 
 ## Check it
 

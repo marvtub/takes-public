@@ -26,7 +26,25 @@ struct CodexParseTests {
         #expect(p.finished)
         #expect(p.messages.allSatisfy { $0.done })
         #expect(p.messages.last?.text == "Done.")
-        #expect(p.context == ChatContext(used: 108_123, window: 272_000))
+        // The turn's usage adds up every call in it: not the context (2026-10-29: "200%+").
+        #expect(p.context == nil, "no Codex session file for this thread")
+    }
+
+    /// The context comes from Codex's session file: the last call over the model's own window.
+    @Test func theContextIsTheLastCallFromCodexsSessionFile() throws {
+        let home = FileManager.default.temporaryDirectory.appending(path: "codexhome-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: home) }
+        let day = home.appending(path: "sessions/2026/10/29")
+        try FileManager.default.createDirectory(at: day, withIntermediateDirectories: true)
+        func count(_ input: Int, _ window: Int) -> String {
+            #"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1237492799,"output_tokens":1306612},"#
+                + #""last_token_usage":{"input_tokens":\#(input),"output_tokens":70},"model_context_window":\#(window)}}}"#
+        }
+        let lines = [count(90_000, 475_000), #"{"type":"response_item","payload":{}}"#, count(351_109, 475_000),
+                     #"{"type":"event_msg","payload":{"type":"token_count","info":null}}"#]
+        try (lines.joined(separator: "\n") + "\n").write(to: day.appending(path: "rollout-2026-10-29T18-39-28-thread-9.jsonl"), atomically: true, encoding: .utf8)
+        #expect(CodexAdapter.context(thread: "thread-9", home: home) == ChatContext(used: 351_179, window: 475_000))
+        #expect(CodexAdapter.context(thread: "thread-8", home: home) == nil)
     }
 
     @Test func aFailedTurnShowsTheServersOwnWords() {
@@ -130,6 +148,7 @@ struct CodexRunTests {
         #expect(chat.agent == .codex)
         let dec = JSONDecoder()
         dec.dateDecodingStrategy = .iso8601
+        ClaudeChat.flushSaves()
         let log = try dec.decode(ChatLog.self, from: Data(contentsOf: ClaudeChat.file(session)))
         #expect(log.agent == "codex" && log.thread == "thread-77")
     }

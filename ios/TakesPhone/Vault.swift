@@ -10,25 +10,32 @@ enum Vault {
     private static let account = "token"
 
     static func save(_ token: String) throws {
-        delete()
-        var q: [String: Any] = [
+        let item: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecAttrAccount as String: account,
-            kSecValueData as String: Data(token.utf8),
         ]
+        let values = KeychainReplacement.updateValues(valueKey: kSecValueData as String,
+                                                       data: Data(token.utf8))
+        var addValues = values
         #if targetEnvironment(simulator)
         // The simulator has no passcode, so it cannot hold an item behind Face ID.
-        q[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+        addValues[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
         #else
         var error: Unmanaged<CFError>?
         guard let access = SecAccessControlCreateWithFlags(nil, kSecAttrAccessibleWhenPasscodeSetThisDeviceOnly,
                                                            .userPresence, &error) else {
             throw error!.takeRetainedValue() as Error
         }
-        q[kSecAttrAccessControl as String] = access
+        addValues[kSecAttrAccessControl as String] = access
         #endif
-        let s = SecItemAdd(q as CFDictionary, nil)
+        let s = KeychainReplacement.run(itemNotFound: errSecItemNotFound) {
+            SecItemUpdate(item as CFDictionary, values as CFDictionary)
+        } add: {
+            var q = item
+            q.merge(addValues) { _, replacement in replacement }
+            return SecItemAdd(q as CFDictionary, nil)
+        }
         guard s == errSecSuccess else {
             throw NSError(domain: NSOSStatusErrorDomain, code: Int(s),
                           userInfo: [NSLocalizedDescriptionKey: s == errSecParam || s == -25293

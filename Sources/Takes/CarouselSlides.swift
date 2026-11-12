@@ -165,10 +165,26 @@ final class SlidePictures: ObservableObject {
 
     /// Loads every picture the slides show, for export.
     func preload(_ files: [(URL, Double?)]) async {
-        for (url, at) in files where cache[Self.key(url, at)] == nil {
-            if let img = await Self.load(url, at: at) { cache[Self.key(url, at)] = img }
-            if Self.isVideo(url), lengths[url.path] == nil,
-               let d = try? await AVURLAsset(url: url).load(.duration) { lengths[url.path] = d.seconds }
+        var seen = Set<String>()
+        let todo = files.filter { cache[Self.key($0.0, $0.1)] == nil && seen.insert(Self.key($0.0, $0.1)).inserted }
+            .map { ($0.0, $0.1, Self.isVideo($0.0) && lengths[$0.0.path] == nil) }
+        // Each file is its own decode: 4 at a time, not one after another.
+        let got = await withTaskGroup(of: (URL, Double?, NSImage?, Double?).self) { group in
+            var got: [(URL, Double?, NSImage?, Double?)] = []
+            for (i, (url, at, wantLength)) in todo.enumerated() {
+                if i >= 4, let r = await group.next() { got.append(r) }
+                group.addTask {
+                    let img = await Self.load(url, at: at)
+                    let d = wantLength ? (try? await AVURLAsset(url: url).load(.duration))?.seconds : nil
+                    return (url, at, img, d)
+                }
+            }
+            for await r in group { got.append(r) }
+            return got
+        }
+        for (url, at, img, d) in got {
+            if let img { cache[Self.key(url, at)] = img }
+            if let d, lengths[url.path] == nil { lengths[url.path] = d }
         }
     }
 
@@ -437,8 +453,9 @@ struct CarouselSlideView: View {
 
     /// A picture filling its frame (or fitting it, on a white card), or a calm place for one.
     @ViewBuilder
+    /// `lift` moves the empty-picture hint up by that share of the height, off words drawn over the picture.
     private func picture(_ media: String, at: Double?, width pw: CGFloat, height ph: CGFloat, hint: String = "Drop a picture",
-                         fit: Bool = false) -> some View {
+                         fit: Bool = false, lift: CGFloat = 0) -> some View {
         let u = url(media)
         let img = u.flatMap { pictures.image($0, at: at) }
         ZStack {
@@ -458,6 +475,7 @@ struct CarouselSlideView: View {
                         }
                     }
                     .foregroundStyle(dark.opacity(0.35))
+                    .offset(y: -ph * lift)
                     RoundedRectangle(cornerRadius: 2).strokeBorder(dark.opacity(0.18), style: StrokeStyle(lineWidth: 1, dash: [5, 4]))
                 }
             }
@@ -522,8 +540,9 @@ struct CarouselSlideView: View {
     /// A picture under the whole slide, the words over its dark foot. A video slide starts here too.
     private var coverSlide: some View {
         ZStack(alignment: .bottomLeading) {
+            // The title sits on the lower half: the hint goes up, or "The picture is gone" ran into it (2026-11-07).
             picture(slide.media, at: slide.layout == .video ? (slide.start ?? 0) : slide.at, width: w, height: h,
-                    hint: slide.layout == .video ? "Drop a video" : "Drop a picture")
+                    hint: slide.layout == .video ? "Drop a video" : "Drop a picture", lift: 0.2)
             LinearGradient(colors: [.black.opacity(0), .black.opacity(0.78)], startPoint: .init(x: 0.5, y: 0.35), endPoint: .bottom)
                 .allowsHitTesting(false)
             VStack(alignment: .leading, spacing: w * 0.025) {

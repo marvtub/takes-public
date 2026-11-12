@@ -1,0 +1,16 @@
+{
+  "name": "Live cursor",
+  "description": "A named cursor flies in and drags a selection box over the speaker. The box turns into a design-tool selection with handles, a live size badge and an outline round the body. Then the cursor drags the speaker sideways like a layer, and the speaker slides back.",
+  "when": "When you talk about an agent or a tool that does the work for you, or about editing yourself: 'it moves me around like a layer'.",
+  "needs": [
+    "the name on the cursor",
+    "the box round the speaker's head and chest",
+    "the cut time where it starts",
+    "a cutout of the speaker (made in the steps)",
+    "a clean plate: the room without the speaker (plate.png)"
+  ],
+  "kind": "Cut-out",
+  "length_s": 4,
+  "shape": "any",
+  "shipped": true
+}

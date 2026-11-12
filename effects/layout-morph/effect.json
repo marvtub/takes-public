@@ -1,0 +1,14 @@
+{
+  "name": "Layout morph",
+  "description": "You sit over a screen recording in a card, a round bubble, a tall side panel or the full frame, and change layout mid-video: the box glides, resizes and rounds into the next layout in 0.7 s while a dark panel slides in or out, with a short real whoosh on each change.",
+  "when": "Screen + camera videos where the user asks to change layout mid-video: small while the screen matters, big when they talk to the lens.",
+  "needs": [
+    "a take with a camera and a screen file",
+    "the plan: each change's second in the cut and its layout (card, bubble, side, full), with a corner for card and bubble",
+    "the centre of the face in the camera, in its pixels",
+    "the edit's size and frame rate"
+  ],
+  "kind": "Overlay",
+  "shape": "any",
+  "shipped": true
+}

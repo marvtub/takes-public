@@ -12,6 +12,21 @@ let snapDir = ProcessInfo.processInfo.environment["TAKES_SNAP"]
 @MainActor
 @Suite struct Snap {
     func shoot(_ name: String, _ view: some View, size: CGSize, dark: Bool = false) {
+        let (window, host) = open(view, size: size, dark: dark)
+        for _ in 0..<5 { RunLoop.main.run(until: Date().addingTimeInterval(0.15)); host.layoutSubtreeIfNeeded() }
+        save(name, window, host)
+    }
+
+    /// The same, for a view whose data loads off the main actor (a detached task, a video's still
+    /// frame): it sleeps `settle` seconds, so those tasks can come back to the main actor first.
+    func shoot(_ name: String, _ view: some View, size: CGSize, dark: Bool = false, settle: Double) async {
+        let (window, host) = open(view, size: size, dark: dark)
+        let end = Date().addingTimeInterval(settle)
+        while Date() < end { try? await Task.sleep(for: .milliseconds(150)); host.layoutSubtreeIfNeeded() }
+        save(name, window, host)
+    }
+
+    private func open(_ view: some View, size: CGSize, dark: Bool) -> (NSWindow, NSView) {
         let host = NSHostingView(rootView: AnyView(view.frame(width: size.width, height: size.height)))
         host.frame = NSRect(origin: .zero, size: size)
         let window = NSWindow(contentRect: NSRect(x: -6000, y: -6000, width: size.width, height: size.height),
@@ -19,7 +34,10 @@ let snapDir = ProcessInfo.processInfo.environment["TAKES_SNAP"]
         window.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
         window.contentView = host
         window.orderFrontRegardless()
-        for _ in 0..<5 { RunLoop.main.run(until: Date().addingTimeInterval(0.15)); host.layoutSubtreeIfNeeded() }
+        return (window, host)
+    }
+
+    private func save(_ name: String, _ window: NSWindow, _ host: NSView) {
         let rep = host.bitmapImageRepForCachingDisplay(in: host.bounds)!
         host.cacheDisplay(in: host.bounds, to: rep)
         window.orderOut(nil)
@@ -44,6 +62,45 @@ let snapDir = ProcessInfo.processInfo.environment["TAKES_SNAP"]
         let doc = SessionDoc(url: s.url)
         shoot("sounds-wide-dark", SoundsPane(doc: doc, wide: true).environment(app), size: CGSize(width: 1000, height: 700), dark: true)
         shoot("sounds-column", SoundsPane(doc: doc).environment(app), size: CGSize(width: 420, height: 700))
+    }
+
+    /// The Made tab (make_music, 2026-11-03): empty, and with two songs, light and dark.
+    @Test(.enabled(if: snapDir != nil)) func soundsMade() throws {
+        let root = FileManager.default.temporaryDirectory.appending(path: "snap-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let s = root.appending(path: "Proj/2026-11-03-launch")
+        try FileManager.default.createDirectory(at: s, withIntermediateDirectories: true)
+        try Data(#"{"title":"Launch","createdAt":"2026-11-03T00:00:00Z","named":true,"takes":[]}"#.utf8)
+            .write(to: s.appending(path: "session.json"))
+        let audio = SoundLib.dir(root: root)
+        for f in ["Music/26428_Chasing the Truth.mp3", "SFX/1_Whoosh.mp3"] {
+            let u = audio.appending(path: f)
+            try FileManager.default.createDirectory(at: u.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try Data().write(to: u)
+        }
+        let app = AppModel()
+        app.library.setRoot(root)
+        let doc = SessionDoc(url: s)
+        shoot("sounds-made-empty", SoundsPane(doc: doc, wide: true, startOn: "Made").environment(app), size: CGSize(width: 1000, height: 520))
+        for f in ["Made/Moonlight piano over soft D&B v1.mp3", "Made/Heroic strings over soft D&B v1.mp3"] {
+            let u = audio.appending(path: f)
+            try FileManager.default.createDirectory(at: u.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try Data().write(to: u)
+        }
+        shoot("sounds-made", SoundsPane(doc: doc, wide: true, startOn: "Made").environment(app), size: CGSize(width: 1000, height: 520))
+        shoot("sounds-made-dark", SoundsPane(doc: doc, wide: true, startOn: "Made").environment(app), size: CGSize(width: 1000, height: 520), dark: true)
+        shoot("sounds-made-column", SoundsPane(doc: doc, startOn: "Made").environment(app), size: CGSize(width: 420, height: 560))
+        // Tags (2026-11-08): the filter row and the tags on each row, light and dark; the editor.
+        SoundTags.save(["Made/Moonlight piano over soft D&B v1.mp3": ["Education", "Calm"],
+                        "Made/Heroic strings over soft D&B v1.mp3": ["Education"]], to: audio)
+        shoot("sounds-tags", SoundsPane(doc: doc, wide: true, startOn: "Made").environment(app), size: CGSize(width: 1000, height: 520))
+        shoot("sounds-tags-dark", SoundsPane(doc: doc, wide: true, startOn: "Made").environment(app), size: CGSize(width: 1000, height: 520), dark: true)
+        shoot("sounds-tags-column", SoundsPane(doc: doc, startOn: "Made").environment(app), size: CGSize(width: 420, height: 560))
+        let editor = SoundTagEditor(title: "Moonlight piano over soft D&B v1", tags: ["Education", "Calm"],
+                                    suggestions: ["Education", "Calm", "Whoosh", "Upbeat"], onChange: { _ in })
+            .background(Theme.paper)
+        shoot("sounds-tag-editor", editor.environment(app), size: CGSize(width: 260, height: 190))
+        shoot("sounds-tag-editor-dark", editor.environment(app), size: CGSize(width: 260, height: 190), dark: true)
     }
 
     @Test(.enabled(if: snapDir != nil)) func sidebar() {

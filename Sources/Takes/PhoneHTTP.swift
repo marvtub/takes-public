@@ -93,6 +93,36 @@ struct ChunkedDecoder {
     }
 }
 
+/// The phone's outbox sends each change with its id (`X-Takes-Op`). On a weak link the Mac can
+/// act and the answer still not reach the phone: the phone then sends the change again. A repeat
+/// gets the first answer and is not done twice, also while the first one still runs
+/// (2026-11-02: one chat message sent from a bad connection ran five times).
+actor PhoneOnce {
+    private var done: [String: PhoneResponse] = [:]
+    private var order: [String] = []
+    private var running: [String: Task<PhoneResponse, Never>] = [:]
+    private let keep: Int
+
+    init(keep: Int = 500) { self.keep = keep }
+
+    /// Runs `work` once per id; `repeat` is true when it did not run this time. Only a yes is
+    /// kept: a change the Mac refused may go again.
+    func run(_ id: String, _ work: @escaping @Sendable () async -> PhoneResponse) async -> (PhoneResponse, repeat: Bool) {
+        if let r = done[id] { return (r, true) }
+        if let t = running[id] { return (await t.value, true) }
+        let t = Task { await work() }
+        running[id] = t
+        let r = await t.value
+        running[id] = nil
+        if case .json(_, let status) = r, status == 200 {
+            done[id] = r
+            order.append(id)
+            if order.count > keep { done[order.removeFirst()] = nil }
+        }
+        return (r, false)
+    }
+}
+
 /// Things a connection asks of the server.
 protocol PhoneHandler: AnyObject, Sendable {
     /// Before an upload body arrives: where to write it, or the error to send at once.

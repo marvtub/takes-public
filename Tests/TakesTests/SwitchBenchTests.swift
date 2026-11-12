@@ -34,7 +34,19 @@ import Testing
         FileManager.default.createFile(atPath: to.path, contents: Data())
     }
 
+    /// A copy of a real library (APFS clone) to switch through in place of the made-up one:
+    /// TAKES_BENCH_LIBRARY=/path. Its biggest project is used. Never point it at ~/Movies/Takes.
+    static let real = ProcessInfo.processInfo.environment["TAKES_BENCH_LIBRARY"].flatMap { $0.isEmpty ? nil : URL(fileURLWithPath: $0) }
+
+    /// The session's first edit (clip-v1.mp4 in the made-up library).
+    static func edit(in session: URL) -> URL? {
+        let dir = session.appending(path: "edits")
+        return ((try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? [])
+            .filter { $0.pathExtension == "mp4" }.sorted { $0.lastPathComponent < $1.lastPathComponent }.first
+    }
+
     static func library() -> URL {
+        if let real { return real }
         let fm = FileManager.default
         let root = fm.temporaryDirectory.appending(path: "takes-switchbench-\(UUID().uuidString)")
         let project = root.appending(path: "Bench")
@@ -101,19 +113,20 @@ import Testing
 
     @Test(.enabled(if: bench)) func sessionSwitch() throws {
         let root = Self.library()
-        defer { try? FileManager.default.removeItem(at: root) }
+        defer { if Self.real == nil { try? FileManager.default.removeItem(at: root) } }
         let d = UserDefaults.standard
         let oldTab = d.string(forKey: "rightTab")
         defer { d.set(oldTab, forKey: "rightTab") }
         let app = AppModel()
         app.library.setRoot(root)
-        app.library.selectedProject = app.library.projects.first?.url
+        app.library.selectedProject = (Self.real == nil ? app.library.projects.first
+            : app.library.projects.max { (app.library.grouped[$0.url]?.count ?? 0) < (app.library.grouped[$1.url]?.count ?? 0) })?.url
         let urls = app.library.sessions.map(\.url)
         // The chat beside the session, as the user keeps it (TAKES_BENCH_CHAT=0 closes it).
         let chatOpen = ProcessInfo.processInfo.environment["TAKES_BENCH_CHAT"] != "0"
         app.chats.docked = chatOpen
         app.chats.open = chatOpen
-        try #require(urls.count == Self.shapes.count)
+        try #require(Self.real != nil || urls.count == Self.shapes.count)
         let host = NSHostingView(rootView: AnyView(ContentView(library: app.library).environment(app).frame(width: 1400, height: 900)))
         let window = NSWindow(contentRect: NSRect(x: -4000, y: -4000, width: 1400, height: 900),
                               styleMask: [.borderless], backing: .buffered, defer: false)
@@ -138,10 +151,11 @@ import Testing
                 // Each session opens on its own tab, as in the app: Assets with an edit in the player,
                 // the post, or the script.
                 for (i, u) in urls.enumerated() {
-                    let edit = u.appending(path: "edits/clip-v1.mp4")
-                    let hasEdit = FileManager.default.fileExists(atPath: edit.path)
-                    switch i % 3 {
-                    case 0 where hasEdit: SessionView.write(u, mode: .assets, file: edit, time: 0)
+                    let edit = Self.edit(in: u)
+                    // TAKES_BENCH_COVER=1: every session opens on its post (a full-window tab).
+                    let pick = ProcessInfo.processInfo.environment["TAKES_BENCH_COVER"] == "1" ? 1 : i % 3
+                    switch pick {
+                    case 0 where edit != nil: SessionView.write(u, mode: .assets, file: edit, time: 0)
                     case 1: SessionView.write(u, mode: .post, file: nil, time: nil)
                     default: SessionView.write(u, mode: .record, file: nil, time: nil)
                     }
@@ -151,17 +165,18 @@ import Testing
             }
             app.library.selectedSessions = []
             settle()
-            var times: [Double] = [], opens: [Double] = []
+            var times: [Double] = [], opens: [Double] = [], walls: [Double] = []
             let names = ["TakeRow", "AssetTile", "TakesList", "SessionHeader", "DetailView", "ChatRows", "PostPane", "ScriptPane"]
             let before = names.map { Perf.count($0) }
             for round in 0..<(Int(ProcessInfo.processInfo.environment["TAKES_BENCH_ROUNDS"] ?? "") ?? 3) {
                 for u in urls {
                     // The main thread's own CPU time: other work on the Mac barely moves it.
-                    let t = cpu()
+                    let t = cpu(), w = CACurrentMediaTime()
                     app.library.selectedSessions = [u]
                     let o = cpu()
                     settle()
-                    if round > 0 { times.append((cpu() - t) * 1000); opens.append((o - t) * 1000) }
+                    if round > 0 { times.append((cpu() - t) * 1000); opens.append((o - t) * 1000)
+                        walls.append((CACurrentMediaTime() - w) * 1000) }
                 }
             }
             let bodies = zip(names, before).map { "\($0.0) \(Perf.count($0.0) - $0.1)" }.joined(separator: ", ")
@@ -171,7 +186,246 @@ import Testing
             let p = { (q: Double) in s[min(s.count - 1, Int(Double(s.count) * q))] }
             report.append(String(format: "BENCH switch %@ (main thread CPU): n %d, p50 %.1f ms, p90 %.1f, max %.1f, mean %.1f",
                                  tab, s.count, p(0.5), p(0.9), s.last ?? 0, s.reduce(0, +) / Double(s.count)))
+            let ws = walls.sorted()
+            let wp = { (q: Double) in ws[min(ws.count - 1, Int(Double(ws.count) * q))] }
+            report.append(String(format: "BENCH switch %@ (wall): n %d, p50 %.1f ms, p95 %.1f, max %.1f",
+                                 tab, ws.count, wp(0.5), wp(0.95), ws.last ?? 0))
         }
         report.forEach { print($0) }
+    }
+
+    /// Tab switches inside a session, each tab opened fresh (a new session keeps no tabs), and a
+    /// click on an edit in Assets (the stage's ReviewPlayer). Main-thread CPU per switch, until
+    /// drawn. TAKES_BENCH_TABS limits the tabs ("assets,post").
+    ///   TAKES_BENCH=1 swift test --filter ZBenchSwitch/tabSwitch
+    @Test(.enabled(if: bench)) func tabSwitch() throws {
+        let root = Self.library()
+        defer { if Self.real == nil { try? FileManager.default.removeItem(at: root) } }
+        let d = UserDefaults.standard
+        let oldTab = d.string(forKey: "rightTab"), oldPlatform = d.string(forKey: "postPlatform")
+        defer { d.set(oldTab, forKey: "rightTab"); d.set(oldPlatform, forKey: "postPlatform") }
+        let app = AppModel()
+        app.library.setRoot(root)
+        app.library.selectedProject = (Self.real == nil ? app.library.projects.first
+            : app.library.projects.max { (app.library.grouped[$0.url]?.count ?? 0) < (app.library.grouped[$1.url]?.count ?? 0) })?.url
+        let urls = app.library.sessions.map(\.url)
+        let chatOpen = ProcessInfo.processInfo.environment["TAKES_BENCH_CHAT"] == "1"
+        app.chats.docked = chatOpen
+        app.chats.open = chatOpen
+        let host = NSHostingView(rootView: AnyView(ContentView(library: app.library).environment(app).frame(width: 1400, height: 900)))
+        let window = NSWindow(contentRect: NSRect(x: -4000, y: -4000, width: 1400, height: 900),
+                              styleMask: [.borderless], backing: .buffered, defer: false)
+        window.contentView = host
+        func settle() {
+            for _ in 0..<3 {
+                RunLoop.main.run(until: Date())
+                host.layoutSubtreeIfNeeded()
+                host.displayIfNeeded()
+            }
+        }
+        defer {
+            var all = d.dictionary(forKey: SessionView.key) ?? [:]
+            for key in all.keys where key.hasPrefix(root.standardizedFileURL.path) { all[key] = nil }
+            d.set(all, forKey: SessionView.key)
+        }
+        let env = ProcessInfo.processInfo.environment
+        let tabs = (env["TAKES_BENCH_TABS"] ?? "assets,post:linkedin,post:vertical,post:youtube,storyboard,write,script,video")
+            .split(separator: ",").map(String.init)
+        var times: [String: [Double]] = [:], walls: [String: [Double]] = [:]
+        for round in 0..<(Int(env["TAKES_BENCH_ROUNDS"] ?? "") ?? 3) {
+            for u in urls {
+                app.preview = nil
+                d.set("script", forKey: "rightTab")
+                app.library.selectedSessions = [u]
+                settle()
+                for tab in tabs {
+                    if tab == "record-later" {
+                        // The session opens on a full-window tab; a second later, back to Record.
+                        d.set("script", forKey: "rightTab"); app.library.selectedSessions = []; settle()
+                        d.set("post", forKey: "rightTab"); app.library.selectedSessions = [u]; settle()
+                        RunLoop.main.run(until: Date().addingTimeInterval(1)); settle()
+                        let t = cpu(), w = CACurrentMediaTime()
+                        d.set("script", forKey: "rightTab")
+                        settle()
+                        if round > 0 { times[tab, default: []].append((cpu() - t) * 1000)
+                            walls[tab, default: []].append((CACurrentMediaTime() - w) * 1000) }
+                        continue
+                    }
+                    if tab == "video" {
+                        // A click on an edit in Assets: it plays on the stage.
+                        guard let edit = Self.edit(in: u) else { continue }
+                        d.set("assets", forKey: "rightTab"); settle()
+                        let t = cpu(), w = CACurrentMediaTime()
+                        app.preview = edit
+                        settle()
+                        if round > 0 { times[tab, default: []].append((cpu() - t) * 1000)
+                            walls[tab, default: []].append((CACurrentMediaTime() - w) * 1000) }
+                        app.preview = nil; settle()
+                        continue
+                    }
+                    let parts = tab.split(separator: ":").map(String.init)
+                    if parts.count > 1 { d.set(parts[1], forKey: "postPlatform") }
+                    // Back to Record first, so each post side opens as a new pane.
+                    if parts.count > 1 { d.set("script", forKey: "rightTab"); app.library.selectedSessions = []; settle()
+                        app.library.selectedSessions = [u]; settle() }
+                    let t = cpu(), w = CACurrentMediaTime()
+                    d.set(parts[0], forKey: "rightTab")
+                    settle()
+                    if round > 0 { times[tab, default: []].append((cpu() - t) * 1000)
+                        walls[tab, default: []].append((CACurrentMediaTime() - w) * 1000) }
+                }
+            }
+        }
+        for tab in tabs {
+            let s = (times[tab] ?? []).sorted()
+            guard !s.isEmpty else { continue }
+            let p = { (q: Double) in s[min(s.count - 1, Int(Double(s.count) * q))] }
+            print(String(format: "BENCH tab %@ (main thread CPU): n %d, p50 %.1f ms, p95 %.1f, max %.1f, mean %.1f",
+                         tab, s.count, p(0.5), p(0.95), s.last ?? 0, s.reduce(0, +) / Double(s.count)))
+            let ws = (walls[tab] ?? []).sorted()
+            let wp = { (q: Double) in ws[min(ws.count - 1, Int(Double(ws.count) * q))] }
+            print(String(format: "BENCH tab %@ (wall): n %d, p50 %.1f ms, p95 %.1f, max %.1f",
+                         tab, ws.count, wp(0.5), wp(0.95), ws.last ?? 0))
+        }
+    }
+
+    /// What each part of a session costs to build, lay out and draw on its own, in a new host:
+    /// tells which part of a switch is worth a fix. Main-thread CPU, median and p95 over sessions.
+    ///   TAKES_BENCH=1 swift test --filter ZBenchSwitch/parts
+    @Test(.enabled(if: bench)) func parts() throws {
+        let root = Self.library()
+        defer { if Self.real == nil { try? FileManager.default.removeItem(at: root) } }
+        let d = UserDefaults.standard
+        let oldPlatform = d.string(forKey: "postPlatform")
+        defer { d.set(oldPlatform, forKey: "postPlatform") }
+        let app = AppModel()
+        app.library.setRoot(root)
+        app.library.selectedProject = (Self.real == nil ? app.library.projects.first
+            : app.library.projects.max { (app.library.grouped[$0.url]?.count ?? 0) < (app.library.grouped[$1.url]?.count ?? 0) })?.url
+        let docs = app.library.sessions.map { SessionDoc(url: $0.url) }
+        func time(_ size: CGSize, _ make: () -> AnyView) -> Double {
+            let t = cpu()
+            let host = NSHostingView(rootView: make().environment(app).frame(width: size.width, height: size.height))
+            let window = NSWindow(contentRect: NSRect(x: -4000, y: -4000, width: size.width, height: size.height),
+                                  styleMask: [.borderless], backing: .buffered, defer: false)
+            window.contentView = host
+            for _ in 0..<3 { RunLoop.main.run(until: Date()); host.layoutSubtreeIfNeeded(); host.displayIfNeeded() }
+            let ms = (cpu() - t) * 1000
+            window.contentView = nil
+            return ms
+        }
+        let wide = CGSize(width: 1100, height: 860), column = CGSize(width: 420, height: 860)
+        var parts: [(String, CGSize, (SessionDoc) -> AnyView)] = [
+            ("sidebar", CGSize(width: 260, height: 860), { _ in AnyView(SessionList(library: app.library, queue: app.posts)) }),
+            ("header", CGSize(width: 1100, height: 52), { AnyView(SessionHeader(doc: $0)) }),
+            ("assets wide", wide, { AnyView(AssetsPane(doc: $0, wide: true)) }),
+            ("assets column", column, { AnyView(AssetsPane(doc: $0)) }),
+            ("script", column, { AnyView(ScriptPane(doc: $0)) }),
+            ("takes", column, { AnyView(TakesList(doc: $0)) }),
+            ("write", wide, { AnyView(ScriptPage(doc: $0)) }),
+            ("storyboard", wide, { AnyView(StoryboardPane(doc: $0)) }),
+        ]
+        for p in ["linkedin", "x", "youtube", "vertical"] {
+            parts.append(("post \(p)", wide, { doc in d.set(p, forKey: "postPlatform"); return AnyView(PostPane(doc: doc)) }))
+        }
+        parts.append(("review player", CGSize(width: 900, height: 700), { doc in
+            AnyView(ReviewPlayer(url: Self.edit(in: doc.url)!, session: doc.url)) }))
+        let rounds = Int(ProcessInfo.processInfo.environment["TAKES_BENCH_ROUNDS"] ?? "") ?? 3
+        let only = ProcessInfo.processInfo.environment["TAKES_BENCH_PART"]
+        for (name, size, make) in parts where only == nil || name.hasPrefix(only!) {
+            var s: [Double] = []
+            for round in 0..<rounds {
+                for doc in docs {
+                    if name == "review player", Self.edit(in: doc.url) == nil { continue }
+                    let ms = time(size) { make(doc) }
+                    if round > 0 { s.append(ms) }
+                }
+            }
+            s.sort()
+            guard !s.isEmpty else { continue }
+            print(String(format: "BENCH part %@: n %d, p50 %.1f ms, p95 %.1f, max %.1f", name, s.count,
+                         s[s.count / 2], s[min(s.count - 1, Int(Double(s.count) * 0.95))], s.last ?? 0))
+        }
+    }
+
+    /// The sidebar alone while the selection moves from session to session (each project's
+    /// sessions shown): what a switch costs the session list. Main-thread CPU per click.
+    ///   TAKES_BENCH=1 swift test --filter ZBenchSwitch/sidebarSelect
+    @Test(.enabled(if: bench)) func sidebarSelect() throws {
+        let root = Self.library()
+        defer { if Self.real == nil { try? FileManager.default.removeItem(at: root) } }
+        let app = AppModel()
+        app.library.setRoot(root)
+        let urls = app.library.grouped.values.joined().filter { !$0.archived && !$0.done }.map(\.url)
+        let host = NSHostingView(rootView: AnyView(SessionList(library: app.library, queue: app.posts)
+            .environment(app).frame(width: 260, height: 900)))
+        let window = NSWindow(contentRect: NSRect(x: -4000, y: -4000, width: 260, height: 900),
+                              styleMask: [.borderless], backing: .buffered, defer: false)
+        window.contentView = host
+        func settle() { for _ in 0..<3 { RunLoop.main.run(until: Date()); host.layoutSubtreeIfNeeded(); host.displayIfNeeded() } }
+        settle()
+        var s: [Double] = []
+        let before = Perf.count("SessionList")
+        for round in 0..<(Int(ProcessInfo.processInfo.environment["TAKES_BENCH_ROUNDS"] ?? "") ?? 3) {
+            for u in urls {
+                let t = cpu()
+                app.library.selectedSessions = [u]
+                settle()
+                if round > 0 { s.append((cpu() - t) * 1000) }
+            }
+        }
+        s.sort()
+        print(String(format: "BENCH sidebar select (%d sessions): n %d, p50 %.2f ms, p95 %.2f, max %.2f; SessionList bodies %d",
+                     urls.count, s.count, s[s.count / 2], s[min(s.count - 1, Int(Double(s.count) * 0.95))], s.last ?? 0,
+                     Perf.count("SessionList") - before))
+    }
+
+    /// Scrolling the long lists: the Assets page with every section open (the session with the
+    /// most files) and the sidebar. Main-thread CPU per 40 pt step, laid out and drawn.
+    ///   TAKES_BENCH=1 swift test --filter ZBenchSwitch/scrolling
+    @Test(.enabled(if: bench)) func scrolling() throws {
+        let root = Self.library()
+        defer { if Self.real == nil { try? FileManager.default.removeItem(at: root) } }
+        let app = AppModel()
+        app.library.setRoot(root)
+        let all = app.library.grouped.values.joined().map(\.url)
+        let store = AssetStore()
+        let biggest = try #require(all.max { a, b in
+            store.scan(SessionDoc(url: a)); let n = store.assets.count
+            store.scan(SessionDoc(url: b)); return n < store.assets.count
+        })
+        let doc = SessionDoc(url: biggest)
+        store.scan(doc)
+        for (name, size, view) in [
+            ("assets (\(store.assets.count) files)", CGSize(width: 1100, height: 860), AnyView(AssetsPane(doc: doc, wide: true, openAll: true))),
+            ("sidebar (\(all.count) sessions)", CGSize(width: 260, height: 600), AnyView(SessionList(library: app.library, queue: app.posts))),
+        ] {
+            let host = NSHostingView(rootView: view.environment(app).frame(width: size.width, height: size.height))
+            let window = NSWindow(contentRect: NSRect(x: -4000, y: -4000, width: size.width, height: size.height),
+                                  styleMask: [.borderless], backing: .buffered, defer: false)
+            window.contentView = host
+            func settle() { for _ in 0..<2 { RunLoop.main.run(until: Date()); host.layoutSubtreeIfNeeded(); host.displayIfNeeded() } }
+            for _ in 0..<20 { settle(); RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+            func scrolls(_ v: NSView) -> [NSScrollView] { ((v as? NSScrollView).map { [$0] } ?? []) + v.subviews.flatMap(scrolls) }
+            guard let scroll = scrolls(host).max(by: { ($0.documentView?.frame.height ?? 0) < ($1.documentView?.frame.height ?? 0) }),
+                  let docView = scroll.documentView else { continue }
+            var s: [Double] = []
+            for pass in 0..<3 {
+                var y: CGFloat = 0
+                docView.scroll(.zero); settle()
+                while y + size.height < docView.frame.height {
+                    y += 40
+                    let t = cpu()
+                    docView.scroll(NSPoint(x: 0, y: y))
+                    settle()
+                    if pass > 0 { s.append((cpu() - t) * 1000) }
+                }
+            }
+            s.sort()
+            guard !s.isEmpty else { print("BENCH scroll \(name): no scroll"); continue }
+            print(String(format: "BENCH scroll %@: %.0f pt, n %d, p50 %.2f ms, p95 %.2f, max %.2f", name, docView.frame.height, s.count,
+                         s[s.count / 2], s[min(s.count - 1, Int(Double(s.count) * 0.95))], s.last ?? 0))
+            window.contentView = nil
+        }
     }
 }

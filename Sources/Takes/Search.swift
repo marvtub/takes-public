@@ -1063,7 +1063,7 @@ struct SearchPage: View {
             VStack(alignment: .leading, spacing: 22) {
                 VStack(alignment: .leading, spacing: 6) {
                     Text("Search").font(Theme.display(26)).foregroundStyle(Theme.ink)
-                    Text("Press ⌘K and describe what you look for: \"hands typing\", \"walking outside\", \"where I talk about pricing\". Takes finds clips by what they show, stills, and the words in transcripts and scripts. It runs on this Mac. Nothing leaves it.")
+                    Text("Press ⌘K and describe what you look for: \u{201C}hands typing\u{201D}, \u{201C}walking outside\u{201D}, \u{201C}where I talk about pricing\u{201D}. Takes finds clips by what they show, stills, and the words in transcripts and scripts. It runs on this Mac. Nothing leaves it.")
                         .font(Theme.sans(12.5)).foregroundStyle(Theme.muted).fixedSize(horizontal: false, vertical: true)
                 }
                 VStack(alignment: .leading, spacing: 12) {

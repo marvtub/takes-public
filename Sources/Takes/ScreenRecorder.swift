@@ -1,9 +1,10 @@
 import AppKit
 import ScreenCaptureKit
 
-/// One display into its own .mov (HEVC, 60fps, cursor on, mic included for waveform sync).
+/// One display into its own .mov (HEVC, 60fps, mic included for waveform sync). The pointer is left
+/// out and drawn back from the cursor log (CursorLog.swift) when the arrow can be drawn, else kept in.
 /// The Takes window itself is excluded, so the script never shows up in the screen file.
-final class ScreenRecorder: NSObject, ObservableObject, SCStreamDelegate, SCRecordingOutputDelegate {
+final class ScreenRecorder: NSObject, ObservableObject, SCStreamDelegate, SCRecordingOutputDelegate, SCStreamOutput {
     struct Display: Identifiable, Hashable { let id: CGDirectDisplayID; let name: String }
     /// One app window to record instead of a whole display (the screen pill, 2026-10-14).
     struct Window: Identifiable, Hashable { let id: CGWindowID; let app: String; let title: String }
@@ -22,6 +23,11 @@ final class ScreenRecorder: NSObject, ObservableObject, SCStreamDelegate, SCReco
     private var startCont: CheckedContinuation<Date, Error>?
     private var stopCont: CheckedContinuation<Void, Never>?
     private let lock = NSLock()
+    /// The cursor log of the take being recorded (CursorLog.swift).
+    private var cursor: CursorLog?
+    /// The take being recorded notes shortcuts (the pill's ⌨, KeyLog.swift).
+    @Published var keysLive = false
+    private let frames = DispatchQueue(label: "takes.screen.frames", qos: .utility)
 
     override init() {
         super.init()
@@ -63,13 +69,16 @@ final class ScreenRecorder: NSObject, ObservableObject, SCStreamDelegate, SCReco
     func startRecording(to url: URL, micID: String?) async throws -> Date {
         let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
         let filter: SCContentFilter
+        let area: CGRect, picked: CGWindowID?
         if let id = windowID, let window = content.windows.first(where: { $0.windowID == id }) {
             filter = SCContentFilter(desktopIndependentWindow: window)
+            area = window.frame; picked = id
         } else {
             guard let display = content.displays.first(where: { $0.displayID == displayID }) ?? content.displays.first
             else { throw RecorderError("No display found.") }
             let me = content.applications.filter { $0.bundleIdentifier == Bundle.main.bundleIdentifier }
             filter = SCContentFilter(display: display, excludingApplications: me, exceptingWindows: [])
+            area = CGDisplayBounds(display.displayID); picked = nil
         }
 
         let config = SCStreamConfiguration()
@@ -77,7 +86,10 @@ final class ScreenRecorder: NSObject, ObservableObject, SCStreamDelegate, SCReco
         config.width = Int(filter.contentRect.width * scale)
         config.height = Int(filter.contentRect.height * scale)
         config.minimumFrameInterval = CMTime(value: 1, timescale: 60)
-        config.showsCursor = true
+        // 2026-10-30: Takes draws the pointer from the cursor log (render_edit, the stage), so the
+        // video leaves it out. No arrow to draw it with: the video keeps it, as before.
+        let (arrow, keys) = await MainActor.run { (CursorLog.arrow(), KeyLog.on && KeyLog.allowed) }
+        config.showsCursor = arrow == nil
         config.queueDepth = 6
         config.capturesAudio = false
         if let micID {
@@ -93,6 +105,16 @@ final class ScreenRecorder: NSObject, ObservableObject, SCStreamDelegate, SCReco
 
         let stream = SCStream(filter: filter, configuration: config, delegate: self)
         try stream.addRecordingOutput(recording)
+        // 2026-10-30: the cursor log. The frames come here too, only for the first one's time: the
+        // .mov starts at that frame, so the log's clock does too.
+        let map = CursorMap(area: area, mainHeight: Double(CGDisplayBounds(CGMainDisplayID()).height),
+                            size: CGSize(width: config.width, height: config.height))
+        let log = CursorLog(video: url, map: map, source: picked == nil ? "display" : "window",
+                            scale: Double(scale), fps: 60, windowID: picked, arrow: arrow, keys: keys)
+        log.onKeys = { [weak self] on in self?.keysLive = on }
+        try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: frames)
+        lock.withLock { cursor = log }
+        log.start()
         self.stream = stream
         return try await withCheckedThrowingContinuation { cont in
             lock.withLock { startCont = cont }
@@ -114,6 +136,9 @@ final class ScreenRecorder: NSObject, ObservableObject, SCStreamDelegate, SCReco
             }
         }
         self.stream = nil
+        let log = lock.withLock { () -> CursorLog? in defer { cursor = nil }; return cursor }
+        log?.finish()
+        await MainActor.run { keysLive = false }
     }
 
     /// Gives up on a start that has not begun yet (Record pressed again while "Starting…").
@@ -127,6 +152,14 @@ final class ScreenRecorder: NSObject, ObservableObject, SCStreamDelegate, SCReco
     private func resumeStop() {
         let c = lock.withLock { () -> CheckedContinuation<Void, Never>? in defer { stopCont = nil }; return stopCont }
         c?.resume()
+    }
+
+    /// Only the first complete frame matters: its time is 0 in the .mov and in the cursor log.
+    func stream(_ stream: SCStream, didOutputSampleBuffer sb: CMSampleBuffer, of type: SCStreamOutputType) {
+        guard type == .screen, let log = lock.withLock({ cursor }) else { return }
+        guard let info = CMSampleBufferGetSampleAttachmentsArray(sb, createIfNecessary: false) as? [[SCStreamFrameInfo: Any]],
+              let raw = info.first?[.status] as? Int, SCFrameStatus(rawValue: raw) == .complete else { return }
+        log.frame(at: CMSampleBufferGetPresentationTimeStamp(sb).seconds)
     }
 
     func recordingOutputDidStartRecording(_ recordingOutput: SCRecordingOutput) { resumeStart(.success(Date())) }

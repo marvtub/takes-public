@@ -1,0 +1,4 @@
+{
+  "zoom": {"auto": true, "level": 1.8},
+  "pointer": {"smooth": true, "hide_idle": true, "look": "system", "size": 1.25}
+}

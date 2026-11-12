@@ -7,8 +7,11 @@ import SwiftUI
 
 enum MarkdownText {
     /// The whole file as styled text. `size` is the body size.
-    static func attributed(_ md: String, size: CGFloat = 14) -> NSAttributedString {
-        var r = Builder(size: size)
+    /// `faces`: a folder of <handle>.jpg. A link to linkedin.com/in/<handle> then shows that
+    /// person's round photo before the name, or their initials when there is none (the target
+    /// list, 2026-11-07).
+    static func attributed(_ md: String, size: CGFloat = 14, faces: URL? = nil) -> NSAttributedString {
+        var r = Builder(size: size, faces: faces)
         r.build(md.replacingOccurrences(of: "\r\n", with: "\n").components(separatedBy: "\n"))
         return r.out
     }
@@ -20,7 +23,7 @@ enum MarkdownText {
     }
 
     /// Bold, italic, code and links inside one line, in the given font.
-    static func inline(_ s: String, font: NSFont, color: NSColor) -> NSAttributedString {
+    static func inline(_ s: String, font: NSFont, color: NSColor, faces: URL? = nil) -> NSAttributedString {
         let opts = AttributedString.MarkdownParsingOptions(interpretedSyntax: .inlineOnlyPreservingWhitespace,
                                                            failurePolicy: .returnPartiallyParsedIfPossible)
         let parsed = (try? AttributedString(markdown: s, options: opts)) ?? AttributedString(s)
@@ -39,6 +42,10 @@ enum MarkdownText {
                 if i.contains(.strikethrough) { attrs[.strikethroughStyle] = NSUnderlineStyle.single.rawValue }
             }
             if let link = run.link {
+                if let faces, let face = face(link, name: text, folder: faces, size: font.pointSize * 2.2, font: font) {
+                    out.append(face)
+                    out.append(NSAttributedString(string: " ", attributes: [.font: font]))
+                }
                 attrs[.link] = link
                 attrs[.foregroundColor] = NSColor(Theme.accentInk)
             }
@@ -48,10 +55,47 @@ enum MarkdownText {
         return out
     }
 
+    /// The LinkedIn handle of a profile link, lowercased: the photo's file name.
+    static func handle(_ link: URL) -> String? {
+        guard link.host?.hasSuffix("linkedin.com") == true else { return nil }
+        let parts = link.pathComponents.filter { $0 != "/" }
+        guard parts.count >= 2, parts[0] == "in" else { return nil }
+        return parts[1].removingPercentEncoding?.lowercased() ?? parts[1].lowercased()
+    }
+
+    /// A round photo (or initials on a soft disc) sitting on the text's middle.
+    static func face(_ link: URL, name: String, folder: URL, size d: CGFloat, font: NSFont) -> NSAttributedString? {
+        guard let h = handle(link) else { return nil }
+        let photo = NSImage(contentsOf: folder.appending(path: h + ".jpg"))
+        let initials = name.split(separator: " ").prefix(2).compactMap(\.first).map(String.init).joined().uppercased()
+        let img = NSImage(size: NSSize(width: d, height: d), flipped: false) { r in
+            let circle = NSBezierPath(ovalIn: r)
+            if let photo, photo.size.width > 0 {
+                circle.addClip()
+                let s = photo.size, k = max(r.width / s.width, r.height / s.height)
+                let w = s.width * k, hgt = s.height * k
+                photo.draw(in: NSRect(x: (r.width - w) / 2, y: (r.height - hgt) / 2, width: w, height: hgt))
+            } else {
+                NSColor(Theme.hover).setFill()
+                circle.fill()
+                let f = Self.font(d * 0.4, .semibold)
+                let a: [NSAttributedString.Key: Any] = [.font: f, .foregroundColor: NSColor(Theme.muted)]
+                let sz = (initials as NSString).size(withAttributes: a)
+                (initials as NSString).draw(at: NSPoint(x: (r.width - sz.width) / 2, y: (r.height - sz.height) / 2), withAttributes: a)
+            }
+            return true
+        }
+        let att = NSTextAttachment()
+        att.image = img
+        att.bounds = NSRect(x: 0, y: (font.capHeight - d) / 2, width: d, height: d)
+        return NSAttributedString(attachment: att)
+    }
+
     private struct Builder {
         let size: CGFloat
+        var faces: URL? = nil
         var out = NSMutableAttributedString()
-        init(size: CGFloat) { self.size = size }
+        init(size: CGFloat, faces: URL? = nil) { self.size = size; self.faces = faces }
 
         private var ink: NSColor { Theme.inkNS }
         private var muted: NSColor { NSColor(Theme.muted) }
@@ -185,7 +229,8 @@ enum MarkdownText {
                     p.lineSpacing = size * 0.15
                     let cell = c < row.count ? row[c] : ""
                     let s = NSMutableAttributedString(attributedString:
-                        inline(cell.isEmpty ? " " : cell, font: font(size * 0.9, r == 0 ? .semibold : .regular), color: ink))
+                        inline(cell.isEmpty ? " " : cell, font: font(size * 0.9, r == 0 ? .semibold : .regular), color: ink,
+                               faces: c == 0 ? faces : nil))
                     s.append(NSAttributedString(string: "\n"))
                     s.addAttribute(.paragraphStyle, value: p, range: NSRange(location: 0, length: s.length))
                     out.append(s)
@@ -247,9 +292,18 @@ struct MarkdownReader: NSViewRepresentable {
     var clear = false
     /// A plain click on the text (not on a link, not a drag to select): Ideas opens its editor.
     var onTap: (() -> Void)? = nil
+    /// A folder of <handle>.jpg: profile links in the first table column get a face.
+    var faces: URL? = nil
     @Environment(\.colorScheme) private var scheme
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
+
+    /// When the photo folder last changed: a new photo redraws the page.
+    private static func stamp(_ folder: URL?) -> TimeInterval {
+        guard let folder else { return 0 }
+        return ((try? FileManager.default.attributesOfItem(atPath: folder.path))?[.modificationDate] as? Date)?
+            .timeIntervalSince1970 ?? 0
+    }
 
     func makeNSView(context: Context) -> NSScrollView {
         // TextKit 1: tables (NSTextTable) draw only there.
@@ -285,11 +339,11 @@ struct MarkdownReader: NSViewRepresentable {
         tv.textContainer?.lineFragmentPadding = clear ? 0 : 5
         (tv as? TapTextView)?.onTap = onTap
         tv.selectedTextAttributes = [.backgroundColor: NSColor(Theme.accent).withAlphaComponent(0.22)]
-        let key = "\(text.hashValue)|\(size)|\(scheme)"
+        let key = "\(text.hashValue)|\(size)|\(scheme)|\(faces?.path ?? "")|\(Self.stamp(faces))"
         if c.drawn != key {
             c.drawn = key
             let y = scroll.contentView.bounds.origin.y
-            tv.textStorage?.setAttributedString(MarkdownText.attributed(text, size: size))
+            tv.textStorage?.setAttributedString(MarkdownText.attributed(text, size: size, faces: faces))
             c.lit = nil
             // An agent's edit redraws in place: keep the reading position.
             scroll.contentView.scroll(to: NSPoint(x: 0, y: y))

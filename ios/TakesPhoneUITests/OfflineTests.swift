@@ -156,7 +156,6 @@ final class OfflineTests: XCTestCase {
     }
 
     func shot(_ app: XCUIApplication, _ name: String) {
-        guard let dir = ProcessInfo.processInfo.environment["TAKES_SHOTS"] else { return }
-        try? app.screenshot().pngRepresentation.write(to: URL(fileURLWithPath: dir).appending(path: name + ".png"))
+        writeScreenshot(app.screenshot(), named: name)
     }
 }

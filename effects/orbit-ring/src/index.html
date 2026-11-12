@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <!-- Orbit ring: a ring of tall serif capitals spins round the speaker's head like a planet's ring. The front
+         half passes in front of the chin in warm gold, the back half goes behind the head, smaller and silver.
+         The letters sit on the ring like on a turning drum: side letters squeeze thin, back letters read mirrored.
+         It whips in from the side with a blur, spins, and whips out again. The shot punches in a little meanwhile.
+         Inputs next to this file: footage.mp4 (the moment, at the frame size) and person.webm (its cutout).
+         Full frame: render it as mp4 and lay it over the cut. The frame size is data-width / data-height on #root.
+         Edit RING, LOOK and AT below. -->
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+    <style>
+      @font-face { font-family: "Cinzel"; src: url("fonts/Cinzel.ttf"); font-weight: 400 900; }
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
+      #root { position: relative; width: 100%; height: 100%; overflow: hidden; background: #000; }
+      #root video, .full { position: absolute; inset: 0; width: 100%; height: 100%; }
+      #root video { object-fit: cover; }
+      .l { position: absolute; left: 0; top: 0; font-family: "Cinzel", serif; font-weight: 700; line-height: 1; white-space: pre;
+           transform-origin: 50% 50%; will-change: transform; }
+    </style>
+  </head>
+  <body>
+    <svg width="0" height="0" style="position:absolute"><filter id="mb" x="-60%" y="-20%" width="220%" height="140%"><feGaussianBlur id="mbg" stdDeviation="0 0" /></filter></svg>
+    <div id="root" data-composition-id="main" data-start="0" data-duration="3.4" data-width="1080" data-height="1920">
+      <div id="cam" class="full">
+        <video id="footage" class="clip" src="footage.mp4" muted playsinline data-start="0" data-track-index="0"></video>
+        <div id="back" class="full" style="filter:url(#mb)"></div>
+        <video id="person" class="clip" src="person.webm" muted playsinline data-start="0" data-track-index="1"></video>
+        <div id="front" class="full" style="filter:url(#mb)"></div>
+      </div>
+    </div>
+    <script>
+      // The ring. text = what goes round (it repeats to fill the ring). center = the middle of the ring, about the
+      // nose, as parts of the frame. radius = across, as a part of the short side. tilt = how flat the ring looks
+      // (0 = edge on, 1 = seen from above). turns = how many times it goes round per second (negative = the front
+      // moves right to left).
+      const RING = { text: "ORBIT · RING · ", center: { x: 0.52, y: 0.325 }, radius: 0.36, tilt: 0.55, turns: -0.3, repeat: 2 };
+      // Look. size = letter height in px at a 1080 px short side (front). front / back = colours.
+      const LOOK = { size: 104, front: "#ecc66f", back: "#b9bec6", punch: 1.12, blur: 10, smear: 46 };
+      // smear = the sideways motion blur while the ring spins fast (px at 1080), on the way in and out.
+      // When (seconds): whip in, whip out, how long the whip in takes and how long the spin-up at the end takes.
+      const AT = { in: 0.25, out: 2.55, whip: 0.38, spinOut: 0.6 };
+
+      const root = document.getElementById("root");
+      const FRAME = { w: Number(root.dataset.width), h: Number(root.dataset.height) };
+      const short = Math.min(FRAME.w, FRAME.h), U = short / 1080;
+      const cx = RING.center.x * FRAME.w, cy = RING.center.y * FRAME.h, R = RING.radius * short;
+      const chars = [...RING.text.repeat(RING.repeat)];
+      const back = document.getElementById("back"), front = document.getElementById("front");
+      // Every letter exists twice: once behind the speaker, once in front. Only one copy shows at a time.
+      const L = chars.map((c) => {
+        const mk = (p) => { const d = document.createElement("div"); d.className = "l"; d.textContent = c; d.style.fontSize = LOOK.size * U + "px"; p.appendChild(d); return d; };
+        return { b: mk(back), f: mk(front) };
+      });
+      const cam = document.getElementById("cam");
+      cam.style.transformOrigin = `${cx}px ${cy}px`;
+      const S = { spin: -620, grow: 2.4, alpha: 0, blur: LOOK.blur, sweep: -90, smear: LOOK.smear, drop: 0, fore: 1, flat: 1 };
+      const mbg = document.getElementById("mbg");
+      const mix = (a, b, t) => { const p = (h) => [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16)); const A = p(a), B = p(b); return `rgb(${A.map((v, i) => Math.round(v + (B[i] - v) * t)).join(",")})`; };
+      function draw() {
+        const t = tl.time();
+        mbg.setAttribute("stdDeviation", (S.smear * U).toFixed(1) + " " + (S.smear * U * 0.06).toFixed(1));
+        const step = 360 / chars.length, r = R * S.grow;
+        L.forEach((l, i) => {
+          const a = (i * step + t * RING.turns * 360 + S.spin + S.sweep) * Math.PI / 180;
+          const z = Math.cos(a);                       // 1 = nearest the camera, -1 = furthest
+          const x = cx + r * Math.sin(a), y = cy + S.drop * FRAME.h + r * RING.tilt * S.flat * z;
+          const persp = 1 + 0.22 * z;                  // near letters bigger
+          const sx = Math.cos(a) * persp;              // the drum: side letters squeeze, back ones flip
+          const el = z >= 0 ? l.f : l.b, other = z >= 0 ? l.b : l.f;
+          other.style.opacity = 0;
+          el.style.opacity = S.alpha * (z >= 0 ? S.fore : 1) * (0.55 + 0.45 * Math.abs(z));
+          el.style.color = mix(LOOK.back, LOOK.front, (z + 1) / 2);
+          el.style.transform = `translate(${x}px, ${y}px) translate(-50%, -50%) scale(${sx.toFixed(3)}, ${persp.toFixed(3)})`;
+          el.style.filter = `blur(${S.blur * U}px) drop-shadow(0 ${3 * U}px ${5 * U}px rgba(0,0,0,.6)) drop-shadow(0 0 ${14 * U}px rgba(0,0,0,.25))`;
+        });
+      }
+      window.__timelines = window.__timelines || {};
+      const tl = gsap.timeline({ paused: true, onUpdate: draw });
+      tl.to(cam, { scale: LOOK.punch, duration: 0.25, ease: "power3.out" }, AT.in - 0.05);
+      // Whip in: the ring comes in big and fast from the side, shrinks onto the head and sharpens.
+      tl.to(S, { grow: 1, sweep: 0, duration: AT.whip, ease: "power3.out" }, AT.in);
+      tl.to(S, { spin: 0, duration: AT.whip * 1.3, ease: "power3.out" }, AT.in);
+      tl.to(S, { smear: 0, duration: AT.whip * 1.1, ease: "power2.out" }, AT.in);
+      tl.to(S, { alpha: 1, duration: AT.whip * 0.4 }, AT.in);
+      tl.to(S, { blur: 0, duration: AT.whip * 0.8, ease: "power2.out" }, AT.in);
+      // Spin out: the ring speeds up, drops to the neck and flattens. The front half fades first, so the last of
+      // the blurred band goes round behind the neck (the cutout covers it), then it is gone.
+      tl.to(S, { spin: 1500, duration: AT.spinOut, ease: "power2.in" }, AT.out);
+      tl.to(S, { grow: 0.85, drop: 0.075, flat: 0.4, duration: AT.spinOut, ease: "power2.in" }, AT.out);
+      tl.to(S, { fore: 0, duration: AT.spinOut * 0.45, ease: "power1.in" }, AT.out + AT.spinOut * 0.1);
+      tl.to(S, { smear: LOOK.smear, duration: AT.spinOut * 0.8, ease: "power2.in" }, AT.out + AT.spinOut * 0.2);
+      tl.to(S, { alpha: 0, duration: AT.spinOut * 0.25, ease: "power1.in" }, AT.out + AT.spinOut * 0.8);
+      tl.to(cam, { scale: 1, duration: 0.25, ease: "power3.inOut" }, AT.out + AT.spinOut);
+      tl.set({}, {}, Number(root.dataset.duration));
+      window.__timelines["main"] = tl;
+      draw(); tl.seek(0);
+    </script>
+  </body>
+</html>

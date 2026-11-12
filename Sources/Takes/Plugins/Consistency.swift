@@ -38,10 +38,15 @@ enum Consistency {
             let root = app.library.root
             attach(app)
             let library = app.library
-            return AnyView(ConsistencyBoard(hub: app.chats, root: root, choices: { PlanChoice.all(library) }) { url in
-                app.board = nil
-                app.library.select(url)
-            })
+            return AnyView(ConsistencyBoard(hub: app.chats, root: root, choices: { PlanChoice.all(library) },
+                                            open: { url in
+                                                app.board = nil
+                                                app.library.select(url)
+                                            },
+                                            openPost: { url in
+                                                app.board = nil
+                                                app.go(url)
+                                            }))
         },
         phone: PlanPhone.hook,
         toggled: { app, on in PostingPlan.setOff(app.library.root, !on) },
@@ -54,13 +59,16 @@ enum Consistency {
         self.app = app
         ConsistencyStore.hub = app.chats
         ClaudeChat.boardContexts["consistency"] = { context(r) }
-        ClaudeChat.boardIntros["consistency"] = (
-            title: "Plan your next videos.",
-            line: "Takes knows your posting days and your videos. It puts a video on each day, moves them when plans change, and says what to record next.",
-            asks: [("Fill my open days", "Put a video on each of my open posting days in the next two weeks with plan_video. Pick the ones closest to done first, and tell me why in one line each."),
-                   ("What should I record next?", "Which video should I record next to keep my posting days covered? Pick one, with one line why."),
-                   ("How does Plan work?", "Explain the Plan board in four short lines: posting days, putting a video on a day, the week rings and the week streak.")])
+        ClaudeChat.boardIntros["consistency"] = intro
     }
+
+    /// What the empty Plan chat says and offers, on the Mac and the phone (2026-10-26).
+    static let intro = (
+        title: "Plan your next videos.",
+        line: "Takes knows your posting days and your videos. It puts a video on each day, moves them when plans change, and says what to record next.",
+        asks: [("Fill my open days", "Put a video on each of my open posting days in the next two weeks with plan_video. Pick the ones closest to done first, and tell me why in one line each."),
+               ("What should I record next?", "Which video should I record next to keep my posting days covered? Pick one, with one line why."),
+               ("How does Plan work?", "Explain the Plan board in four short lines: posting days, putting a video on a day, the week rings and the week streak.")])
 
     @MainActor static func context(_ root: URL) -> String {
         """
@@ -269,8 +277,11 @@ struct ConsistencyStats: Equatable {
         var byDay: [Date: [(title: String, session: String)]] = [:]
         var state: [String: (status: Status, at: Date)] = [:]
         var readyAt: [String: Date] = [:]
+        let failed = Plugins.builtAutopost?.failed
         for p in PostQueue.read(root) where platforms.contains(p.platform.rawValue) {
-            let c = p.content
+            var c = p.content
+            // A post the autopost plugin could not send is not out: it waits for a retry, like a ready one.
+            if c.status == .scheduled, failed?(c) == true { c.status = .ready }
             guard c.status != .draft else { continue }
             guard let at = c.at else {
                 if c.status == .ready { s.readyWithoutTime.append(p.title) }
@@ -618,12 +629,14 @@ struct ConsistencyBoard: View {
     var choices: () -> [PlanChoice] = { [] }
     /// Opens a session (a card's click).
     var open: (URL) -> Void = { _ in }
+    /// Opens a post file on its session's Post tab.
+    var openPost: (URL) -> Void = { _ in }
     private var store: ConsistencyStore { .shared(root) }
 
     var body: some View {
         let target = ChatTarget(chat: hub.boardChat("consistency"), title: "Plan", session: nil)
         ChatSlot(hub: hub, target: target) {
-            ConsistencyPage(store: store, root: root, choices: choices, open: open)
+            ConsistencyPage(store: store, root: root, choices: choices, open: open, openPost: openPost)
         }
         .overlay(alignment: .bottomTrailing) {
             BoardChatCorner(hub: hub, target: target).padding(18)
@@ -649,6 +662,7 @@ struct ConsistencyPage: View {
     let root: URL
     var choices: () -> [PlanChoice] = { [] }
     var open: (URL) -> Void = { _ in }
+    var openPost: (URL) -> Void = { _ in }
     /// Tests pass the brand file: they have no app bundle.
     var mascot: NSImage? = Mascot.image
     @State private var editing = false
@@ -662,6 +676,8 @@ struct ConsistencyPage: View {
             }
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
+                    // A plugin's part at the top (2026-11-06, the admin Mods slot "plan").
+                    if let slot = Plugins.slot("plan", open: open) { slot }
                     if store.loaded {
                         if store.plan == nil {
                             FirstPlan(mascot: mascot) { plan in
@@ -701,7 +717,12 @@ struct ConsistencyPage: View {
                                       remove: { store.remove(root, $0) },
                                       setWeeks: { store.setWeeks(root, $0) })
                                 .card(padding: 16).arrive(2)
-                            if !store.stats.readyWithoutTime.isEmpty { ready.arrive(3) }
+                            // A plugin can show the posts themselves here (admin Ready posts, 2026-10-30).
+                            if let feed = Plugins.planReady {
+                                feed(PlanReadyContext(root: root, plan: plan, stats: store.stats, openPost: openPost)).arrive(3)
+                            } else if !store.stats.readyWithoutTime.isEmpty {
+                                ready.arrive(3)
+                            }
                         }
                     }
                 }

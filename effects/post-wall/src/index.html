@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <!-- Post wall: a wall of small squares, like a contribution graph, fills in behind the speaker's head from the
+         bottom up. The newest row flashes cream, then settles into greys, deep green and gold. Above it a day
+         counter and a big post count run up together; at the end the count turns gold and the legend square pulses.
+         The head stays in front of the wall. Then the wall snaps away.
+         Inputs next to this file: footage.mp4 (the moment, at the frame size) and person.webm (its cutout).
+         Full frame: render it as mp4 and lay it over the cut. The frame size is data-width / data-height on #root.
+         Edit DATA, WALL, LOOK and AT below. -->
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+    <style>
+      @font-face { font-family: "Plex Mono"; src: url("fonts/IBMPlexMono-Medium.ttf"); font-weight: 500; }
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
+      #root { position: relative; width: 100%; height: 100%; overflow: hidden; background: #000; font-family: "Plex Mono", monospace; }
+      #root video, .full { position: absolute; inset: 0; width: 100%; height: 100%; }
+      #root video { object-fit: cover; }
+      #dim { background: #000; opacity: 0; }
+      #wall { position: absolute; opacity: 0; background: var(--panel); border-radius: 6px; }
+      #cells { display: grid; }
+      .c { border-radius: 2px; }
+      .head { display: flex; justify-content: space-between; align-items: flex-end; color: #e9e5da; }
+      .day { display: flex; align-items: center; gap: 0.5em; letter-spacing: 0.12em; }
+      .day b { font-weight: 500; color: var(--gold); letter-spacing: 0.04em; }
+      .key { display: inline-block; width: 1.05em; height: 1.05em; background: var(--gold); border-radius: 2px; }
+      .count { display: flex; align-items: baseline; gap: 0.3em; }
+      .count .n { line-height: 1; font-variant-numeric: tabular-nums; }
+      .count .u { letter-spacing: 0.14em; }
+    </style>
+  </head>
+  <body>
+    <div id="root" data-composition-id="main" data-start="0" data-duration="3.4" data-width="1080" data-height="1920">
+      <div id="cam" class="full">
+        <video id="footage" class="clip" src="footage.mp4" muted playsinline data-start="0" data-track-index="0"></video>
+        <div id="dim" class="full"></div>
+        <div id="wall"><div class="head"><div class="day"><span class="key"></span><span>DAY</span><b id="day">000</b></div><div class="count"><span class="n" id="n">0</span><span class="u">POSTS</span></div></div><div id="cells"></div></div>
+        <video id="person" class="clip" src="person.webm" muted playsinline data-start="0" data-track-index="1"></video>
+      </div>
+    </div>
+    <script>
+      // The numbers it counts up to.
+      const DATA = { days: 564, posts: 1711, unit: "POSTS" };
+      // The wall: columns and rows, how many cells stay empty at the bottom-right (days still to come), and where
+      // it sits (left, top, width as parts of the frame; wide frames: put it beside the head).
+      const WALL = { cols: 31, rows: 19, empty: 0.12, x: 0.08, y: 0.115, w: 0.84, seed: 7 };
+      // Colours of a filled cell and how often each is picked.
+      const LOOK = { gold: "#caa54f", flash: "#efe9dc", empty: "#0d1410", line: "#2e3b33", dim: 0.3, punch: 1.06, panel: "rgba(9,13,11,.62)",
+                     mix: [["#6f7a73", 4], ["#8d968f", 5], ["#aab1ab", 4], ["#c9cec8", 1.6], ["#efe9dc", 1], ["#1e3a2b", 3], ["#caa54f", 1.2]] };
+      // When (seconds): the wall shows, the fill runs (how long), the wall goes.
+      const AT = { in: 0.25, fill: 0.5, fillFor: 1.25, out: 2.85 };
+
+      const root = document.getElementById("root");
+      const FRAME = { w: Number(root.dataset.width), h: Number(root.dataset.height) };
+      const U = Math.min(FRAME.w, FRAME.h) / 1080;
+      root.style.setProperty("--gold", LOOK.gold); root.style.setProperty("--panel", LOOK.panel);
+      const wall = document.getElementById("wall"), cells = document.getElementById("cells");
+      const W = WALL.w * FRAME.w, gap = W / WALL.cols * 0.14, cs = (W - gap * (WALL.cols - 1)) / WALL.cols;
+      Object.assign(wall.style, { left: WALL.x * FRAME.w - cs * 0.7 + "px", top: WALL.y * FRAME.h + "px", width: W + cs * 1.4 + "px", padding: `${cs * 0.6}px ${cs * 0.7}px ${cs * 0.7}px` });
+      Object.assign(cells.style, { gridTemplateColumns: `repeat(${WALL.cols}, ${cs}px)`, gap: gap + "px" });
+      const head = wall.querySelector(".head");
+      Object.assign(head.style, { marginBottom: cs * 0.6 + "px", fontSize: cs * 0.95 + "px" });
+      wall.querySelector(".count .n").style.fontSize = cs * 2.6 + "px";
+      wall.querySelector(".count .u").style.fontSize = cs * 0.85 + "px";
+      // Seeded random so every render is the same wall.
+      let seed = WALL.seed; const rnd = () => ((seed = (seed * 16807) % 2147483647) / 2147483647);
+      const total = LOOK.mix.reduce((a, m) => a + m[1], 0);
+      const pick = () => { let r = rnd() * total; for (const [c, w] of LOOK.mix) { if ((r -= w) <= 0) return c; } return LOOK.mix[0][0]; };
+      const N = WALL.cols * WALL.rows, filled = Math.round(N * (1 - WALL.empty));
+      const list = [];
+      for (let i = 0; i < N; i++) {
+        const d = document.createElement("div"); d.className = "c";
+        Object.assign(d.style, { width: cs + "px", height: cs + "px", background: LOOK.empty, boxShadow: `inset 0 0 0 ${Math.max(1, 1.6 * U)}px ${LOOK.line}` });
+        cells.appendChild(d);
+        // Fill order: bottom row first, left to right, up to the top. The cells after `filled` stay empty.
+        const r = Math.floor(i / WALL.cols), c = i % WALL.cols, order = (WALL.rows - 1 - r) * WALL.cols + c;
+        list.push({ d, order, color: pick() });
+      }
+      // The empty cells are the newest days: the last ones in reading order (bottom right).
+      const byReading = [...list].sort((a, b) => list.indexOf(a) - list.indexOf(b));
+      byReading.slice(filled).forEach((c) => (c.empty = true));
+      const cam = document.getElementById("cam"); cam.style.transformOrigin = "50% 30%";
+      const S = { p: 0 };
+      const day = document.getElementById("day"), n = document.getElementById("n");
+      const fmt = (v) => v.toLocaleString("en-US");
+      function draw() {
+        const t = tl.time();
+        const k = S.p * (N + WALL.cols * 1.3); // runs past the end so the top row settles too
+        list.forEach((c) => {
+          if (c.empty) return;
+          const on = k - c.order;            // > 0 once the wave has passed this cell
+          c.d.style.background = on <= 0 ? LOOK.empty : on < WALL.cols * 1.2 ? LOOK.flash : c.color;
+          c.d.style.boxShadow = on <= 0 ? `inset 0 0 0 ${Math.max(1, 1.6 * U)}px ${LOOK.line}` : "none";
+        });
+        day.textContent = String(Math.round(DATA.days * S.p)).padStart(3, "0");
+        n.textContent = fmt(Math.round(DATA.posts * S.p));
+        n.style.color = S.p >= 0.999 ? LOOK.gold : "#f2efe6";
+      }
+      wall.querySelector(".u").textContent = DATA.unit;
+      window.__timelines = window.__timelines || {};
+      const tl = gsap.timeline({ paused: true, onUpdate: draw });
+      tl.to(cam, { scale: LOOK.punch, duration: 0.2, ease: "power3.out" }, AT.in);
+      tl.to("#dim", { opacity: LOOK.dim, duration: 0.2 }, AT.in);
+      tl.fromTo(wall, { opacity: 0, y: 12 * U }, { opacity: 1, y: 0, duration: 0.2, ease: "power2.out" }, AT.in + 0.05);
+      tl.to(S, { p: 1, duration: AT.fillFor, ease: "power1.inOut" }, AT.fill);
+      tl.fromTo(".key", { scale: 1 }, { scale: 1.5, duration: 0.12, yoyo: true, repeat: 3, ease: "power1.inOut" }, AT.fill + AT.fillFor + 0.05);
+      tl.to(wall, { opacity: 0, y: -10 * U, duration: 0.12, ease: "power2.in" }, AT.out);
+      tl.to("#dim", { opacity: 0, duration: 0.15 }, AT.out);
+      tl.to(cam, { scale: 1, duration: 0.2, ease: "power3.inOut" }, AT.out + 0.05);
+      tl.set({}, {}, Number(root.dataset.duration));
+      window.__timelines["main"] = tl;
+      draw(); tl.seek(0);
+    </script>
+  </body>
+</html>

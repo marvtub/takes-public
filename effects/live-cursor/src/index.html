@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <!-- Live cursor: a named multiplayer cursor ("Takes") flies in, drags a marquee over the speaker, and the
+         marquee turns into a design-tool selection (gold frame, square handles, a live W x H badge, an outline round
+         the body). Then the cursor drags the speaker sideways like a layer: a pink smart guide flashes as the body
+         passes the centre, and the speaker slides back when the cursor lets go and leaves.
+         Inputs next to this file: footage.mp4 (the moment, at the frame size), person.webm (the cutout, same
+         length) and plate.png (the room without the speaker, at the frame size).
+         Full frame: render it as mp4 and lay it over the cut. The frame size is data-width / data-height on #root.
+         Edit SEL, CURSOR, LOOK and AT below. -->
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+    <style>
+      @font-face { font-family: "Inter"; src: url("fonts/InterVariable.ttf"); font-weight: 100 900; }
+      @font-face { font-family: "Plex Mono"; src: url("fonts/IBMPlexMono-Bold.ttf"); font-weight: 700; }
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
+      #root { position: relative; width: 100%; height: 100%; overflow: hidden; background: #000; font-family: "Inter", sans-serif; }
+      #root video, #plate { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+      #plate, #person { opacity: 0; }
+      #person { clip-path: inset(-200px -200px 6px -200px); }
+      .abs { position: absolute; left: 0; top: 0; }
+      #marq { border: var(--line) solid var(--gold); background: rgba(212, 178, 98, 0.13); opacity: 0; }
+      #ring { border: var(--line) solid var(--gold); border-radius: 50%; opacity: 0; }
+      #sel { border: var(--line) solid var(--gold); opacity: 0; box-shadow: 0 0 0 1px rgba(0,0,0,.18), inset 0 0 0 1px rgba(0,0,0,.12); }
+      .h { position: absolute; background: #f6eed6; border: var(--line) solid var(--gold); }
+      #badge { background: var(--gold); color: #1d1a12; font-family: "Plex Mono", monospace; font-weight: 700;
+               white-space: nowrap; opacity: 0; }
+      #guide { background: #ff4f7b; opacity: 0; }
+      #cur { opacity: 0; }
+      #tag { position: absolute; white-space: nowrap; color: #fff; font-weight: 600; background: #1e3b2c;
+             border: var(--line) solid #9fc1a6; }
+    </style>
+  </head>
+  <body>
+    <div id="root" data-composition-id="main" data-start="0" data-duration="4" data-width="1080" data-height="1920">
+      <video id="footage" class="clip" src="footage.mp4" muted playsinline data-start="0" data-track-index="0"></video>
+      <img id="plate" src="plate.png" />
+      <video id="person" class="clip" src="person.webm" muted playsinline data-start="0" data-track-index="1"></video>
+      <div id="marq" class="abs"></div>
+      <div id="ring" class="abs"></div>
+      <div id="sel" class="abs"></div>
+      <div id="guide" class="abs"></div>
+      <div id="badge" class="abs"></div>
+      <div id="cur" class="abs">
+        <svg id="arrow" viewBox="0 0 24 34"><path d="M2 2 L2 27 L8.2 21.2 L12.4 31 L16.6 29.2 L12.5 19.8 L21 19.8 Z"
+          fill="#111" stroke="#fff" stroke-width="2" stroke-linejoin="round"/></svg>
+        <div id="tag"></div>
+      </div>
+    </div>
+    <script>
+      // The box the cursor selects, as parts of the frame (0 to 1): left, top, width, height. Head and chest.
+      const SEL = { x: 0.2, y: 0.15, w: 0.6, h: 0.47 };
+      // The cursor's name tag, where it flies in from (parts of the frame) and how far it drags the speaker
+      // (part of the width; negative = to the left, the guide flashes when the body crosses the centre).
+      const CURSOR = { name: "Takes", from: [1.08, 0.7], drag: -0.09, lift: -0.006 };
+      // Look at a 1080 px short side: line width, handle size, badge text size, tag text size, arrow height (px).
+      const LOOK = { gold: "#d0ae5c", line: 3, handle: 18, badge: 25, tag: 30, arrow: 64, outline: "#efe2b8" };
+      // When things happen (seconds): fly in, press, marquee drag ends, layer drag, let go, cursor gone.
+      const AT = { start: 0.4, press: 0.75, marquee: 1.15, drag: 1.45, release: 2.35, gone: 2.95 };
+
+      const root = document.getElementById("root");
+      const FRAME = { w: Number(root.dataset.width), h: Number(root.dataset.height) };
+      const U = Math.min(FRAME.w, FRAME.h) / 1080;
+      root.style.setProperty("--gold", LOOK.gold);
+      root.style.setProperty("--line", LOOK.line * U + "px");
+      const $ = (id) => document.getElementById(id);
+      const box = { x: SEL.x * FRAME.w, y: SEL.y * FRAME.h, w: SEL.w * FRAME.w, h: SEL.h * FRAME.h };
+
+      // Handles on the selection: four corners and four mid-points.
+      const sel = $("sel"), hs = LOOK.handle * U;
+      [[0, 0], [0.5, 0], [1, 0], [0, 0.5], [1, 0.5], [0, 1], [0.5, 1], [1, 1]].forEach(([fx, fy]) => {
+        const d = document.createElement("div"); d.className = "h";
+        Object.assign(d.style, { width: hs + "px", height: hs + "px", left: `calc(${fx * 100}% - ${hs / 2}px)`, top: `calc(${fy * 100}% - ${hs / 2}px)` });
+        sel.appendChild(d);
+      });
+      const badge = $("badge");
+      Object.assign(badge.style, { fontSize: LOOK.badge * U + "px", padding: `${4 * U}px ${12 * U}px`, borderRadius: 5 * U + "px" });
+      const tag = $("tag"); tag.textContent = CURSOR.name;
+      Object.assign(tag.style, { fontSize: LOOK.tag * U + "px", padding: `${5 * U}px ${14 * U}px`, borderRadius: 9 * U + "px",
+                                 left: LOOK.arrow * 0.55 * U + "px", top: LOOK.arrow * 0.92 * U + "px" });
+      const arrow = $("arrow"); arrow.style.height = LOOK.arrow * U + "px"; arrow.style.filter = "drop-shadow(0 2px 4px rgba(0,0,0,.45))";
+      const guide = $("guide"); Object.assign(guide.style, { width: 2 * U + "px", height: FRAME.h + "px", left: FRAME.w / 2 - U + "px" });
+      // The outline round the body: four hard drop shadows make a thin line round the cutout.
+      const o = 2.2 * U, oc = LOOK.outline;
+      const OUTLINE = `drop-shadow(${o}px 0 0 ${oc}) drop-shadow(-${o}px 0 0 ${oc}) drop-shadow(0 ${o}px 0 ${oc}) drop-shadow(0 -${o}px 0 ${oc})`;
+
+      // One state object drives every drawn part each frame, so the badge always shows the real size.
+      const S = { cx: CURSOR.from[0] * FRAME.w, cy: CURSOR.from[1] * FRAME.h, mw: 0, mh: 0, dx: 0, dy: 0, k: 1, outline: 0, sw: 1, sh: 1 };
+      const plate = $("plate"), marq = $("marq"), ring = $("ring"), cur = $("cur"), person = $("person");
+      function draw() {
+        cur.style.transform = `translate(${S.cx - 3 * U}px, ${S.cy - 3 * U}px) scale(${S.k})`;
+        cur.style.transformOrigin = "0 0";
+        Object.assign(marq.style, { left: box.x + "px", top: box.y + "px", width: S.mw + "px", height: S.mh + "px" });
+        // sw / sh: the box breathes a little while it is dragged, so the badge numbers tick like a real resize.
+        const bw = box.w * S.sw, bh = box.h * S.sh, bx = box.x + S.dx, by = box.y + S.dy;
+        Object.assign(sel.style, { left: bx + "px", top: by + "px", width: bw + "px", height: bh + "px" });
+        badge.textContent = `${Math.round(bw / U)} × ${Math.round(bh / U)}`;
+        Object.assign(badge.style, { left: bx + bw / 2 + "px", top: by - 14 * U + "px", transform: "translate(-50%, -100%)" });
+        person.style.transform = `translate(${S.dx}px, ${S.dy}px)`;
+        person.style.filter = S.outline > 0.01 ? OUTLINE.replaceAll(oc, `rgba(239,226,184,${S.outline})`) : "none";
+      }
+      gsap.set(ring, { width: 46 * U, height: 46 * U, left: box.x - 23 * U, top: box.y - 23 * U });
+
+      window.__timelines = window.__timelines || {};
+      const tl = gsap.timeline({ paused: true, onUpdate: draw });
+      const ex = box.x + box.w, ey = box.y + box.h;
+      // 1. Fly in on a slight curve, fast then soft.
+      tl.set(cur, { opacity: 1 }, AT.start);
+      tl.to(S, { cx: box.x, duration: AT.press - AT.start, ease: "power3.out" }, AT.start);
+      tl.to(S, { cy: box.y, duration: AT.press - AT.start, ease: "power2.inOut" }, AT.start);
+      // 2. Press: the arrow dips, a ring marks the start point.
+      tl.to(S, { k: 0.88, duration: 0.06, ease: "power1.out" }, AT.press);
+      tl.fromTo(ring, { opacity: 0, scale: 0.4 }, { opacity: 1, scale: 1, duration: 0.12, ease: "power2.out" }, AT.press);
+      // 3. Marquee: the box grows from the start point under the cursor.
+      tl.set(marq, { opacity: 1 }, AT.press + 0.04);
+      tl.to(S, { cx: ex, cy: ey, mw: box.w, mh: box.h, duration: AT.marquee - AT.press - 0.04, ease: "power2.inOut" }, AT.press + 0.04);
+      // 4. Let go of the marquee: it becomes the selection, the outline goes on, the speaker becomes a layer.
+      tl.to(S, { k: 1, duration: 0.06 }, AT.marquee);
+      tl.to(ring, { opacity: 0, duration: 0.1 }, AT.marquee);
+      tl.set(marq, { opacity: 0 }, AT.marquee + 0.03);
+      tl.set([sel, badge], { opacity: 1 }, AT.marquee + 0.03);
+      tl.fromTo(sel, { scale: 1.03 }, { scale: 1, duration: 0.14, ease: "back.out(3)" }, AT.marquee + 0.03);
+      tl.set([plate, person], { opacity: 1 }, AT.marquee + 0.03);
+      tl.to(S, { outline: 1, duration: 0.12 }, AT.marquee + 0.03);
+      // 5. Drag the layer: press on the box, slide the speaker, the guide flashes when the body passes the centre.
+      tl.to(S, { k: 0.88, duration: 0.06 }, AT.drag - 0.08);
+      const dragT = AT.release - AT.drag, dx = CURSOR.drag * FRAME.w, dy = CURSOR.lift * FRAME.h;
+      tl.to(S, { dx, dy, duration: dragT * 0.62, ease: "power2.inOut" }, AT.drag);
+      tl.to(S, { sw: 1.05, sh: 1.012, duration: dragT * 0.45, ease: "sine.inOut" }, AT.drag);
+      tl.to(S, { sw: 1.02, sh: 0.985, duration: dragT * 0.55, ease: "sine.inOut" }, AT.drag + dragT * 0.45);
+      tl.to(S, { cx: ex + dx + box.w * 0.05, cy: ey + dy + box.h * 0.012, duration: dragT * 0.62, ease: "power2.inOut" }, AT.drag);
+      tl.to(S, { dx: dx * 0.82, cx: ex + dx * 0.82 + box.w * 0.02, cy: ey + dy - box.h * 0.015, duration: dragT * 0.38, ease: "sine.inOut" }, AT.drag + dragT * 0.62);
+      tl.set(guide, { opacity: 1 }, AT.drag + dragT * 0.22);
+      tl.set(guide, { opacity: 0 }, AT.drag + dragT * 0.5);
+      tl.set(guide, { opacity: 1 }, AT.drag + dragT * 0.72);
+      tl.set(guide, { opacity: 0 }, AT.drag + dragT * 0.86);
+      // 6. Let go: the selection goes, the speaker slides home, the cursor leaves down and right.
+      tl.to(S, { k: 1, duration: 0.06 }, AT.release);
+      tl.set([sel, badge], { opacity: 0 }, AT.release + 0.05);
+      tl.to(S, { outline: 0, duration: 0.1 }, AT.release + 0.05);
+      tl.to(S, { dx: 0, dy: 0, duration: 0.26, ease: "power3.inOut" }, AT.release + 0.05);
+      tl.set([plate, person], { opacity: 0 }, AT.release + 0.32);
+      tl.to(S, { cx: FRAME.w * 1.1, cy: FRAME.h * 1.02, duration: AT.gone - AT.release, ease: "power2.in" }, AT.release + 0.08);
+      tl.set(cur, { opacity: 0 }, AT.gone + 0.08);
+      tl.set({}, {}, Number(root.dataset.duration));
+      window.__timelines["main"] = tl;
+      draw(); tl.seek(0);
+    </script>
+  </body>
+</html>

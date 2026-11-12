@@ -65,6 +65,19 @@ class TakeTranscriptTests(unittest.TestCase):
         self.assertTrue(os.path.exists(os.path.join(self.s, "take-01-hook-camera.words.json")))
         self.assertFalse(os.path.exists(os.path.join(self.s, "take-01-camera.words.json")))
 
+    def test_cursor_log_shows_and_moves_with_the_screen_take(self):
+        ev = os.path.join(self.s, "take-01-screen.events.json")
+        with open(ev, "w") as f:
+            json.dump({"v": 1, "moves": [], "clicks": [], "apps": []}, f)
+        g = t.t_get_session({"session": self.s})
+        scr1 = next(x for x in g["takes"] if x["kind"] == "screen")
+        self.assertEqual(scr1["events"], ev)
+        self.assertNotIn("events", next(x for x in g["takes"] if x["kind"] == "camera"))
+        self.assertNotIn(ev, json.dumps(g.get("assets")))  # a take's sidecar, not an asset
+        t.t_rename_take({"session": self.s, "take": "1", "name": "Demo"})
+        self.assertTrue(os.path.exists(os.path.join(self.s, "take-01-demo-screen.events.json")))
+        self.assertFalse(os.path.exists(ev))
+
 
 if __name__ == "__main__":
     unittest.main()

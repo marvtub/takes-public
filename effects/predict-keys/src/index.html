@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <!-- Predict keys: a phone keyboard pops up over the shot and types a word letter by letter. Each tapped key
+         pops a bigger copy above it, the three suggestions above the keys change with every letter, and the last
+         tap hits a suggestion: the word jumps into the text bar in gold, the send button turns gold, and the
+         suggestions guess the next word (a tease for what comes next). Then the keyboard drops away with a tilt.
+         Input next to this file: footage.mp4 (the moment, at the frame size).
+         Full frame: render it as mp4 and lay it over the cut. The frame size is data-width / data-height on #root.
+         Edit TEXT, STEPS, PLACE, LOOK and AT below. -->
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+    <style>
+      @font-face { font-family: "Inter"; src: url("fonts/InterVariable.ttf"); font-weight: 100 900; }
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
+      #root { position: relative; width: 100%; height: 100%; overflow: hidden; background: #000; font-family: "Inter", sans-serif; }
+      #root video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+      #kb { position: absolute; display: flex; flex-direction: column; gap: var(--gap); opacity: 0; }
+      .bar { display: flex; align-items: center; justify-content: space-between; background: var(--green); color: #f4f1e8;
+             border-radius: var(--r2); padding: 0 calc(var(--key) * 0.12) 0 calc(var(--key) * 0.38); height: calc(var(--key) * 1.0);
+             font-weight: 600; font-size: calc(var(--key) * 0.52); box-shadow: 0 6px 18px rgba(0,0,0,.35); }
+      .typed { display: flex; align-items: center; white-space: pre; }
+      .typed .w { color: var(--gold); }
+      .caret { display: inline-block; width: calc(var(--key) * 0.045); height: 0.95em; background: #f4f1e8; margin-left: 0.08em; }
+      .send { width: calc(var(--key) * 0.78); height: calc(var(--key) * 0.78); border-radius: 50%; background: #f4f1e8; display: grid; place-items: center; }
+      .send svg { width: 58%; height: 58%; }
+      .row { display: flex; gap: var(--gap); justify-content: center; }
+      .k, .sug { position: relative; height: var(--key); border-radius: var(--r); background: var(--cream); color: #1b1b1b;
+                 display: grid; place-items: center; font-size: calc(var(--key) * 0.5); font-weight: 450;
+                 box-shadow: 0 2px 0 rgba(0,0,0,.28), 0 6px 14px rgba(0,0,0,.25); }
+      .k { width: var(--kw); }
+      .k.fn { background: var(--green); color: #f4f1e8; font-size: calc(var(--key) * 0.36); }
+      .sugs .sug { flex: 1; font-size: calc(var(--key) * 0.46); height: calc(var(--key) * 0.8); background: #e4dccb; }
+      .sug.hit { background: #fffaf0; }
+      .pop { position: absolute; left: 50%; bottom: 70%; width: calc(var(--kw) * 1.5); height: calc(var(--key) * 1.45);
+             transform: translateX(-50%); border-radius: var(--r2); background: var(--cream); display: grid; place-items: center;
+             font-size: calc(var(--key) * 0.85); color: #1b1b1b; box-shadow: 0 8px 22px rgba(0,0,0,.35); opacity: 0; }
+      .fly { position: absolute; color: var(--gold); font-weight: 600; font-size: calc(var(--key) * 0.52); opacity: 0; white-space: nowrap; }
+    </style>
+  </head>
+  <body>
+    <div id="root" data-composition-id="main" data-start="0" data-duration="3.6" data-width="1080" data-height="1920">
+      <video id="footage" class="clip" src="footage.mp4" muted playsinline data-start="0" data-track-index="0"></video>
+      <div id="kb"></div>
+    </div>
+    <script>
+      // What is in the text bar before typing, and the word that gets typed (it turns gold when picked).
+      const TEXT = { lead: "Predict ", word: "keys" };
+      // Each tap: the key, and the three suggestions shown after it. The last step taps suggestion PICK.
+      const STEPS = [
+        { key: null, sug: ["the", "your", "what"] },
+        { key: "k", sug: ["k", "keys", "keep"] },
+        { key: "e", sug: ["ke", "keys", "keep"] },
+        { key: "y", sug: ["key", "keys", "keyboard"] },
+      ];
+      const PICK = 1, NEXT = [",", "orbit", "."];
+      // Where the keyboard sits: centred, its bottom edge as a part of the frame height, and its width as a
+      // part of the frame's short side (wide frames: about 0.75).
+      const PLACE = { bottom: 0.83, width: 0.68 };
+      const LOOK = { green: "#1d3a2b", cream: "#f1ebdc", gold: "#d4b35f" };
+      // When (seconds): keyboard in, first tap, time between taps, keyboard out.
+      const AT = { in: 0.3, tap: 0.85, every: 0.3, out: 2.9 };
+
+      const root = document.getElementById("root");
+      const FRAME = { w: Number(root.dataset.width), h: Number(root.dataset.height) };
+      const short = Math.min(FRAME.w, FRAME.h);
+      const KW = PLACE.width * short, key = KW / 10 * 0.98 * 1.12, gap = KW * 0.012, kw = (KW - 9 * gap) / 10;
+      const kb = document.getElementById("kb");
+      Object.entries({ "--key": key + "px", "--kw": kw + "px", "--gap": gap + "px", "--r": key * 0.14 + "px", "--r2": key * 0.22 + "px",
+        "--green": LOOK.green, "--cream": LOOK.cream, "--gold": LOOK.gold }).forEach(([k, v]) => root.style.setProperty(k, v));
+      kb.style.width = KW + "px"; kb.style.left = (FRAME.w - KW) / 2 + "px";
+      const arrow = (c) => `<svg viewBox="0 0 24 24"><path d="M12 20V5M5 11.5 12 4.5l7 7" stroke="${c}" stroke-width="2.8" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+      kb.innerHTML = `
+        <div class="bar"><div class="typed"><span class="lead"></span><span class="w"></span><span class="caret"></span></div><div class="send">${arrow("#1d3a2b")}</div></div>
+        <div class="row sugs"><div class="sug"></div><div class="sug"></div><div class="sug"></div></div>
+        <div class="row">${[..."qwertyuiop"].map((c) => `<div class="k" data-c="${c}">${c}<div class="pop">${c}</div></div>`).join("")}</div>
+        <div class="row">${[..."asdfghjkl"].map((c) => `<div class="k" data-c="${c}">${c}<div class="pop">${c}</div></div>`).join("")}</div>
+        <div class="row"><div class="k fn" style="width:calc(var(--kw)*1.4)">⇧</div>${[..."zxcvbnm"].map((c) => `<div class="k" data-c="${c}">${c}<div class="pop">${c}</div></div>`).join("")}<div class="k fn" style="width:calc(var(--kw)*1.4)">⌫</div></div>
+        <div class="row"><div class="k fn" style="width:calc(var(--kw)*1.5)">123</div><div class="k">,</div><div class="k" style="width:calc(var(--kw)*4.6)">space</div><div class="k">.</div><div class="k fn" style="width:calc(var(--kw)*1.5)">return</div></div>`;
+      const lead = kb.querySelector(".lead"), wEl = kb.querySelector(".w"), caret = kb.querySelector(".caret"), sendEl = kb.querySelector(".send");
+      lead.textContent = TEXT.lead;
+      const sugs = [...kb.querySelectorAll(".sug")];
+      const setSug = (list) => list.forEach((t, i) => (sugs[i].textContent = t));
+      setSug(STEPS[0].sug);
+      // Bottom edge: place by height now that the rows exist (fixed geometry: no measuring in the timeline).
+      const kbH = key * 1.0 + key * 0.8 + key * 4 + gap * 5;
+      kb.style.top = PLACE.bottom * FRAME.h - kbH + "px";
+
+      window.__timelines = window.__timelines || {};
+      // Text state comes from the time alone, so any seek order gives the same frame.
+      const tp = AT.tap + (STEPS.length - 1) * AT.every;
+      function text() {
+        const t = tl.time();
+        let n = 0; STEPS.slice(1).forEach((_, i) => { if (t >= AT.tap + i * AT.every + 0.03) n = i + 1; });
+        const picked = t >= tp + 0.08;
+        lead.textContent = TEXT.lead + (picked ? "" : STEPS.slice(1, n + 1).map((s) => s.key).join(""));
+        wEl.textContent = picked ? TEXT.word : "";
+        setSug(t >= tp + 0.2 ? NEXT : STEPS[n].sug);
+      }
+      const tl = gsap.timeline({ paused: true, onUpdate: text });
+      // In: up from below with a small tilt, settles with a little overshoot.
+      tl.fromTo(kb, { opacity: 0, y: key * 3.2, rotation: -4, transformOrigin: "50% 100%" }, { opacity: 1, y: 0, rotation: 0, duration: 0.32, ease: "back.out(1.6)" }, AT.in);
+      // Caret blinks while waiting.
+      for (let t = AT.in; t < AT.out; t += 0.5) { tl.set(caret, { opacity: 0 }, t + 0.25); tl.set(caret, { opacity: 1 }, t + 0.5); }
+      STEPS.slice(1).forEach((s, i) => {
+        const t = AT.tap + i * AT.every, k = [...kb.querySelectorAll(".k")].find((e) => e.dataset.c === s.key), pop = k.querySelector(".pop");
+        tl.set(k, { backgroundColor: "#fffaf0" }, t); tl.set(k, { backgroundColor: LOOK.cream }, t + 0.16);
+        tl.fromTo(pop, { opacity: 1, scale: 0.6, transformOrigin: "50% 100%" }, { opacity: 1, scale: 1, duration: 0.07, ease: "power2.out", immediateRender: false }, t);
+        tl.set(pop, { opacity: 0 }, t + 0.18);
+      });
+      // Pick the suggestion: it lights, the word lands in gold in the bar, send turns gold, next-word guesses.
+      tl.set(sugs[PICK], { backgroundColor: "#fffaf0" }, tp);
+      tl.fromTo(sugs[PICK], { scale: 1 }, { scale: 0.94, duration: 0.06, yoyo: true, repeat: 1 }, tp);
+      tl.set(sugs[PICK], { backgroundColor: "#e4dccb" }, tp + 0.16);
+      tl.fromTo(wEl, { y: key * 0.9, opacity: 0.2, scale: 0.85 }, { y: 0, opacity: 1, scale: 1, duration: 0.18, ease: "back.out(2)" }, tp + 0.08);
+      tl.to(sendEl, { backgroundColor: LOOK.gold, duration: 0.12 }, tp + 0.14);
+      // Out: drops away down and to the right with a tilt.
+      tl.to(kb, { y: key * 5, x: KW * 0.18, rotation: 7, opacity: 0, duration: 0.3, ease: "power2.in" }, AT.out);
+      tl.set({}, {}, Number(root.dataset.duration));
+      window.__timelines["main"] = tl;
+      tl.seek(0);
+    </script>
+  </body>
+</html>

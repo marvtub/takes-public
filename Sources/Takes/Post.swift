@@ -587,6 +587,10 @@ struct PlatformPostPane: View {
     /// The session's slides, when the post shows them in place of its video (Carousel.swift).
     @StateObject private var carousel = CarouselStore()
     @State private var slide = 0
+    /// Marking an area on the slide on show for a comment, and the slide (from 0) and place of the
+    /// comment being written.
+    @State private var markingSlide = false
+    @State private var draftSlide: (index: Int, place: CarouselPlace)?
 
     init(doc: SessionDoc, platform: PostPlatform, from: String? = nil, pick: @escaping (String) -> Void) {
         self.doc = doc
@@ -606,7 +610,29 @@ struct PlatformPostPane: View {
     }
 
     private var file: String { PostFile.rel(of: post.draft, platform) }
-    private var postComments: [Comment] { comments.on(file) }
+    /// The post's comments: on its text, then on its slides while they are on.
+    private var postComments: [Comment] {
+        comments.on(file) + (slidesOn ? comments.on(CarouselFile.rel).filter { $0.slide != nil } : [])
+    }
+
+    private var slideNotes: SlideNotes {
+        SlideNotes(pins: postComments.enumerated().filter { $0.element.slide != nil }.map { ($0.offset + 1, $0.element) },
+                   focused: focused, marking: markingSlide,
+                   draft: draftSlide.flatMap { d in draft.map { (d.index, $0.rect) } },
+                   pick: { id in withAnimation(Theme.motion) { draft = nil; draftSlide = nil; focused = id } },
+                   start: { i in
+                       withAnimation(Theme.motion) { focused = nil; draft = nil; draftSlide = nil; slide = i; markingSlide = true }
+                   },
+                   marked: { i, rect, place in
+                       withAnimation(Theme.motion) {
+                           markingSlide = false
+                           draftSlide = (i, place)
+                           var d = draft ?? ReviewPlayer.Draft(timed: false)
+                           d.rect = rect
+                           draft = d
+                       }
+                   })
+    }
 
     var body: some View {
         let _ = Perf.body("PlatformPostPane")
@@ -628,7 +654,10 @@ struct PlatformPostPane: View {
                                          }
                                      },
                                      pickComment: { c in
-                                         withAnimation(Theme.motion) { draft = nil; focused = c.id; expanded = true }
+                                         withAnimation(Theme.motion) {
+                                             draft = nil; draftSlide = nil; focused = c.id
+                                             if let n = c.slide { slide = max(0, n - 1) } else { expanded = true }
+                                         }
                                          if let q = c.quote { reveal = (q, (reveal?.token ?? 0) + 1) }
                                      })
                             .padding(.top, 110).padding(.trailing, 16)
@@ -643,9 +672,12 @@ struct PlatformPostPane: View {
         .onDisappear { post.close(); carousel.flush() }
         .onChange(of: paneShown) { _, on in if on { load() } else { post.close(); draft = nil } }
         .onChange(of: doc.url) { load(); draft = nil; focused = nil; expanded = false }
-        .onChange(of: post.draft) { draft = nil; focused = nil; selection = ""; previewHook = nil }
+        .onChange(of: post.draft) { draft = nil; focused = nil; selection = ""; previewHook = nil; markingSlide = false }
+        .onChange(of: draft == nil) { _, none in if none { draftSlide = nil } }
         .onFilesChanged(in: doc.url) { load() }
-        .onExitCommand { withAnimation(Theme.motion) { if draft != nil { draft = nil } else { focused = nil } } }
+        .onExitCommand {
+            withAnimation(Theme.motion) { if markingSlide { markingSlide = false } else if draft != nil { draft = nil } else { focused = nil } }
+        }
         .sheet(isPresented: $showHistory) {
             VersionsSheet(title: "Post history", subtitle: doc.meta.title,
                           empty: "Takes saves a version whenever the chat changes the post, and while you edit it.",
@@ -692,7 +724,8 @@ struct PlatformPostPane: View {
         return AnyView(GeometryReader { g in
             CarouselPager(slides: c.slides, place: .linkedin, name: name, index: $slide, width: g.size.width,
                           style: carousel.style, session: doc.url,
-                          flipped: { say("Showing slide \($0 + 1) of \(c.slides.count)") }, edit: editSlide, drop: dropOnSlide)
+                          flipped: { say("Showing slide \($0 + 1) of \(c.slides.count)") }, edit: editSlide, drop: dropOnSlide,
+                          notes: slideNotes)
         }
         .aspectRatio(CarouselPlace.linkedin.ratio, contentMode: .fit))
     }
@@ -704,7 +737,8 @@ struct PlatformPostPane: View {
         return AnyView(CarouselPhotosPhone(slides: c.slides, place: place == .reels ? .instagram : .tiktok, name: name,
                                            caption: shownText.wrappedValue, index: $slide, height: height,
                                            style: carousel.style, session: doc.url,
-                                           flipped: { say("Showing photo \($0 + 1) of \(c.slides.count)") }, edit: editSlide, drop: dropOnSlide))
+                                           flipped: { say("Showing photo \($0 + 1) of \(c.slides.count)") }, edit: editSlide, drop: dropOnSlide,
+                                           notes: slideNotes))
     }
 
     /// YouTube's watch page, or the vertical phone with its caption.
@@ -738,7 +772,8 @@ struct PlatformPostPane: View {
                                  onExpand: { expanded = true; focusToken += 1 },
                                  onCollapse: { withAnimation(Theme.motion) { expanded = false }; releaseKeys() },
                                  photos: slidesOn ? photos : nil,
-                                 notes: slidesOn ? CarouselFile.notes(post.content?.places ?? VerticalPlace.allCases) : [])
+                                 notes: slidesOn ? CarouselFile.notes(post.content?.places ?? VerticalPlace.allCases) : [],
+                                 extra: slidesOn ? nil : Plugins.vertical?(doc.url, media, shownText.wrappedValue, app))
                 }
             }
             .padding(.horizontal, 24).padding(.top, 76).padding(.bottom, 60)
@@ -1048,7 +1083,18 @@ struct PlatformPostPane: View {
 
     private func startComment() {
         let quote = selection.isEmpty ? nil : selection
-        withAnimation(Theme.motion) { focused = nil; draft = ReviewPlayer.Draft(quote: quote, timed: false) }
+        withAnimation(Theme.motion) {
+            focused = nil; draftSlide = nil; markingSlide = false
+            draft = ReviewPlayer.Draft(quote: quote, timed: false)
+        }
+    }
+
+    /// A comment on slide `i`, with its frame: the slide as the post shows it, the area outlined.
+    private func sendSlide(_ d: (index: Int, place: CarouselPlace), _ rect: CGRect?, _ text: String) -> Comment? {
+        guard let c = carousel.file else { return nil }
+        let name = UserDefaults.standard.string(forKey: "linkedinName") ?? "You"
+        return comments.add(slide: d.index + 1, rect: rect, text: text,
+                            picture: CarouselExport.picture(c, d.index, place: d.place, session: doc.url, name: name))
     }
 
     @ViewBuilder private var card: some View {
@@ -1057,13 +1103,13 @@ struct PlatformPostPane: View {
                      onSend: {
                          let text = (draft?.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
                          guard !text.isEmpty else { return }
-                         if let c = comments.add(text: file, quote: draft?.quote, text: text) {
-                             app.show(toast: "Comment \(c.id) saved for Takes")
-                         }
+                         let made = draftSlide.map { sendSlide($0, draft?.rect, text) }
+                             ?? comments.add(text: file, quote: draft?.quote, text: text)
+                         if let c = made { app.show(toast: "Comment \(c.id) saved for Takes") }
                          withAnimation(Theme.motion) { draft = nil }
                      },
                      onCancel: { withAnimation(Theme.motion) { draft = nil } },
-                     onArea: {}, areas: false)
+                     onArea: { if let d = draftSlide { slide = d.index; markingSlide = true } }, areas: draftSlide != nil)
         } else if let id = focused, let i = postComments.firstIndex(where: { $0.id == id }) {
             let c = postComments[i]
             CommentCard(comment: c, number: i + 1,
@@ -1156,6 +1202,8 @@ struct SchedulePanel: View {
     /// The zone list or the ⋯ rows, open inside this panel (the kit has one floating panel).
     @State private var picking = false
     @State private var more = false
+    /// A day in the week on show.
+    @State private var week = Date()
 
     private var zone: TimeZone { TimeZone(identifier: zoneID) ?? .current }
 
@@ -1207,49 +1255,65 @@ struct SchedulePanel: View {
                                           close: close))
     }
 
+    /// The panel from "B · Your week" on the Takes Scheduling Journey canvas (2026-11-03): one week
+    /// of days, with a dot on days that already have a post, then four times. The month calendar,
+    /// the zone picker and Cancel went: the zone is in ⋯, Esc closes.
     private var form: some View {
         let auto = auto
+        let days = ScheduleWeek.days(of: week, in: zone)
+        let busy = ScheduleWeek.busy(app.posts.planned.filter { !($0.session == post.session && $0.platform == post.platform) }
+                                         .compactMap(\.content.at), in: zone)
+        let slot = ScheduleWeek.slot(of: date, in: zone)
         return VStack(alignment: .leading, spacing: 12) {
-            Text(content.status == .posted ? "Posted" : "When does it go out?").font(Theme.sans(15, .bold))
-            DatePicker("", selection: $date, displayedComponents: [.date])
-                .datePickerStyle(.graphical).labelsHidden()
-                .environment(\.timeZone, zone)
-            HStack(spacing: 8) {
+            HStack(spacing: 4) {
+                Text(content.status == .posted ? "Posted" : ScheduleWeek.title(days[0], in: zone)).font(Theme.sans(15, .bold))
+                Spacer()
+                weekButton("chevron.left", "Last week", by: -1).disabled(days[0] <= .now)
+                weekButton("chevron.right", "Next week", by: 1)
+            }
+            HStack(spacing: 4) {
+                ForEach(days, id: \.self) { d in
+                    dayCell(d, busy: busy.contains(ScheduleWeek.key(d, in: zone)))
+                }
+            }
+            HStack(spacing: 6) {
+                ForEach(ScheduleWeek.slots.indices, id: \.self) { i in
+                    let s = ScheduleWeek.slots[i]
+                    timeButton(ScheduleWeek.clock(s.hour, s.minute), on: slot == i) {
+                        date = ScheduleWeek.at(date, hour: s.hour, minute: s.minute, in: zone)
+                    }
+                }
+                timeButton("Other", on: slot == nil) {
+                    if slot != nil { date = ScheduleWeek.at(date, hour: 9, minute: 23, in: zone) }
+                }
+            }
+            if slot == nil {
                 DatePicker("", selection: $date, displayedComponents: [.hourAndMinute])
                     .labelsHidden().environment(\.timeZone, zone)
-                Button { more = false; withAnimation(Theme.motion) { picking = true } } label: {
-                    HStack(spacing: 5) {
-                        Text(PostFile.zoneName(zone)).font(Theme.sans(12.5)).foregroundStyle(Theme.ink).lineLimit(1)
-                        Image(systemName: "chevron.down").font(.system(size: 8, weight: .bold)).foregroundStyle(Theme.faint)
-                    }
-                    .padding(.horizontal, 9).frame(height: 24)
-                    .background(RoundedRectangle(cornerRadius: 7).fill(Theme.surface))
-                    .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(Theme.border))
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .help("The time zone the time is in")
             }
             if zone.identifier != TimeZone.current.identifier {
                 Text("That is \(PostFile.label(date, .current)) here.").font(Theme.sans(11.5)).foregroundStyle(Theme.muted)
             }
+            Text(ScheduleWeek.summary(date, in: zone)).font(Theme.sans(12.5)).foregroundStyle(Theme.muted)
             if let auto { auto.block }
-            Text(auto?.note ?? (content.status == .scheduled
+            let note = auto?.note ?? (content.status == .scheduled
                  ? "It is on \(post.platform.name) for \(content.at.map { PostFile.label($0, content.tz) } ?? "a time"). A new time here: ask Takes to move it."
-                 : "Then tell Takes \"schedule my posts\". It schedules the post on \(post.platform.name) for this time and marks it scheduled here."))
-                .font(Theme.sans(11.5)).foregroundStyle(Theme.muted)
-                .fixedSize(horizontal: false, vertical: true)
+                 : "Then tell Takes \"schedule my posts\". It schedules the post on \(post.platform.name) for this time.")
+            if !note.isEmpty {
+                Text(note).font(Theme.sans(11.5)).foregroundStyle(Theme.muted)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             HStack(spacing: 8) {
                 Button { withAnimation(Theme.motion) { more.toggle() } } label: {
                     Image(systemName: "ellipsis.circle").font(.system(size: 14)).frame(width: 26, height: 26)
                 }
                 .buttonStyle(IconButtonStyle())
-                .help("More: ready without a time, remove the time, back to draft")
+                .help("More: time zone, ready without a time, remove the time, back to draft")
+                // Esc closes, as before; the button itself went (2026-11-03).
+                Button("", action: close).keyboardShortcut(.cancelAction).opacity(0).frame(width: 0, height: 0)
                 Spacer()
-                Button("Cancel", action: close).keyboardShortcut(.cancelAction)
-                    .buttonStyle(AccentButtonStyle(kind: .quiet)).fixedSize()
                 if let primary = auto?.primary { primary } else {
-                Button(content.at == nil ? "Set time" : "Save") {
+                Button(content.at == nil ? "Schedule" : "Save") {
                     let (d, z) = (date, zone)
                     post.update { c in
                         c.plan(d, in: z)
@@ -1258,12 +1322,13 @@ struct SchedulePanel: View {
                     close()
                 }
                 .keyboardShortcut(.defaultAction)
-                .buttonStyle(AccentButtonStyle(kind: .solid))
+                .buttonStyle(AccentButtonStyle(kind: .accent))
                 }
             }
             if more {
                 let (content, post, close) = (content, post, close)
                 PanelMenu(width: 220, close: { withAnimation(Theme.motion) { more = false } }) {
+                    MenuButton("Time Zone: \(PostFile.zoneName(zone))", icon: "globe") { withAnimation(Theme.motion) { picking = true } }
                     if content.status == .draft {
                         MenuButton("Ready, No Time Yet", icon: "checkmark.circle") { post.update { $0.status = .ready }; close() }
                     }
@@ -1280,20 +1345,152 @@ struct SchedulePanel: View {
             }
         }
         .padding(16)
-        .frame(width: 320)
+        .frame(width: 340)
         .tint(Theme.accent)
         .onAppear {
             zoneID = content.tz.identifier
             date = content.at ?? Self.nextMorning(in: content.tz)
+            week = date
         }
     }
 
-    /// Tomorrow at 9:00 in the zone: a good first guess.
+    private func weekButton(_ icon: String, _ help: String, by n: Int) -> some View {
+        Button {
+            var cal = Calendar(identifier: .gregorian); cal.timeZone = zone
+            withAnimation(Theme.motion) { week = cal.date(byAdding: .day, value: 7 * n, to: week) ?? week }
+        } label: {
+            Image(systemName: icon).font(.system(size: 10, weight: .bold)).frame(width: 26, height: 26)
+        }
+        .buttonStyle(IconButtonStyle())
+        .help(help)
+    }
+
+    /// "Wed / 4" with a dot under it when another post goes out that day. Past days are grey.
+    private func dayCell(_ d: Date, busy: Bool) -> some View {
+        let past = ScheduleWeek.isPast(d, in: zone)
+        let on = ScheduleWeek.key(d, in: zone) == ScheduleWeek.key(date, in: zone)
+        return Button {
+            let (h, m) = ScheduleWeek.hourMinute(date, in: zone)
+            withAnimation(Theme.motion) { date = ScheduleWeek.at(d, hour: h, minute: m, in: zone) }
+        } label: {
+            VStack(spacing: 3) {
+                Text(ScheduleWeek.weekday(d, in: zone)).font(Theme.sans(10.5, .semibold)).foregroundStyle(past ? Theme.faint : Theme.muted)
+                Text(ScheduleWeek.dayNumber(d, in: zone)).font(Theme.sans(15, .semibold)).foregroundStyle(past ? Theme.faint : Theme.ink)
+                Circle().fill(Theme.warn).frame(width: 5, height: 5).opacity(busy ? 1 : 0)
+            }
+            .frame(maxWidth: .infinity).padding(.vertical, 7)
+            .background(RoundedRectangle(cornerRadius: 9, style: .continuous).fill(on ? Theme.accentSoft : .clear))
+            .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous).strokeBorder(on ? Theme.accent : .clear))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(past)
+        .help(busy ? "A post already goes out that day" : "")
+    }
+
+    private func timeButton(_ label: String, on: Bool, _ action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(label).font(Theme.sans(12.5, .medium)).foregroundStyle(Theme.ink).lineLimit(1)
+                .frame(maxWidth: .infinity).frame(height: 32)
+                .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(on ? Theme.accentSoft : Theme.hover))
+                .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(on ? Theme.accent : Theme.border))
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    /// Tomorrow at 8:07 in the zone, the Morning time: a good first guess.
     static func nextMorning(in zone: TimeZone) -> Date {
         var cal = Calendar(identifier: .gregorian)
         cal.timeZone = zone
         let tomorrow = cal.date(byAdding: .day, value: 1, to: cal.startOfDay(for: .now)) ?? .now
-        return cal.date(bySettingHour: 9, minute: 0, second: 0, of: tomorrow) ?? tomorrow
+        return cal.date(bySettingHour: 8, minute: 7, second: 0, of: tomorrow) ?? tomorrow
+    }
+}
+
+/// The dates behind the Schedule panel's week, in the post's zone. Pure, so the tests can check it.
+enum ScheduleWeek {
+    /// Morning, Midday, Evening: odd minutes, so a post never looks booked on the hour.
+    static let slots: [(hour: Int, minute: Int)] = [(8, 7), (12, 13), (17, 41)]
+
+    static func calendar(_ zone: TimeZone) -> Calendar {
+        var c = Calendar(identifier: .gregorian)
+        c.timeZone = zone
+        c.locale = Locale(identifier: "en_US")
+        return c
+    }
+
+    /// The seven days (each at its midnight) of the week holding `day`, Sunday first.
+    static func days(of day: Date, in zone: TimeZone) -> [Date] {
+        let cal = calendar(zone)
+        let start = cal.dateInterval(of: .weekOfYear, for: day)?.start ?? cal.startOfDay(for: day)
+        return (0..<7).compactMap { cal.date(byAdding: .day, value: $0, to: start) }
+    }
+
+    /// "2026-11-04": one key per day, to match posts to days.
+    static func key(_ d: Date, in zone: TimeZone) -> String {
+        let c = calendar(zone).dateComponents([.year, .month, .day], from: d)
+        return String(format: "%04d-%02d-%02d", c.year ?? 0, c.month ?? 0, c.day ?? 0)
+    }
+
+    static func busy(_ times: [Date], in zone: TimeZone) -> Set<String> { Set(times.map { key($0, in: zone) }) }
+
+    static func isPast(_ day: Date, in zone: TimeZone, now: Date = .now) -> Bool {
+        let cal = calendar(zone)
+        return cal.startOfDay(for: day) < cal.startOfDay(for: now)
+    }
+
+    static func hourMinute(_ d: Date, in zone: TimeZone) -> (Int, Int) {
+        let c = calendar(zone).dateComponents([.hour, .minute], from: d)
+        return (c.hour ?? 9, c.minute ?? 0)
+    }
+
+    /// `day` at hour:minute.
+    static func at(_ day: Date, hour: Int, minute: Int, in zone: TimeZone) -> Date {
+        calendar(zone).date(bySettingHour: hour, minute: minute, second: 0, of: day) ?? day
+    }
+
+    /// Which of `slots` the time is, nil for another time.
+    static func slot(of d: Date, in zone: TimeZone) -> Int? {
+        let (h, m) = hourMinute(d, in: zone)
+        return slots.firstIndex { $0.hour == h && $0.minute == m }
+    }
+
+    /// "This week", "Next week", "Last week", else "Nov 15 – 21".
+    static func title(_ start: Date, in zone: TimeZone, now: Date = .now) -> String {
+        let cal = calendar(zone)
+        let here = days(of: now, in: zone)[0]
+        let n = cal.dateComponents([.day], from: here, to: start).day.map { Int((Double($0) / 7).rounded()) } ?? 0
+        switch n {
+        case 0: return "This week"
+        case 1: return "Next week"
+        case -1: return "Last week"
+        default:
+            let f = DateFormatter(); f.timeZone = zone; f.locale = cal.locale; f.dateFormat = "MMM d"
+            let end = cal.date(byAdding: .day, value: 6, to: start) ?? start
+            let e = DateFormatter(); e.timeZone = zone; e.locale = cal.locale
+            e.dateFormat = cal.component(.month, from: end) == cal.component(.month, from: start) ? "d" : "MMM d"
+            return "\(f.string(from: start)) – \(e.string(from: end))"
+        }
+    }
+
+    static func weekday(_ d: Date, in zone: TimeZone) -> String { format(d, "EEE", zone) }
+    static func dayNumber(_ d: Date, in zone: TimeZone) -> String { format(d, "d", zone) }
+
+    /// "8:07 AM".
+    static func clock(_ hour: Int, _ minute: Int) -> String {
+        "\(hour % 12 == 0 ? 12 : hour % 12):\(String(format: "%02d", minute)) \(hour < 12 ? "AM" : "PM")"
+    }
+
+    /// "Wed, Nov 4 at 8:07 AM PST".
+    static func summary(_ d: Date, in zone: TimeZone) -> String { format(d, "EEE, MMM d 'at' h:mm a zzz", zone) }
+
+    private static func format(_ d: Date, _ pattern: String, _ zone: TimeZone) -> String {
+        let f = DateFormatter()
+        f.timeZone = zone
+        f.locale = Locale(identifier: "en_US")
+        f.dateFormat = pattern
+        return f.string(from: d)
     }
 }
 
@@ -1776,13 +1973,15 @@ struct PostPlayerLayer: NSViewRepresentable {
 /// of the file instead, clipped and overlaid like the video.
 struct PostVideo: View {
     let player: AVPlayer
+    /// The whole frame, not filled: the review player sizes the view to the video itself.
+    var fit = false
     nonisolated(unsafe) static var stills = false
     @State private var still: CGImage?
 
     var body: some View {
         if Self.stills {
             Color.clear
-                .overlay { if let still { Image(decorative: still, scale: 1).resizable().scaledToFill() } }
+                .overlay { if let still { Image(decorative: still, scale: 1).resizable().aspectRatio(contentMode: fit ? .fit : .fill) } }
                 .clipped()
                 .task {
                     // A looper hands its first item to the player a moment later.

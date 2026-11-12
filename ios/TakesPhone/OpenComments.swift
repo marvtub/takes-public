@@ -94,7 +94,10 @@ struct OpenCommentsChip: View {
     }
 
     private func resolve(_ c: Comment) {
-        withAnimation(.snappy) { open.removeAll { $0.id == c.id } }
-        Task { await model.resolve(sessionID, comment: c.id, true) }
+        Task {
+            if await model.resolve(sessionID, comment: c.id, true) {
+                withAnimation(.snappy) { open.removeAll { $0.id == c.id } }
+            }
+        }
     }
 }

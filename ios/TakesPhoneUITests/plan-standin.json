@@ -37,6 +37,24 @@
     ],
     "goal" : 0,
     "headline" : "Your plan is set.",
+    "intro" : {
+      "asks" : [
+        {
+          "ask" : "Put a video on each of my open posting days in the next two weeks with plan_video. Pick the ones closest to done first, and tell me why in one line each.",
+          "label" : "Fill my open days"
+        },
+        {
+          "ask" : "Which video should I record next to keep my posting days covered? Pick one, with one line why.",
+          "label" : "What should I record next?"
+        },
+        {
+          "ask" : "Explain the Plan board in four short lines: posting days, putting a video on a day, the week rings and the week streak.",
+          "label" : "How does Plan work?"
+        }
+      ],
+      "line" : "Takes knows your posting days and your videos. It puts a video on each day, moves them when plans change, and says what to record next.",
+      "title" : "Plan your next videos."
+    },
     "level" : "Pick a day to start",
     "maxWeeks" : 12,
     "minWeeks" : 2,
@@ -301,6 +319,24 @@
     ],
     "goal" : 2,
     "headline" : "Your next 3 posting days have a video. Next free one: Tue, Oct 20.",
+    "intro" : {
+      "asks" : [
+        {
+          "ask" : "Put a video on each of my open posting days in the next two weeks with plan_video. Pick the ones closest to done first, and tell me why in one line each.",
+          "label" : "Fill my open days"
+        },
+        {
+          "ask" : "Which video should I record next to keep my posting days covered? Pick one, with one line why.",
+          "label" : "What should I record next?"
+        },
+        {
+          "ask" : "Explain the Plan board in four short lines: posting days, putting a video on a day, the week rings and the week streak.",
+          "label" : "How does Plan work?"
+        }
+      ],
+      "line" : "Takes knows your posting days and your videos. It puts a video on each day, moves them when plans change, and says what to record next.",
+      "title" : "Plan your next videos."
+    },
     "level" : "The sweet spot",
     "maxWeeks" : 12,
     "minWeeks" : 2,

@@ -113,7 +113,8 @@ extension PhoneServer {
             return .file(dir.appending(path: n), type: "font/woff2")
         case ("GET", "/api/plugins"):
             // The plugin screens the phone shows at the foot of its list (2026-10-09). The public copy has Plan only.
-            return .encode(Plugins.all.filter { $0.phone != nil }.map { PhonePluginInfo(id: $0.id, title: $0.title, icon: $0.icon) })
+            // A plugin with no board (Ready posts, on the Plan screen) gets no row.
+            return .encode(Plugins.all.filter { $0.phone != nil && $0.board != nil }.map { PhonePluginInfo(id: $0.id, title: $0.title, icon: $0.icon) })
         case ("POST", "/api/chat/new"):
             // New conversation: the open one goes to the history, as the Mac's ⌘N in the chat.
             guard let s = session(req.query["id"]) else { return .error(404, "No such session") }

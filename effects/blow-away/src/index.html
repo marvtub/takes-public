@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <!-- Blow away: an ending. The speaker turns to dust, starting at the bottom left and sweeping up to the top of
+         the head, and the dust blows off to the right on a gust, swirling, shrinking and fading. The empty room is
+         left behind.
+         Inputs next to this file: footage.mp4 (the moment, at the frame size), plate.png (the room without the
+         speaker) and person-still.png (from `./still.sh <this folder> <AT.start>`: the cutout at that moment).
+         Full frame: render it as mp4 and lay it over the cut, at the end of the video. The frame size is
+         data-width / data-height on #root. Edit WIND, LOOK and AT below. -->
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+    <style>
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
+      #root { position: relative; width: 100%; height: 100%; overflow: hidden; background: #000; }
+      #root video, #root img, #dust { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+      #plate, #dust { opacity: 0; }
+      #still { display: none; }
+    </style>
+  </head>
+  <body>
+    <div id="root" data-composition-id="main" data-start="0" data-duration="3.0" data-width="1080" data-height="1920">
+      <video id="footage" class="clip" src="footage.mp4" muted playsinline data-start="0" data-track-index="0"></video>
+      <img id="plate" src="plate.png" />
+      <canvas id="dust"></canvas>
+      <img id="still" src="person-still.png" />
+    </div>
+    <script>
+      // The wind: which way the dust flies (dx, dy per second as parts of the frame), how much it swirls, and the
+      // direction the dust front sweeps (from bottom left to top right by default: weight of x and of height).
+      const WIND = { dx: 0.55, dy: -0.22, swirl: 0.06, wx: 0.5, wy: 0.5 };
+      // Look: dust grain size (px at 1080), how many grains (1 = one per 3 px), how long one grain lives (s).
+      const LOOK = { grain: 3, density: 1, life: 1.0 };
+      // When (seconds): the dust starts (person-still.png must be from this moment), how long the sweep takes.
+      const AT = { start: 0.5, sweep: 1.3 };
+
+      const root = document.getElementById("root");
+      const FRAME = { w: Number(root.dataset.width), h: Number(root.dataset.height) };
+      const U = Math.min(FRAME.w, FRAME.h) / 1080;
+      const cv = document.getElementById("dust"), ctx = cv.getContext("2d");
+      cv.width = FRAME.w; cv.height = FRAME.h;
+      let body = null, th = null, grains = [], img = null;
+      let seed = 3; const rnd = () => ((seed = (seed * 16807) % 2147483647) / 2147483647);
+      // Smooth value noise for a ragged dust front.
+      const noise = (x, y) => Math.sin(x * 0.021 + Math.sin(y * 0.013) * 2) * 0.5 + Math.sin(y * 0.034 + x * 0.008) * 0.5;
+      function prepare() {
+        const still = document.getElementById("still");
+        const off = document.createElement("canvas"); off.width = FRAME.w; off.height = FRAME.h;
+        const o = off.getContext("2d"); o.drawImage(still, 0, 0, FRAME.w, FRAME.h);
+        body = o.getImageData(0, 0, FRAME.w, FRAME.h);
+        // Where the body is: its box, so the front sweeps over the body, not the whole frame.
+        let x0 = FRAME.w, x1 = 0, y0 = FRAME.h, y1 = 0;
+        for (let y = 0; y < FRAME.h; y += 4) for (let x = 0; x < FRAME.w; x += 4) if (body.data[(y * FRAME.w + x) * 4 + 3] > 128) { x0 = Math.min(x0, x); x1 = Math.max(x1, x); y0 = Math.min(y0, y); y1 = Math.max(y1, y); }
+        th = new Float32Array(FRAME.w * FRAME.h);
+        for (let y = 0; y < FRAME.h; y++) for (let x = 0; x < FRAME.w; x++) {
+          const fx = (x - x0) / Math.max(1, x1 - x0), fy = 1 - (y - y0) / Math.max(1, y1 - y0);
+          th[y * FRAME.w + x] = Math.min(1, Math.max(0, (WIND.wx * fx + WIND.wy * fy) + noise(x, y) * 0.08));
+        }
+        const step = Math.max(2, Math.round(3 / LOOK.density));
+        for (let y = 0; y < FRAME.h; y += step) for (let x = 0; x < FRAME.w; x += step) {
+          const i = (y * FRAME.w + x) * 4;
+          if (body.data[i + 3] < 128) continue;
+          grains.push({ x, y, t: th[y * FRAME.w + x], c: `rgb(${body.data[i]},${body.data[i + 1]},${body.data[i + 2]})`,
+                        vx: 0.6 + rnd() * 0.8, vy: (rnd() - 0.5) * 0.8, ph: rnd() * 6.28, s: 0.6 + rnd() * 0.9 });
+        }
+        img = ctx.createImageData(FRAME.w, FRAME.h);
+      }
+      function draw() {
+        const t = tl.time();
+        if (!body) { const s = document.getElementById("still"); if (s.complete && s.naturalWidth) prepare(); else return; }
+        ctx.clearRect(0, 0, FRAME.w, FRAME.h);
+        if (t < AT.start) return;
+        const p = (t - AT.start) / AT.sweep;   // the front: grains with t < p have let go
+        // The body that is still whole.
+        const d = img.data, b = body.data;
+        for (let i = 0, n = FRAME.w * FRAME.h; i < n; i++) {
+          const k = i * 4;
+          if (b[k + 3] && th[i] > p) { d[k] = b[k]; d[k + 1] = b[k + 1]; d[k + 2] = b[k + 2]; d[k + 3] = b[k + 3]; } else d[k + 3] = 0;
+        }
+        ctx.putImageData(img, 0, 0);
+        // The dust.
+        const G = LOOK.grain * U;
+        for (const g of grains) {
+          const a = (p - g.t) * AT.sweep; // seconds since this grain let go
+          if (a <= 0 || a > LOOK.life) continue;
+          const e = a * a * 0.9 + a * 0.25;   // speeds up
+          const x = g.x + (WIND.dx * g.vx) * FRAME.w * e + Math.sin(g.ph + a * 7) * WIND.swirl * FRAME.w * a;
+          const y = g.y + (WIND.dy + g.vy * 0.15) * FRAME.h * e + Math.cos(g.ph + a * 5) * WIND.swirl * FRAME.w * a * 0.6;
+          const life = 1 - a / LOOK.life;
+          ctx.globalAlpha = life * 0.95;
+          ctx.fillStyle = a < 0.4 ? g.c : `rgba(225,225,222,1)`;
+          const sz = G * g.s * (0.4 + life * 0.6);
+          ctx.fillRect(x, y, sz, sz);
+        }
+        ctx.globalAlpha = 1;
+      }
+      window.__timelines = window.__timelines || {};
+      const tl = gsap.timeline({ paused: true, onUpdate: draw });
+      tl.set(["#plate", "#dust"], { opacity: 1 }, AT.start);
+      tl.set({}, {}, Number(root.dataset.duration));
+      window.__timelines["main"] = tl;
+      tl.seek(0);
+    </script>
+  </body>
+</html>

@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <!-- Dolly zoom: the "Vertigo" move. The speaker stays the same size while the room behind them grows,
+         as if the camera dollied back while the lens zoomed in. It eases in, holds, and snaps back on the cut.
+         Inputs next to this file: footage.mp4 (the moment, at the frame size), person.webm (its cutout) and
+         plate.png (the room without the speaker).
+         Full frame: render it as mp4 and lay it over the cut. The frame size is data-width / data-height on #root.
+         Edit LOOK and AT below. -->
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+    <style>
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
+      #root { position: relative; width: 100%; height: 100%; overflow: hidden; background: #000; }
+      #root video, #root img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+      #plate, #person { opacity: 0; }
+    </style>
+  </head>
+  <body>
+    <div id="root" data-composition-id="main" data-start="0" data-duration="2.0" data-width="1080" data-height="1920">
+      <video id="footage" class="clip" src="footage.mp4" muted playsinline data-start="0" data-track-index="0"></video>
+      <img id="plate" src="plate.png" />
+      <video id="person" class="clip" src="person.webm" muted playsinline data-start="0" data-track-index="1"></video>
+    </div>
+    <script>
+      // Look: how much the room grows (1.35 = 35 % bigger), and the point it grows from (about the head).
+      // person = how much the speaker shrinks meanwhile (a real dolly zoom keeps them the same: 1).
+      const LOOK = { room: 1.38, person: 0.97, at: { x: 0.5, y: 0.3 } };
+      // When (seconds): the move starts, how long it takes, the snap back.
+      const AT = { start: 0.3, for: 0.75, back: 1.7 };
+      const root = document.getElementById("root");
+      const o = `${LOOK.at.x * 100}% ${LOOK.at.y * 100}%`;
+      const plate = document.getElementById("plate"), person = document.getElementById("person");
+      plate.style.transformOrigin = o; person.style.transformOrigin = o;
+      window.__timelines = window.__timelines || {};
+      const tl = gsap.timeline({ paused: true });
+      tl.set([plate, person], { opacity: 1 }, AT.start);
+      tl.to(plate, { scale: LOOK.room, duration: AT.for, ease: "power2.inOut" }, AT.start);
+      tl.to(person, { scale: LOOK.person, duration: AT.for, ease: "power2.inOut" }, AT.start);
+      tl.set(plate, { scale: 1 }, AT.back); tl.set(person, { scale: 1 }, AT.back);
+      tl.set([plate, person], { opacity: 0 }, AT.back);
+      tl.set({}, {}, Number(root.dataset.duration));
+      window.__timelines["main"] = tl;
+      tl.seek(0);
+    </script>
+  </body>
+</html>

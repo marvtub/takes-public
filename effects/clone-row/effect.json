@@ -1,0 +1,15 @@
+{
+  "name": "Clone row",
+  "description": "The shot punches in, then copies of the speaker shoot out from behind them to both sides, smaller and darker the further out, like a row going back into the room. All copies talk in sync. Then they snap back with a blur.",
+  "when": "When you talk about doing more at once, a team of agents, or 'ten of me': a moment that shows scale.",
+  "needs": [
+    "the place of the speaker's head",
+    "how many copies on each side (1 to 4)",
+    "the cut time where it starts",
+    "a cutout of the speaker (made in the steps)"
+  ],
+  "kind": "Cut-out",
+  "length_s": 4,
+  "shape": "any",
+  "shipped": true
+}

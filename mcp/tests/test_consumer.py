@@ -56,10 +56,16 @@ class Consumer(unittest.TestCase):
         c = t.work_consumer_status(t.work_climb(), self.now)
         self.assertTrue(c["due"])
         self.assertIn("temporary-chat=true", c["how"])
+        # 2026-11-05: climb_status's due line names it, so an agent that reads only the headline does it.
+        s = t.t_climb_status({})
+        self.assertIn("Consumer check due (Alternatives).", s["due"])
+        self.assertNotEqual(s["due"], "Nothing due.")
+        self.assertEqual(s["consumer"], c)
         t.work_save_consumer({"consumer": {"answers": [
             {"surface": "ChatGPT web", "question": Q1, "named": False, "apps": ["OpenScreen", "Recordly"]}]}},
             t.work_climb(), self.now)
         self.assertFalse(t.work_consumer_status(t.work_climb(), self.now)["due"])
+        self.assertNotIn("Consumer check", t.t_climb_status({})["due"])
         # The next week has its own topic.
         self.set_now(30)
         c = t.work_consumer_status(t.work_climb(), self.now)

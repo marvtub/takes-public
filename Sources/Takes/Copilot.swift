@@ -145,6 +145,93 @@ struct PostedTally: Equatable {
     }
 }
 
+/// How well the copilot learns (2026-11-01): comments/eval.json, written by the takes MCP server
+/// (comment_eval, learn_comment). Python does the math; the Library tab only shows it.
+struct CommentEval: Decodable, Equatable {
+    struct Week: Decodable, Equatable, Identifiable {
+        var week: String
+        var decided: Int
+        var approved: Int
+        var edited: Int
+        var badComment: Int
+        var wrongPost: Int
+        var expired: Int
+        /// Approved as is, of all approved (nil: none approved that week).
+        var asIs: Double?
+        var bad: Double?
+        /// How much of the picked draft his final kept (1 = untouched).
+        var kept: Double?
+        var id: String { week }
+
+        enum CodingKeys: String, CodingKey {
+            case week, decided, approved, edited, expired, bad, kept
+            case badComment = "bad_comment", wrongPost = "wrong_post", asIs = "as_is"
+        }
+
+        var date: Date? { CommentEval.day.date(from: week) }
+    }
+
+    struct Gate: Decodable, Equatable {
+        var phrases: Int
+        var badDrafts: Int
+        var caught: Int
+        var hisBlocked: Int
+
+        enum CodingKeys: String, CodingKey {
+            case phrases, caught
+            case badDrafts = "bad_drafts", hisBlocked = "his_blocked"
+        }
+    }
+
+    struct Judge: Decodable, Equatable {
+        var agree: Int
+        var of: Int
+        var good: Int
+        var bad: Int
+        var kappa: Double?
+        var trusted: Bool
+        var at: String?
+    }
+
+    struct Learning: Decodable, Equatable, Identifiable {
+        var at: String?
+        var outcome: String?
+        var kind: String?
+        var text: String?
+        var why: String?
+        var id: String { (at ?? "") + (text ?? "") }
+    }
+
+    var updated: String?
+    var weeks: [Week]
+    var gate: Gate?
+    var waiting: Int
+    var learned: Int
+    var recent: [Learning]
+    var judge: Judge?
+
+    nonisolated(unsafe) static let day: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd"
+        f.timeZone = TimeZone(identifier: "UTC")
+        return f
+    }()
+
+    nonisolated static func url(_ root: URL) -> URL { CopilotStore.folder(root).appending(path: "eval.json") }
+
+    nonisolated static func load(_ root: URL) -> CommentEval? {
+        guard let data = try? Data(contentsOf: url(root)) else { return nil }
+        return try? JSONDecoder().decode(CommentEval.self, from: data)
+    }
+
+    /// The newest week with an as-is share, and the one about four weeks before it.
+    var asIsNow: Week? { weeks.last { $0.asIs != nil } }
+    var asIsBefore: Week? {
+        guard let now = asIsNow, let i = weeks.firstIndex(of: now) else { return nil }
+        return weeks[..<i].last { $0.asIs != nil && (weeks.firstIndex(of: $0) ?? i) <= i - 4 } ?? weeks.first { $0.asIs != nil && $0 != now }
+    }
+}
+
 /// Why a draft was declined. The order is the number key on the card (1 to 8).
 enum DeclineReason: String, CaseIterable {
     case offVoice = "off-voice", soundsAI = "sounds AI", generic = "too generic", long = "too long"
@@ -259,13 +346,15 @@ final class CopilotStore: ObservableObject {
     }
 
     /// `wrongPost`: he would not comment on this post at all. Else the comment was the problem.
-    func decline(_ s: Suggestion, wrongPost: Bool, reason: DeclineReason, note: String = "") {
+    /// `variant`: the one on screen, so the agent learns which draft he turned down (2026-11-01).
+    func decline(_ s: Suggestion, wrongPost: Bool, reason: DeclineReason, note: String = "", variant: Int? = nil) {
         lastSkipped = nil
         update(s.id) { d in
             d["status"] = "declined"
             var dec: [String: Any] = ["kind": wrongPost ? "wrong_post" : "bad_comment", "reason": reason.rawValue, "at": Self.now()]
             let n = note.trimmingCharacters(in: .whitespacesAndNewlines)
             if !n.isEmpty { dec["note"] = n }
+            if let variant, s.options.count > 1, s.options.indices.contains(variant) { dec["variant"] = variant }
             d["decision"] = dec
         }
     }
@@ -414,7 +503,7 @@ final class CopilotRunner: ObservableObject {
 
     var running: Bool { if case .running = state { return true } else { return false } }
 
-    static let takesTools = ["get_comment_context", "add_comment_suggestion", "redraft_comment",
+    static let takesTools = ["get_comment_context", "learn_comment", "add_comment_suggestion", "redraft_comment",
                              "list_comment_suggestions"].map { "mcp__takes__" + $0 }
 
     static func arguments(system: String) -> [String] {
@@ -506,10 +595,10 @@ final class CopilotRunner: ObservableObject {
 
     static let redraftPrompt = """
         The user gave feedback on LinkedIn comment drafts in the Takes app. Call get_comment_context. \
-        For each item in waiting_for_redraft, read the newest draft's variants and feedback note and \
+        First learn every signal in to_learn with learn_comment, as its to_learn_note says. \
+        Then for each item in waiting_for_redraft, read the newest draft's variants and feedback note and \
         write 3 new variants that follow it (if the draft has an edit, that is the user's own text: \
-        keep it as variant 1, changed only as the note asks), each a different shape, keeping to the lessons and the \
-        style guide it names. Save each with redraft_comment. Do not use the browser. End with one short line.
+        keep it as variant 1, changed only as the note asks), each a different shape, keeping to the lessons. Save each with redraft_comment. Do not use the browser. End with one short line.
         """
 }
 
@@ -595,13 +684,15 @@ enum CopilotAsk {
         draft ("make it shorter", "I like the second one"): write 3 new variants with \
         redraft_comment. About the drafts in general ("all of these", "every draft", the voice, a \
         habit seen across them): redraft every draft in review with redraft_comment, and if it \
-        is a lasting rule, add it to the lessons (rules/comments.md). A question: answer it. Say in one line which you did.
+        is a lasting rule, add it with learn_comment. A question: answer it. Say in one line which you did.
 
         \(ClaudeChat.browserRules)
 
         Finding posts (when the user asks for drafts): four scouts read LinkedIn in parallel, you draft.
         1. Call get_comment_context. Read lessons, rules, targets and examples (edited_by_user \
-        shows what the user changes: study it most). Read the style guide file it names.
+        shows what the user changes: study it most). Then learn \
+        every signal in to_learn with learn_comment before you draft (the drafting tools refuse until \
+        then): one item per thing learned, each with every signal it covers.
         2. If waiting_for_redraft lists drafts, first write a new draft for each that follows its \
         feedback note, and save it with redraft_comment. A draft's edit is the user's own text: keep \
         it as variant 1, changed only as the note asks.
@@ -615,12 +706,13 @@ enum CopilotAsk {
         how well the author fits, then fresh posts with few comments. Draft only the best ones, up \
         to the number asked for: a weak post is not worth a draft, even if that means fewer.
         5. For each post you draft: one angle line (what the user can add), then 3 variants of the \
-        comment, following the lessons and the style guide. Each variant a different shape (a short \
+        comment, following the lessons. Each variant a different shape (a short \
         story from the user's work, a pointed question, a counterpoint, a concrete tip) and length; \
         variant_picks shows which shapes the user picks. Save it with add_comment_suggestion: the post's \
         own URL, post_text exactly as the scout returned it (its empty lines too), author_photo from the scout, and source "feed", "list", "search" or "commenters" (the scout that found it). If the slop gate refuses \
         a variant, rewrite it once; refused again, drop the post.
-        6. End with one short line: how many drafts you added from how many candidates, anything \
+        6. If the context lists stats_due, read each comment's numbers as stats_due_note says.
+        7. End with one short line: how many drafts you added from how many candidates, anything \
         that stopped a scout, and the scouts' new_targets and quiet people (names only) for the \
         target list. Never edit the target list yourself.
 
@@ -638,8 +730,14 @@ enum CopilotAsk {
         4. When the comment shows under the post, call set_comment_posted with the suggestion id \
         and the comment's link: the post URL with ?commentUrn= and the comment's urn:li:comment \
         from the page, else the post URL.
-        5. Wait 60 to 120 seconds between two comments. Post at most 15 a day: count the posted \
-        ones from the last 24 hours. Stop at the first error message LinkedIn shows.
+        5. Go at a person's pace: 10 comments take about 30 minutes, so each one takes 2 to 4 \
+        minutes, a different time each time. Before you start and between two comments, use \
+        LinkedIn like a person in your tab: scroll the feed for a while, open one or two posts or \
+        profiles and scroll them, and sometimes reach the next post from its author's profile \
+        rather than its URL. On the post itself, scroll through it and its comments before you \
+        open the comment box. Never like, follow, react or click anything that writes. Wait with \
+        several short waits (10 s each), not one long one. Post at most 15 a day: count the \
+        posted ones from the last 24 hours. Stop at the first error message LinkedIn shows.
         6. End with one line per comment: posted, or why not.
         """
 }
@@ -661,7 +759,13 @@ final class OutputBuffer: @unchecked Sendable {
 @MainActor
 final class CommentScout {
     static let onKey = "commentScoutOn", dayKey = "commentScoutDay"
-    nonisolated static let hour = 8, minute = 7, count = 10
+    nonisolated static let hour = 8, minute = 7
+    /// The daily run tops the line up to this many waiting cards (2026-11-07). It drafted 10 a day
+    /// before, and 21 expired unread in one week: a card he never sees teaches the copilot nothing.
+    nonisolated static let line = 5
+
+    /// How many posts today's run looks for: the gap to `line`. 0 skips the run.
+    nonisolated static func count(waiting: Int) -> Int { max(0, line - waiting) }
 
     static var on: Bool {
         get { UserDefaults.standard.object(forKey: onKey) as? Bool ?? true }
@@ -681,6 +785,9 @@ final class CommentScout {
         return String(format: "%04d-%02d-%02d", c.year ?? 0, c.month ?? 0, c.day ?? 0)
     }
 
+    /// Cards still waiting in Review (not skipped), from AppModel's store.
+    var waiting: () -> Int = { 0 }
+
     func start(_ hub: ChatHub) {
         timer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self, weak hub] _ in
             MainActor.assumeIsolated { if let hub { self?.tick(hub) } }
@@ -695,8 +802,10 @@ final class CommentScout {
         d.set(Self.day(Date()), forKey: Self.dayKey)
         // A Find the user started himself counts as today's run.
         guard !hub.comments.running else { return }
+        let n = Self.count(waiting: waiting())
+        guard n > 0 else { return }
         hub.comments.reset()
-        hub.comments.send(CopilotAsk.daily(Self.count), title: "Comments", onStage: nil,
-                          shown: "Daily search: find up to \(Self.count) posts")
+        hub.comments.send(CopilotAsk.daily(n), title: "Comments", onStage: nil,
+                          shown: "Daily search: find up to \(n) posts")
     }
 }

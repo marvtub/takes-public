@@ -263,7 +263,8 @@ class Pure(Base):
         self.assertIn("sidechaincompress", sound)
         self.assertIn("volume=-12.00dB", sound)  # the song to -14 LUFS once (+6), then its gain_db (-18)
         picture = a["picture"]
-        self.assertEqual(" ".join(picture).count("libx264") + " ".join(a["mux"]).count("libx264"), 1)
+        enc = t.picture_codec()[1]  # the one lossy encode: in the picture pass, never in the mux
+        self.assertEqual(" ".join(picture).count(enc) + " ".join(a["mux"]).count(enc), 1)
         self.assertIn("-an", picture)
         self.assertIn("copy", a["mux"])
         self.assertIn("[cv][cb]concat", " ".join(picture))
@@ -447,6 +448,12 @@ class Bases(Base):
         self.published("hook", 2)
         t.write_json(os.path.join(self.s, "edits", "hook-v3.recipe.json"), {"name": "hook", "render_id": "job-x"})
         self.assertEqual(t.t_next_path({"kind": "edit", "name": "hook", "session": self.s})["version"], 4)
+
+    def test_next_path_gives_a_fast_encode(self):
+        out = t.t_next_path({"kind": "edit", "name": "hook", "session": self.s})
+        self.assertIn(t.picture_codec()[1], out["encode"])
+        self.assertIn("Never -preset slow", out["encode"])
+        self.assertNotIn("encode", t.t_next_path({"kind": "edit", "name": "hook", "session": self.s, "ext": ".fcpxml"}))
 
 
 class Publish(Base):
@@ -807,7 +814,7 @@ class Render(Base):
             self.assertIn(k, v1)
         self.assertEqual(v1["music"][0]["file"], song)
         self.assertEqual(v1["takes"][0]["take"], 1)
-        self.assertTrue(any("libx264" in c for c in v1["commands"]))
+        self.assertTrue(any(t.picture_codec()[1] in c for c in v1["commands"]))
         # The next version: change one value; only that value and Takes' own fields differ.
         entry = dict(v1["music"][0], gain_db=-21)
         r2 = self.render(base="hook", changes={"music": [entry]})

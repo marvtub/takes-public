@@ -1,0 +1,318 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=1080, height=1920" />
+    <!-- Cursor looks: the pointer of a screen recording drawn in one of eight looks, with a state for each
+         thing it does (move, hover, text, drag, wait) and a press and a burst at each click. Transparent
+         background: render as mov (ProRes 4444 with alpha) and lay it over the edit, with the recipe's
+         pointer {"look": "none"}. cursor.py fills DATA, data-duration and the size on #root from the take's
+         cursor log (take-NN-screen.events.json), mapped through the edit's cut, crop and scale.
+         Each look is drawn in points around the pointer's tip (0, 0): DATA.unit is edit px per point. -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@600&display=swap" rel="stylesheet" />
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+    <style>
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      html, body { width: 100%; height: 100%; overflow: hidden; background: transparent; }
+      #root { position: relative; width: 100%; height: 100%; overflow: hidden; }
+      .l, .st, .cur, .sz, .press, .fx { position: absolute; left: 0; top: 0; }
+      .cur, .fx { will-change: transform; }
+      .sz, .press, .dir { transform-origin: 0 0; }
+      svg { overflow: visible; }
+      .chip { position: absolute; left: 20px; top: 26px; padding: 6px 10px; border-radius: 999px; background: #141414;
+        color: #fff; font: 600 12px/1 Inter, sans-serif; white-space: nowrap; box-shadow: 0 4px 10px rgba(0,0,0,.2);
+        transform-origin: 0 0; display: flex; align-items: center; gap: 6px; }
+      .glass { background: rgba(255,255,255,.3); border: 1px solid rgba(255,255,255,.8);
+        box-shadow: 0 8px 24px rgba(20,20,40,.18), inset 0 1px 0 rgba(255,255,255,.9); }
+      /* Loops. A finite count: HyperFrames seeks CSS animations with a known end. */
+      .spin { animation: k-spin .8s linear 9999 both; }
+      .spin-slow { animation: k-spin 1s linear 9999 both; }
+      .spin-px { animation: k-spin .9s steps(8, end) 9999 both; }
+      .swirl-fast { animation-duration: .6s !important; }
+      .flip { animation: k-flip 2.6s cubic-bezier(.65,0,.35,1) 9999 both; }
+      .wig { animation: k-wig 1.4s ease-in-out 9999 both; }
+      .tap { animation: k-tap .6s ease-in-out 9999 both; }
+      .blink { animation: k-blink .9s linear 9999 both; }
+      .sparkle { animation: k-sparkle .8s steps(1, end) 9999 both; }
+      .orb { position: absolute; left: -23px; top: -23px; width: 46px; height: 46px; }
+      .blob { position: absolute; inset: 0; border-radius: 50%;
+        background: radial-gradient(circle at 34% 30%, #FFFDE0 0, #FFF04A 26%, var(--a) 58%, #FF9F00 100%);
+        box-shadow: 0 0 16px 4px rgba(255,214,0,.75), 0 0 46px 12px rgba(255,170,0,.35);
+        animation: k-wob 1.6s ease-in-out 9999 both; }
+      .swirl { position: absolute; inset: 5px; border-radius: 50%;
+        background: conic-gradient(from 0deg, rgba(255,255,255,0), rgba(255,255,255,.85), rgba(255,140,0,.5), rgba(255,255,255,0) 70%);
+        mix-blend-mode: screen; filter: blur(3px); animation: k-spin 1.3s linear 9999 both; }
+      .pulse { animation: k-pulse 1.2s ease-in-out 9999 both; }
+      @keyframes k-spin { to { transform: rotate(360deg); } }
+      @keyframes k-flip { 0%,35% { transform: rotate(0); } 50%,85% { transform: rotate(180deg); } 100% { transform: rotate(360deg); } }
+      @keyframes k-wig { 0%,100% { transform: rotate(0); } 20% { transform: rotate(-9deg); } 40% { transform: rotate(7deg); } 60% { transform: rotate(-5deg); } 80% { transform: rotate(3deg); } }
+      @keyframes k-tap { 0%,100% { transform: translate(0,0); } 50% { transform: translate(4px,7px); } }
+      @keyframes k-blink { 0%,100% { opacity: .25; } 50% { opacity: 1; } }
+      @keyframes k-sparkle { 0%,49% { opacity: 1; } 50%,100% { opacity: 0; } }
+      @keyframes k-wob { 0%,100% { border-radius: 48% 52% 55% 45%/50% 45% 55% 50%; } 33% { border-radius: 55% 45% 48% 52%/45% 55% 48% 52%; } 66% { border-radius: 45% 55% 52% 48%/55% 48% 52% 45%; } }
+      @keyframes k-pulse { 0%,100% { transform: scale(.9); filter: brightness(.9); } 50% { transform: scale(1.15); filter: brightness(1.25); } }
+    </style>
+  </head>
+  <body>
+    <div id="root" data-composition-id="main" data-start="0" data-duration="4" data-width="1080" data-height="1920">
+    </div>
+    <script>
+      // cursor.py writes DATA. path: [t, x, y, zoom?] per frame (x null = not shown), states: [t, state] at each
+      // change, clicks: [t, x, y, zoom?], labels: [t, seconds, text], waits: [from, to, text]; all from the layer's start.
+      const DATA = {"path":[[0,300,1500],[0.5,420,1200],[1,640,900],[1.5,640,900],[2,500,760],[2.5,500,760],[3,380,1000],[3.5,380,1000]],"states":[[0,"move"],[1.4,"hover"],[2.4,"text"],[3.2,"move"]],"clicks":[[1.5,640,900]],"labels":[],"waits":[],"look":"plasma","accent":"#FFE600","unit":2.5,"fps":2};
+
+      // ---------- the looks: markup per state in points around the tip, {{A}} = the accent ----------
+      const SH = "filter:drop-shadow(0 3px 5px rgba(0,0,0,.3))";
+      const glassArrow = (fill, stroke, extra) => `<svg width="22" height="30" viewBox="0 0 22 30" style="position:absolute;left:-1.5px;top:-1.5px;${extra || SH}"><path d="M1.5 1.5V24l5.7-5.4 3.6 8.4 3.8-1.6-3.5-8.2h7.7z" fill="${fill}" stroke="${stroke}" stroke-width="1.6" stroke-linejoin="round"/></svg>`;
+      const beam = (stroke) => `<svg width="12" height="26" viewBox="0 0 12 26" style="position:absolute;left:-6px;top:-13px;filter:drop-shadow(0 2px 3px rgba(0,0,0,.25))"><path d="M2 2c2.5 0 4 1 4 3v16c0 2-1.5 3-4 3M10 2C7.5 2 6 3 6 5M6 21c0 2 1.5 3 4 3" fill="none" stroke="#fff" stroke-width="4" stroke-linecap="round"/><path d="M2 2c2.5 0 4 1 4 3v16c0 2-1.5 3-4 3M10 2C7.5 2 6 3 6 5M6 21c0 2 1.5 3 4 3" fill="none" stroke="${stroke}" stroke-width="1.6" stroke-linecap="round"/></svg>`;
+      const bar = `<div class="l" style="left:-2px;top:-13px;width:4px;height:26px;border-radius:2px;background:{{A}};box-shadow:0 0 0 1.5px #fff,0 2px 6px rgba(0,0,0,.25)"></div>`;
+      const ring = (size, border, extra) => `<div class="l" style="left:${-size / 2}px;top:${-size / 2}px;width:${size}px;height:${size}px;border-radius:50%;border:${border}px solid {{A}};${extra || ""}"></div>`;
+      const cometDot = `<div class="l" style="left:-9px;top:-9px;width:18px;height:18px;border-radius:50%;background:{{A}};border:2px solid #fff;box-shadow:0 2px 8px rgba(0,0,0,.3)"></div>`;
+      const inkArrow = (fill, stroke, shadow, extra) => `<svg width="26" height="34" viewBox="0 0 26 34" style="position:absolute;left:-2px;top:-2px;${extra || ""};filter:drop-shadow(${shadow} {{A}})"><path d="M2 2v25l6.4-6 4 9.3 4.4-1.9-3.9-9.1H21z" fill="${fill}" stroke="${stroke}" stroke-width="2" stroke-linejoin="round"/></svg>`;
+      const capArrow = (shadow) => `<svg width="24" height="32" viewBox="0 0 24 32" style="position:absolute;left:-2px;top:-2px;filter:drop-shadow(${shadow || "0 3px 5px rgba(0,0,0,.3)"})"><path d="M2 2v23.5l6-5.7 3.8 8.8 4-1.7-3.7-8.6H20z" fill="{{A}}" stroke="#fff" stroke-width="2" stroke-linejoin="round"/></svg>`;
+      const PX = "M1 1H2V2H3V3H4V4H5V5H6V6H7V7H8V8H9V9H10V10H11V11H12V12H8V13H9V15H10V17H8V18H7V16H6V14H5V13H4V14H3V15H2V16H1Z";
+      const pxArrow = (fill, stroke, shadow) => `<svg width="39" height="57" viewBox="0 0 13 19" shape-rendering="crispEdges" style="position:absolute;left:-3px;top:-3px;filter:drop-shadow(3px 3px 0 ${shadow || "rgba(0,0,0,.25)"})"><path d="${PX}" fill="${fill}" stroke="${stroke}" stroke-width="1"/></svg>`;
+      const block = (x, y, w, h, bg, extra) => `<div class="l" style="left:${x}px;top:${y}px;width:${w}px;height:${h}px;background:${bg};${extra || ""}"></div>`;
+      const orb = (cls, style) => `<div class="orb ${cls || ""}" style="${style || ""}"><div class="blob"></div><div class="swirl"></div></div>`;
+      const hand = `<svg width="76" height="96" viewBox="0 0 76 96" style="position:absolute;left:-12px;top:-2px;filter:drop-shadow(3px 7px 6px rgba(0,0,0,.3))"><defs><radialGradient id="gl" cx="30%" cy="22%" r="90%"><stop offset="0" stop-color="#fff"/><stop offset=".5" stop-color="#F1ECE3"/><stop offset="1" stop-color="#BDB3A2"/></radialGradient><linearGradient id="wd" x1="0" x2="1" y1="0" y2="0"><stop offset="0" stop-color="#E9B576"/><stop offset=".4" stop-color="#B97A3F"/><stop offset="1" stop-color="#6B3F18"/></linearGradient><linearGradient id="cf" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stop-color="#fff" stop-opacity=".45"/><stop offset="1" stop-color="#000" stop-opacity=".2"/></linearGradient></defs><g transform="rotate(-30 12 2)"><rect x="16.5" y="40" width="6" height="54" rx="3" fill="url(#wd)"/><circle cx="19.5" cy="94" r="4" fill="#5A3414"/><rect x="10" y="34.5" width="19" height="7" rx="3" fill="{{A}}"/><rect x="10" y="34.5" width="19" height="7" rx="3" fill="url(#cf)" stroke="#2A2A2A" stroke-width="1.2"/><path d="M8 18.5V6C8 3.6 9.8 2 12 2s4 1.6 4 4v9c.5-1.3 1.7-2 3-2 1.6 0 2.8 1 3 2.4.6-1 1.6-1.4 2.6-1.4 1.6 0 2.8 1.2 2.8 2.8.6-.4 1.2-.5 1.8-.4 1.4.3 2.2 1.4 2.2 2.8V26c0 5.6-4.2 9.6-10.2 9.6H17c-4.6 0-7.6-2.3-9.1-5.6l-4.4-7.6c-.8-1.4-.4-3.1 1-3.8 1.4-.8 2.8-.4 3.5.5z" fill="url(#gl)" stroke="#2A2A2A" stroke-width="1.4" stroke-linejoin="round"/><path d="M16 15v5.5M22 15.4v5M27.4 16.8v4.6" fill="none" stroke="#A39A8A" stroke-width="1.2" stroke-linecap="round"/><path d="M10.2 5.5v9" fill="none" stroke="#fff" stroke-width="1.6" stroke-linecap="round" opacity=".9"/></g></svg>`;
+      const gmArrow = `<svg width="30" height="40" viewBox="0 0 30 40" style="position:absolute;left:-2px;top:-2px;filter:drop-shadow(0 4px 6px rgba(20,20,40,.25))"><defs><linearGradient id="gmf" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#fff" stop-opacity=".85"/><stop offset=".5" stop-color="#fff" stop-opacity=".4"/><stop offset="1" stop-color="#fff" stop-opacity=".6"/></linearGradient></defs><path d="M2 2v32l8-8 5 12 5.5-2.5-5-11.5h10.8z" fill="none" stroke="rgba(20,20,40,.3)" stroke-width="3" stroke-linejoin="round"/><path d="M2 2v32l8-8 5 12 5.5-2.5-5-11.5h10.8z" fill="url(#gmf)" stroke="#fff" stroke-width="1.4" stroke-linejoin="round"/><path d="M5 8v10" stroke="#fff" stroke-width="1.6" stroke-linecap="round" opacity=".9"/></svg>`;
+      const pop = { from: { scale: 0.4, opacity: 0 }, to: { scale: 1, opacity: 1, duration: 0.25, ease: "back.out(2)" } };
+      const ringBurst = (size, border, grow, extra) => ({ html: ring(size, border, extra), from: { scale: 0.2, opacity: 0.9 },
+        steps: [{ scale: grow, opacity: 0, d: 0.5, ease: "power2.out" }] });
+
+      // Each look: states {move, hover, text, drag, wait} (markup), enter {state: pop} (an entrance for its .in),
+      // press [steps] at each click, burst [{html, from, steps, delay}] at each click, trail [[delay s, markup]],
+      // step (path samples a second, for a stepped look), stretch (squash along the motion), chip (labels).
+      const LOOKS = {
+        glass: {
+          states: {
+            move: glassArrow("#fff", "#141414"),
+            hover: `<div class="l" style="left:-18px;top:-18px;width:36px;height:36px;border-radius:50%;background:{{A}};opacity:.3"></div>` +
+              glassArrow("#fff", "#141414", "transform:rotate(-14deg);transform-origin:1.5px 1.5px;filter:drop-shadow(0 4px 6px rgba(0,0,0,.32))"),
+            text: beam("#141414"),
+            drag: glassArrow("{{A}}", "#141414", "transform:scale(.88);transform-origin:1.5px 1.5px;filter:drop-shadow(0 6px 8px rgba(0,0,0,.35))"),
+            wait: glassArrow("#fff", "#141414") + `<div class="l spin" style="left:18px;top:24px;width:18px;height:18px;border-radius:50%;border:3px solid rgba(0,0,0,.12);border-top-color:{{A}}"></div>`,
+          },
+          press: [{ scale: 0.78, d: 0.07 }, { scale: 1, d: 0.16, ease: "back.out(3)" }],
+          burst: [ringBurst(44, 2, 2.4)],
+        },
+        comet: {
+          states: {
+            move: cometDot,
+            hover: ring(48, 2, "background:rgba(255,255,255,.35);box-shadow:0 2px 10px rgba(0,0,0,.18)") +
+              `<div class="l" style="left:-3px;top:-3px;width:6px;height:6px;border-radius:50%;background:{{A}}"></div>`,
+            text: bar,
+            drag: `<div class="l" style="left:-13px;top:-13px;width:26px;height:26px;border-radius:50%;background:#fff;border:6px solid {{A}};box-shadow:0 6px 12px rgba(0,0,0,.3)"></div>`,
+            wait: cometDot + `<div class="l spin-slow" style="left:-18px;top:-18px;width:36px;height:36px">` +
+              `<div class="l" style="left:15px;top:0;width:6px;height:6px;border-radius:50%;background:{{A}}"></div>` +
+              `<div class="l" style="left:15px;top:30px;width:6px;height:6px;border-radius:50%;background:{{A}};opacity:.35"></div></div>`,
+          },
+          enter: { hover: pop },
+          press: [{ scale: 0.6, d: 0.07 }, { scale: 1, d: 0.18, ease: "back.out(3)" }],
+          burst: [ringBurst(40, 3, 2.6), Object.assign(ringBurst(40, 1.5, 3.6), { delay: 0.08 })],
+          trail: [[0.06, `<div class="l" style="left:-7px;top:-7px;width:14px;height:14px;border-radius:50%;background:{{A}};opacity:.5"></div>`],
+                  [0.12, `<div class="l" style="left:-6px;top:-6px;width:12px;height:12px;border-radius:50%;background:{{A}};opacity:.3"></div>`],
+                  [0.18, `<div class="l" style="left:-5px;top:-5px;width:10px;height:10px;border-radius:50%;background:{{A}};opacity:.15"></div>`]],
+        },
+        ink: {
+          states: {
+            move: inkArrow("#141414", "#fff", "3px 3px 0"),
+            hover: inkArrow("#141414", "#fff", "6px 6px 0", "transform:rotate(-10deg) scale(1.08);transform-origin:2px 2px"),
+            text: `<svg width="14" height="28" viewBox="0 0 14 28" style="position:absolute;left:-7px;top:-14px;filter:drop-shadow(2px 2px 0 {{A}})"><path d="M3 3h8M7 3v22M3 25h8" fill="none" stroke="#fff" stroke-width="6" stroke-linecap="round"/><path d="M3 3h8M7 3v22M3 25h8" fill="none" stroke="#141414" stroke-width="3" stroke-linecap="round"/></svg>`,
+            drag: inkArrow("{{A}}", "#141414", "1px 1px 0", "transform:translate(2px,2px)"),
+            wait: `<svg class="flip" width="22" height="30" viewBox="0 0 22 30" style="position:absolute;left:-11px;top:-15px;filter:drop-shadow(3px 3px 0 {{A}})"><path d="M3 3h16M3 27h16M5 3c0 7 12 7 12 12S5 20 5 27M17 3c0 7-12 7-12 12s12 5 12 12" fill="#fff" stroke="#141414" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
+          },
+          press: [{ scaleX: 1.12, scaleY: 0.8, d: 0.06 }, { scaleX: 0.92, scaleY: 1.08, d: 0.07 }, { scaleX: 1, scaleY: 1, d: 0.12 }],
+          burst: [{ html: `<svg width="64" height="64" viewBox="0 0 64 64" style="position:absolute;left:-32px;top:-32px"><path d="M32 4v10M32 50v10M4 32h10M50 32h10M12 12l7 7M45 45l7 7M52 12l-7 7M19 45l-7 7" fill="none" stroke="{{A}}" stroke-width="4" stroke-linecap="round"/></svg>`,
+                    from: { scale: 0.3, rotation: 0, opacity: 1 }, steps: [{ scale: 1.5, rotation: 20, opacity: 0, d: 0.45, ease: "power2.out" }] }],
+        },
+        caption: {
+          states: {
+            move: capArrow(), hover: capArrow(), text: bar,
+            drag: capArrow("0 5px 8px rgba(0,0,0,.35)"), wait: capArrow(),
+          },
+          press: [{ scale: 0.8, d: 0.07 }, { scale: 1, d: 0.16, ease: "back.out(3)" }],
+          burst: [{ html: `<div class="l" style="left:-20px;top:-20px;width:40px;height:40px;border-radius:50%;background:{{A}}"></div>`,
+                    from: { scale: 0.2, opacity: 0.35 }, steps: [{ scale: 2.2, opacity: 0, d: 0.5, ease: "power2.out" }] }],
+          chip: true,
+        },
+        stick: {
+          states: {
+            move: hand, hover: `<div class="l wig">${hand}</div>`, text: hand,
+            drag: `<div class="l" style="transform:rotate(12deg);transform-origin:0 0">${hand}</div>`,
+            wait: `<div class="l tap">${hand}</div><div class="l" style="left:-30px;top:-20px;display:flex;gap:4px">` +
+              [0, 0.15, 0.3].map((d) => `<div class="blink" style="width:6px;height:6px;border-radius:50%;background:{{A}};animation-delay:${d}s"></div>`).join("") + `</div>`,
+          },
+          press: [{ x: 6, y: 10, d: 0.07 }, { x: -2, y: -3, d: 0.06 }, { x: 0, y: 0, d: 0.08 }],
+          burst: [Object.assign(ringBurst(44, 2, 2.4), { delay: 0.05 })],
+        },
+        pixel: {
+          states: {
+            move: pxArrow("#fff", "#000"),
+            hover: pxArrow("{{A}}", "#fff", "{{A}}") +
+              `<div class="l sparkle" style="left:30px;top:-12px;width:6px;height:6px;background:{{A}}"></div>` +
+              `<div class="l sparkle" style="left:42px;top:0;width:3px;height:3px;background:#141414;animation-delay:.2s"></div>` +
+              `<div class="l sparkle" style="left:-12px;top:-15px;width:3px;height:3px;background:#141414;animation-delay:.1s"></div>`,
+            text: `<svg width="15" height="27" viewBox="0 0 5 9" shape-rendering="crispEdges" style="position:absolute;left:-7.5px;top:-13.5px"><path d="M0 0H2V1H3V0H5V1H3V8H5V9H3V8H2V9H0V8H2V1H0Z" fill="#141414" stroke="#fff" stroke-width=".35" paint-order="stroke"/></svg>`,
+            drag: pxArrow("{{A}}", "#000"),
+            wait: pxArrow("#fff", "#000") + `<div class="l spin-px" style="left:30px;top:30px;width:27px;height:27px">` +
+              block(12, 0, 3, 6, "{{A}}") + block(21, 12, 6, 3, "#141414", "opacity:.7") + block(12, 21, 3, 6, "#141414", "opacity:.45") +
+              block(0, 12, 6, 3, "#141414", "opacity:.25") + `</div>`,
+          },
+          press: [{ x: 3, y: 3, d: 0.1, ease: "steps(1)" }, { x: 0, y: 0, d: 0.01, ease: "steps(1)" }],
+          burst: [{ html: `<div class="l" style="left:-30px;top:-30px;width:60px;height:60px">` +
+                    block(27, 0, 6, 9, "#141414") + block(27, 51, 6, 9, "#141414") + block(0, 27, 9, 6, "#141414") + block(51, 27, 9, 6, "#141414") +
+                    block(6, 6, 6, 6, "#141414") + block(48, 6, 6, 6, "#141414") + block(6, 48, 6, 6, "#141414") + block(48, 48, 6, 6, "#141414") + `</div>`,
+                    from: { scale: 0.4, opacity: 1 }, steps: [{ scale: 1.6, d: 0.3, ease: "steps(3)" }, { opacity: 0, d: 0.01, ease: "steps(1)" }] }],
+          step: 12,
+        },
+        plasma: {
+          states: {
+            move: `<div class="dir">${orb()}</div>`,
+            hover: orb("", "transform:scale(1.7)"),
+            text: `<div class="l" style="left:-7px;top:-22px;width:14px;height:44px;border-radius:7px;background:linear-gradient(90deg,#FFF6A0,{{A}} 50%,#FF9F00);box-shadow:0 0 14px 3px rgba(255,214,0,.7),0 0 34px 8px rgba(255,170,0,.3)"></div>`,
+            drag: `<div class="dir">${orb("", "transform:scale(.85)")}</div>`,
+            wait: `<div class="l pulse">${orb("", "")}</div>`,
+          },
+          enter: { hover: { from: { scale: 0.6 }, to: { scale: 1, duration: 0.35, ease: "back.out(2.5)" } } },
+          press: [{ scaleX: 1.35, scaleY: 0.7, d: 0.06 }, { scaleX: 0.82, scaleY: 1.22, d: 0.07 }, { scaleX: 1.08, scaleY: 0.94, d: 0.07 }, { scaleX: 1, scaleY: 1, d: 0.12 }],
+          burst: [ringBurst(48, 3, 2.6, "box-shadow:0 0 14px {{A}},inset 0 0 10px {{A}}")],
+          stretch: true,
+        },
+        glassmorph: {
+          states: {
+            move: gmArrow,
+            hover: gmArrow + `<div class="l" style="left:-4px;top:-4px;width:8px;height:8px;border-radius:50%;background:#fff;box-shadow:0 1px 4px rgba(0,0,0,.3)"></div>`,
+            text: `<div class="l glass" style="left:-4px;top:-15px;width:8px;height:30px;border-radius:4px"></div>`,
+            drag: `<div class="l" style="transform:scale(.9);transform-origin:0 0;filter:drop-shadow(0 8px 10px rgba(20,20,40,.3))">${gmArrow}</div>`,
+            wait: gmArrow + `<div class="l glass" style="left:24px;top:30px;width:28px;height:28px;border-radius:50%"></div>` +
+              `<div class="l spin" style="left:24px;top:30px;width:28px;height:28px;border-radius:50%;border:2.5px solid transparent;border-top-color:#fff"></div>`,
+          },
+          enter: { hover: pop },
+          press: [{ scale: 0.8, d: 0.07 }, { scale: 1, d: 0.16, ease: "back.out(3)" }],
+          burst: [{ html: `<div class="l glass" style="left:-24px;top:-24px;width:48px;height:48px;border-radius:50%"></div>`,
+                    from: { scale: 0.3, opacity: 0 }, steps: [{ scale: 1, opacity: 1, d: 0.08 }, { scale: 2.2, opacity: 0, d: 0.45, ease: "power2.out" }] }],
+        },
+      };
+
+      // ---------- the engine ----------
+      const L = LOOKS[DATA.look] || LOOKS.glass;
+      const A = DATA.accent;
+      const fillA = (h) => h.split("{{A}}").join(A);
+      const root = document.getElementById("root");
+      root.style.setProperty("--a", A);
+      const el = (cls, html, parent) => { const e = document.createElement("div"); e.className = cls; if (html) e.innerHTML = fillA(html); (parent || root).appendChild(e); return e; };
+      const STATES = ["move", "hover", "text", "drag", "wait"];
+      const P = DATA.path, T = P.map((p) => p[0]);
+      const dur = parseFloat(root.dataset.duration);
+      const step = L.step ? 1 / L.step : 0;
+
+      // The pointer at t: [x, y, zoom] or null when the edit does not show the screen.
+      const at = (t) => {
+        if (step) t = Math.floor(t / step + 1e-6) * step;
+        let lo = 0, hi = T.length;
+        while (lo < hi) { const m = (lo + hi) >> 1; if (T[m] <= t + 1e-6) lo = m + 1; else hi = m; }
+        const p = P[lo - 1];
+        if (!p || p[1] == null || t > T[T.length - 1] + 1 / DATA.fps) return null;
+        return [p[1], p[2], p[3] || 1];
+      };
+
+      const fx = el("fx");
+      const trails = (L.trail || []).map(([d, html]) => [d, el("cur", ""), html]);
+      trails.forEach(([, c, html]) => el("sz", html, c));
+      const cur = el("cur");
+      const sz = el("sz", "", cur);
+      const press = el("press", "", sz);
+      const stateEl = {};
+      for (const s of STATES) {
+        stateEl[s] = el("st", "", press);
+        el("st in", L.states[s], stateEl[s]);
+      }
+      const dirs = [...cur.querySelectorAll(".dir")];
+
+      // Each frame: where the pointer is (and its trail), its size, and for a stretchy look its squash along the motion.
+      const place = (t) => {
+        const p = at(t);
+        cur.style.opacity = p ? 1 : 0;
+        if (p) {
+          cur.style.transform = `translate(${p[0]}px,${p[1]}px)`;
+          sz.style.transform = `scale(${DATA.unit * p[2]})`;
+        }
+        for (const [d, c] of trails) {
+          const q = at(Math.max(0, t - d));
+          c.style.opacity = q && p ? 1 : 0;
+          if (q) { c.style.transform = `translate(${q[0]}px,${q[1]}px)`; c.firstChild.style.transform = `scale(${DATA.unit * q[2]})`; }
+        }
+        if (L.stretch && dirs.length) {
+          const q = at(Math.max(0, t - 2 / DATA.fps));
+          let tr = "none";
+          if (p && q) {
+            const dx = p[0] - q[0], dy = p[1] - q[1];
+            const speed = Math.hypot(dx, dy) / (DATA.unit * p[2]) * DATA.fps / 2;  // points a second
+            const s = Math.min(0.32, speed / 2400), a = Math.atan2(dy, dx);
+            if (s > 0.01) tr = `rotate(${a}rad) scale(${1 + s},${1 - s * 0.55}) rotate(${-a}rad)`;
+          }
+          dirs.forEach((d) => (d.style.transform = tr));
+        }
+      };
+
+      const tl = gsap.timeline({ paused: true });
+      // One tween drives the path: its value is the time, and the modifier draws that moment (seek-safe, no callbacks).
+      const clock = el("clock");
+      tl.fromTo(clock, { x: 0 }, { x: dur, duration: dur, ease: "none", immediateRender: true,
+        modifiers: { x: (v) => { place(parseFloat(v)); return "0px"; } } }, 0);
+
+      // States: a short cross-fade at each change, and the look's entrance for the new one.
+      const S = DATA.states.length ? DATA.states : [[0, "move"]];
+      for (const s of STATES) gsap.set(stateEl[s], { opacity: s === S[0][1] ? 1 : 0 });
+      for (let i = 1; i < S.length; i++) {
+        const [t, s] = S[i], prev = S[i - 1][1];
+        if (s === prev) continue;
+        tl.fromTo(stateEl[prev], { opacity: 1 }, { opacity: 0, duration: 0.1, immediateRender: false }, t);
+        tl.fromTo(stateEl[s], { opacity: 0 }, { opacity: 1, duration: 0.1, immediateRender: false }, t);
+        const e = (L.enter || {})[s];
+        if (e) tl.fromTo(stateEl[s].firstChild, e.from, Object.assign({ immediateRender: false }, e.to), t);
+      }
+
+      // A chain of steps from a start, each a fromTo (seek-safe).
+      const chain = (target, from, steps, t) => {
+        let f = Object.assign({}, from), at_ = t;
+        for (const s of steps) {
+          const to = Object.assign({}, s); delete to.d; delete to.ease;
+          tl.fromTo(target, Object.assign({}, f), Object.assign({}, to, { duration: s.d, ease: s.ease || "power2.out", immediateRender: false }), at_);
+          f = Object.assign(f, to); at_ += s.d;
+        }
+      };
+      const REST = { x: 0, y: 0, scale: 1, scaleX: 1, scaleY: 1, rotation: 0 };
+      for (const [t, x, y, z] of DATA.clicks) {
+        chain(press, REST, L.press || [], t);
+        for (const b of L.burst || []) {
+          const w = el("fx", "", fx);
+          w.style.transform = `translate(${x}px,${y}px) scale(${DATA.unit * (z || 1)})`;
+          const inner = el("l", b.html, w);
+          gsap.set(inner, { opacity: 0 });
+          tl.set(inner, b.from, t + (b.delay || 0));
+          chain(inner, b.from, b.steps, t + (b.delay || 0));
+        }
+      }
+
+      // Labels (the caption look): a chip beside the pointer, and a chip with a spinner while it waits.
+      if (L.chip) {
+        const chips = DATA.labels.map(([t, len, text]) => [t, len, text, false])
+          .concat(DATA.waits.map(([a, b, text]) => [a, b - a, text, true]));
+        for (const [t, len, text, spin] of chips) {
+          const c = el("chip", "", sz);
+          if (spin) el("spin", "", c).style.cssText = "width:10px;height:10px;border-radius:50%;border:2px solid rgba(255,255,255,.3);border-top-color:#fff";
+          c.appendChild(document.createTextNode(text));
+          gsap.set(c, { opacity: 0, scale: 0.6 });
+          tl.fromTo(c, { opacity: 0, scale: 0.6 }, { opacity: 1, scale: 1, duration: 0.2, ease: "back.out(2)", immediateRender: false }, t);
+          tl.fromTo(c, { opacity: 1, scale: 1 }, { opacity: 0, scale: 0.6, duration: 0.15, immediateRender: false }, t + Math.max(0.3, len - 0.15));
+        }
+      }
+
+      window.__timelines = window.__timelines || {};
+      window.__timelines["main"] = tl;
+      tl.seek(0);
+    </script>
+  </body>
+</html>

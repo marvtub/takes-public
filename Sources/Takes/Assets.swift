@@ -103,6 +103,7 @@ final class AssetStore: ObservableObject {
             if Self.skipFolders.contains(first) || (parts.count == 1 && first.hasPrefix("_")) { walk.skipDescendants(); continue }
             guard let v = try? file.resourceValues(forKeys: Set(keys)), v.isRegularFile == true,
                   !first.hasPrefix("_"), !file.lastPathComponent.hasSuffix(".words.json"),  // transcripts
+                  !file.lastPathComponent.hasSuffix(CursorLog.suffix),  // a screen take's cursor log
                   !file.lastPathComponent.hasSuffix(EditRecipe.suffix),  // an edit's recipe
                   !(first == "edits" && EditRecipe.isExport(file.lastPathComponent)) else { continue }  // its export
             let take = parts.count == 1 && takeFiles.contains(first)
@@ -254,6 +255,8 @@ struct AssetsPane: View {
     var doc: SessionDoc
     /// The whole window (nothing open), or the column beside the stage.
     var wide = false
+    /// Every section open at full length, as after "Show all" (the scroll bench).
+    var openAll = false
     @StateObject private var store = AssetStore()
     @StateObject private var comments = CommentStore()
     /// The b-roll library's folders, for "Save to B-roll".
@@ -275,6 +278,7 @@ struct AssetsPane: View {
     /// The thumbnail the post's video starts with (Cover.swift).
     /// Thumbnails a post uses as its cover (Post tab > Cover).
     @State private var coverRels: Set<String> = []
+    @State private var postReads = NewestRead()
     /// Sections that show every file; the others show the first four (2026-10-07).
     @State private var showAll: Set<String> = []
     /// Folders folded into a pile of small thumbnails. One list for every session: a folder he
@@ -309,6 +313,9 @@ struct AssetsPane: View {
                 .coordinateSpace(name: "assets")
                 .onPreferenceChange(TileFrames.self) { frames.frames = $0 }
             }
+            // A new session starts at the top: the Record column keeps this pane, and its list
+            // opened at the last session's scroll offset.
+            .id(doc.url)
             Rule()
             footer
         }
@@ -352,11 +359,15 @@ struct AssetsPane: View {
 
     /// What each post shows, read off the main thread: five post files and a look into edits/ (a
     /// vertical post opens edits to find a tall one) ran on main on every session switch (2026-10-11).
+    /// Only the newest read lands. The check was `doc.url == session` on the copy of the view the
+    /// task kept, so it was always true: a slow read of the last session could land in the next one
+    /// (the Record column keeps this pane across sessions).
     private func readPost() {
-        let session = doc.url
+        let session = doc.url, reads = postReads
+        let n = reads.begin()
         Task {
             let found = await Task.detached(priority: .userInitiated) { Self.postState(session) }.value
-            if doc.url == session { show(found) }
+            if reads.isNewest(n) { show(found) }
         }
     }
 
@@ -391,6 +402,7 @@ struct AssetsPane: View {
     /// edit again; X shows LinkedIn's pick).
     private func pin(_ a: Asset, _ p: PostPlatform) {
         PostFile.pickMedia(postPick[p] == a.rel ? nil : a.rel, in: doc.url, p)
+        _ = postReads.begin()  // a read still on its way is older than this
         show(Self.postState(doc.url))  // at once: the star follows the click
     }
 
@@ -414,7 +426,7 @@ struct AssetsPane: View {
         // Once per section, not once per tile.
         let open = Dictionary(grouping: comments.all.filter(\.open), by: \.file).mapValues(\.count)
         let isFolded = folded.contains(name)
-        let all = showAll.contains(name) || items.count <= Self.firstFew
+        let all = openAll || showAll.contains(name) || items.count <= Self.firstFew
         let app = app  // the right-click rows run outside body
         // The file in the player stays in view, even when it is past the first four.
         let shown = all ? items : Array(items.prefix(Self.firstFew))
@@ -771,6 +783,13 @@ enum AssetPick {
     }
 }
 
+/// Hands out a number per read; only the newest one may show its result.
+@MainActor final class NewestRead {
+    private var last = 0
+    func begin() -> Int { last += 1; return last }
+    func isNewest(_ n: Int) -> Bool { n == last }
+}
+
 /// Equatable without its closure: the grid makes a new `onPin` on every body, so SwiftUI saw every
 /// tile as changed and rebuilt all of them on each redraw of the pane (2026-10-11). The closure acts
 /// on `asset` alone, so a tile with the same values does the same thing.
@@ -923,8 +942,12 @@ struct AssetTile: View, Equatable {
                 try? await Task.sleep(for: .seconds(rest))
                 if Task.isCancelled { return }
             }
-            image = await Thumbs.shared.image(asset)
-            if asset.kind == .video || asset.kind == .audio { duration = await Thumbs.shared.duration(asset) }
+            // The picture and the length are separate reads of the file: load both at once.
+            let timed = asset.kind == .video || asset.kind == .audio, a = asset
+            async let picture = Thumbs.shared.image(a)
+            async let length = timed ? Thumbs.shared.duration(a) : nil
+            image = await picture
+            if timed { duration = await length }
         }
     }
 

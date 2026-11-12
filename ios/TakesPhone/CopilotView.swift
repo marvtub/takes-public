@@ -17,6 +17,7 @@ struct CopilotView: View {
     @State private var noName: NameAsk?
     /// The draft on top of the Review deck and the variant he looks at: the message bar's context.
     @State private var focus: CopilotFocus?
+    @State private var loadOrder = CopilotLoadOrder()
 
     var body: some View {
         NavigationStack {
@@ -157,13 +158,17 @@ struct CopilotView: View {
     // MARK: Calls
 
     private func load() async {
+        let load = loadOrder.start()
         do {
             guard model.connected else { throw URLError(.notConnectedToInternet) }
             let raw = try await model.api.copilotData()
+            guard loadOrder.accepts(load) else { return }
             data = model.patch(try API.decoder.decode(Copilot.self, from: raw))
-            Task.detached(priority: .utility) { Cache.saveData(raw, "copilot") }
+            // Save before another load can start, so an older detached write cannot land last.
+            Cache.saveData(raw, "copilot")
             failed = nil
         } catch {
+            guard loadOrder.accepts(load) else { return }
             // Offline: the last copy, with the decisions that wait on top.
             if let raw = Cache.loadData("copilot"), let c = try? API.decoder.decode(Copilot.self, from: raw) {
                 data = model.patch(c)
@@ -225,10 +230,11 @@ struct CopilotFocus: Equatable {
     }
 
     /// A message as the chat shows it: without the phone's context, and without the open comments
-    /// the Mac sends with a typed message (ClaudeChat.commentsMark).
+    /// the Mac sends with a typed message (ClaudeChat.commentsMark), and without the note on what
+    /// was picked with @ (Mentions.mark).
     static func shown(_ text: String) -> String {
         var t = text
-        for mark in [marker, "\n\n[@comments: open comments in Takes on this session"] {
+        for mark in [marker, "\n\n[@comments: open comments in Takes on this session", "\n\n[@mentions: what I picked with @ in Takes]\n"] {
             if let r = t.range(of: mark, options: .backwards) { t = String(t[..<r.lowerBound]) }
         }
         return t
@@ -529,7 +535,7 @@ struct ReviewDeck: View {
                         }
                         PanelGroup(icon: "hand.thumbsdown", title: "Bad comment", open: $badOpen) {
                             ForEach(Self.badComment.dropLast(), id: \.self) { r in
-                                PanelChoice(title: r) { more = nil; decide(s, "decline", ["wrongPost": false, "reason": r], undo: nil, label: "Declined") }
+                                PanelChoice(title: r) { more = nil; decide(s, "decline", ["wrongPost": false, "reason": r, "variant": variant], undo: nil, label: "Declined") }
                             }
                             PanelChoice(title: "Other: say why") { more = nil; declining = false }
                         }
@@ -562,8 +568,8 @@ struct ReviewDeck: View {
         .sheet(isPresented: Binding(get: { declining != nil }, set: { if !$0 { declining = nil } })) {
             if let s = top, let wrong = declining {
                 TextSheet(title: wrong ? "Wrong post" : "Bad comment", text: "", button: "Decline",
-                          hint: "Say why, in a few words. Takes learns from it.") { t in
-                    decide(s, "decline", ["wrongPost": wrong, "reason": "other", "note": t], undo: nil, label: "Declined")
+                          hint: wrong ? "Say why, in a few words. Takes learns from it." : "Say which words or why. Takes learns from it.") { t in
+                    decide(s, "decline", ["wrongPost": wrong, "reason": "other", "note": t, "variant": variant], undo: nil, label: "Declined")
                 }
                 .presentationDetents([.medium, .large])
             }
@@ -899,6 +905,14 @@ struct PostedTab: View {
 
 // MARK: - The board's chats
 
+/// What a board's empty chat says and offers, from the Mac (ClaudeChat.boardIntros): Plan's, 2026-10-30.
+struct BoardIntro: Decodable, Equatable {
+    struct Ask: Decodable, Equatable { var label: String; var ask: String }
+    var title: String
+    var line: String
+    var asks: [Ask]
+}
+
 /// The Finding or the Posting chat: watch the run and steer it with a message.
 struct BoardChatView: View {
     @EnvironmentObject var model: Model
@@ -910,6 +924,8 @@ struct BoardChatView: View {
     var from: String? = nil
     /// Starts the mic when the chat opens (2026-10-10, Say an idea on the Ideas screen).
     var listen = false
+    /// The Mac's intro and asks for the empty chat, in place of the mascot.
+    var intro: BoardIntro? = nil
     @State private var draft = ""
     /// Some of the draft was dictated.
     @State private var spoke = false
@@ -926,7 +942,7 @@ struct BoardChatView: View {
             TopBar(title: title, subtitle: "On your Mac") { ContextRing(sessionID: id) { memory = true } }
             ChatTranscript(latestRequest: latestRequest) {
                 if let chat, chat.messages.isEmpty {
-                    MascotEmpty(title: "Nothing here yet", message: empty)
+                    if let intro { introView(intro) } else { MascotEmpty(title: "Nothing here yet", message: empty) }
                 }
                 ChatItems(messages: chat?.messages ?? [], running: chat?.running ?? false) { m in
                     Bubble(message: m, files: [], show: { _ in })
@@ -1020,6 +1036,33 @@ struct BoardChatView: View {
             if model.chatID == id { model.chatID = nil }
         }
         .keepsDraft($draft, key: "chatDraft.board.\(id)")
+    }
+
+    /// The Mac's empty board chat: its title, a line, and asks that send at a tap.
+    private func introView(_ i: BoardIntro) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(i.title).font(.nunito(size: 22, relativeTo: .title2)).foregroundStyle(Palette.ink)
+            Text(i.line).font(.inter(.footnote)).foregroundStyle(Palette.muted).fixedSize(horizontal: false, vertical: true)
+            VStack(alignment: .leading, spacing: 6) {
+                ForEach(i.asks, id: \.label) { a in
+                    Button { draft = a.ask; send() } label: {
+                        HStack(spacing: 8) {
+                            Text(a.label).font(.inter(.subheadline, .medium)).foregroundStyle(Palette.ink)
+                            Spacer()
+                            Image(systemName: "arrow.up.right").font(.system(size: 11, weight: .semibold)).foregroundStyle(Palette.faint)
+                        }
+                        .padding(.horizontal, 12).frame(minHeight: 44)
+                        .background(Palette.paper, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(Palette.border, lineWidth: 0.5))
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.press)
+                }
+            }
+            .padding(.top, 6)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 16).padding(.top, 24)
     }
 
     /// Stopping puts what was said into the box, after anything typed, to check.

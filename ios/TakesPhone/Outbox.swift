@@ -11,6 +11,11 @@ import UIKit
 
 @MainActor
 final class Outbox: ObservableObject {
+    enum StorageError: LocalizedError {
+        case cannotSave
+        var errorDescription: String? { "Takes could not keep this change on the phone." }
+    }
+
     struct Op: Codable, Identifiable, Hashable {
         enum Kind: String, Codable { case newSession, script, post, postDraft, scriptDraft, comment, reply, resolve, keeper, cover, decide, say, take, archive, side }
         var id = UUID()
@@ -69,28 +74,44 @@ final class Outbox: ObservableObject {
     /// Goes up when changes reached the Mac: screens reload.
     @Published private(set) var delivered = 0
     weak var model: Model?
-    private var flushing = false
+    private var delivery = OutboxDeliveryState()
     /// False until the app knows which takes the background session still sends.
     private var ready = false
     /// Takes the background session is sending right now.
     private var uploading: Set<UUID> = []
 
+    typealias Persist = ([Op], URL) throws -> Void
     static let dir = URL.applicationSupportDirectory.appending(path: "outbox")
-    static let files = dir.appending(path: "files")
-    private static var list: URL { dir.appending(path: "ops.json") }
+    private let dir: URL
+    private let files: URL
+    private let list: URL
+    private let persist: Persist
 
     var waiting: [Op] { ops.filter { $0.refused == nil } }
     var refused: [Op] { ops.filter { $0.refused != nil } }
     func ops(_ kind: Op.Kind, in session: String) -> [Op] { ops.filter { $0.kind == kind && $0.session == session } }
 
-    init() {
-        if let d = try? Data(contentsOf: Self.list), let o = try? JSONDecoder().decode([Op].self, from: d) { ops = o }
+    init(directory: URL = Outbox.dir, persist: Persist? = nil) {
+        dir = directory
+        files = directory.appending(path: "files")
+        list = directory.appending(path: "ops.json")
+        self.persist = persist ?? { ops, file in
+            try OutboxStore.write(ops, to: file, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+        }
+        if let d = try? Data(contentsOf: list), let o = try? JSONDecoder().decode([Op].self, from: d) { ops = o }
     }
 
-    private func save() {
-        try? FileManager.default.createDirectory(at: Self.dir, withIntermediateDirectories: true)
+    private func save(_ ops: [Op]) throws {
         // Readable after the first unlock, so a take can go on uploading while the phone is locked.
-        try? JSONEncoder().encode(ops).write(to: Self.list, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+        try persist(ops, list)
+    }
+
+    private func change(_ edit: (inout [Op]) -> Void) throws {
+        try OutboxStore.change(&ops, persist: save, edit)
+    }
+
+    private func storageFailed(_ message: String = "Takes could not keep this change on the phone.") {
+        model?.error = message
     }
 
     /// Sends now when it can. Queues it when the Mac is away, or when older changes still wait
@@ -101,52 +122,114 @@ final class Outbox: ObservableObject {
         op.session = model.resolve(op.session)
         // A take uploads on its own: edits do not wait behind it. A video the Mac has not made
         // yet takes everything in it into the queue.
-        if model.connected && !op.session.hasPrefix("phone/") && !waiting.contains(where: { $0.kind != .take }) {
+        let active = OutboxDeliveryState.Active.immediate(op.id)
+        if model.connected && !op.session.hasPrefix("phone/") && !waiting.contains(where: { $0.kind != .take })
+            && delivery.begin(active) {
+            // Keep it before waiting: a later change must queue behind this one, and a lost
+            // answer must leave this change first in the durable list (2026-11-06).
             do {
-                return .now(try await model.api.raw(request(op), session: Self.session))
+                try change { $0.append(op) }
+            } catch {
+                delivery.finish(active)
+                storageFailed()
+                throw StorageError.cannotSave
+            }
+            var flushAfter = false
+            defer {
+                delivery.finish(active)
+                if flushAfter, model.connected { Task { await flush() } }
+            }
+            do {
+                let data = try await raw(request(op))
+                do { try change { $0.removeAll { $0.id == op.id } } } catch { storageFailed() }
+                flushAfter = true
+                return .now(data)
             } catch let e as APIError {
+                do { try change { $0.removeAll { $0.id == op.id } } } catch { storageFailed() }
+                flushAfter = true
                 throw e
             } catch {
                 model.connected = false
+                return .queued(op)
             }
         }
-        ops.append(op)
-        save()
+        do {
+            try change { $0.append(op) }
+        } catch {
+            storageFailed()
+            throw StorageError.cannotSave
+        }
         if model.connected { Task { await flush() } }
         return .queued(op)
     }
 
-    func add(_ op: Op) {
-        ops.append(op)
-        save()
+    /// A change whose send failed: it waits here (refused: until the user sends it again).
+    @discardableResult
+    func keep(_ op: Op, refused: String?) -> Bool {
+        guard !ops.contains(where: { $0.id == op.id }) else { return true }
+        var op = op
+        op.session = model?.resolve(op.session) ?? op.session
+        op.refused = refused
+        do {
+            try change { $0.append(op) }
+        } catch {
+            storageFailed()
+            return false
+        }
+        if refused == nil { Task { await flush() } }
+        return true
+    }
+
+    func add(_ op: Op) throws {
+        do {
+            try change { $0.append(op) }
+        } catch {
+            storageFailed()
+            throw StorageError.cannotSave
+        }
         Task { await flush() }
     }
 
     /// A take, or a file for the session: kept on the phone until the Mac has it.
-    func take(_ file: URL, name: String, session: String, asTake: Bool, shot: String?) {
-        try? FileManager.default.createDirectory(at: Self.files, withIntermediateDirectories: true)
+    @discardableResult
+    func take(_ file: URL, name: String, session: String, asTake: Bool, shot: String?) -> Bool {
         let keep = UUID().uuidString + "-" + name
-        let to = Self.files.appending(path: keep)
+        let to = files.appending(path: keep)
+        let moved = file.path.hasPrefix(FileManager.default.temporaryDirectory.path)
         do {
-            if file.path.hasPrefix(FileManager.default.temporaryDirectory.path) {
+            try FileManager.default.createDirectory(at: files, withIntermediateDirectories: true)
+            if moved {
                 try FileManager.default.moveItem(at: file, to: to)
             } else {
                 try FileManager.default.copyItem(at: file, to: to)
             }
+            let session = model?.resolve(session) ?? session
+            var q = ["session": session, "name": name]
+            if asTake { q["as"] = "take" }
+            if let shot { q["shot"] = shot }
+            var op = Op(.take, session: session, path: "/api/upload", query: q, method: "PUT")
+            op.file = keep
+            op.name = name
+            try change { $0.append(op) }
         } catch {
-            model?.error = "Could not keep \(name) on the phone."
-            return
+            // A queue record and its media are one unit. Put a moved recording back when saving
+            // the record fails, or remove the extra copy, so no untracked file is left behind.
+            if moved, FileManager.default.fileExists(atPath: to.path), !FileManager.default.fileExists(atPath: file.path) {
+                do {
+                    try FileManager.default.moveItem(at: to, to: file)
+                } catch {
+                    // Never delete the only copy of a recording. If moving it back fails, a
+                    // second copy is safer than losing the take.
+                    try? FileManager.default.copyItem(at: to, to: file)
+                }
+            } else {
+                try? FileManager.default.removeItem(at: to)
+            }
+            storageFailed("Could not keep \(name) on the phone.")
+            return false
         }
-        let session = model?.resolve(session) ?? session
-        var q = ["session": session, "name": name]
-        if asTake { q["as"] = "take" }
-        if let shot { q["shot"] = shot }
-        var op = Op(.take, session: session, path: "/api/upload", query: q, method: "PUT")
-        op.file = keep
-        op.name = name
-        ops.append(op)
-        save()
         Task { await flush() }
+        return true
     }
 
     /// Short: a change should not hang for long when the Mac is asleep. It waits instead.
@@ -156,8 +239,23 @@ final class Outbox: ObservableObject {
         return URLSession(configuration: c)
     }()
 
+#if DEBUG
+    /// A deterministic server for the delivery-order regression test.
+    var rawForTesting: ((URLRequest) async throws -> Data)?
+#endif
+
+    private func raw(_ request: URLRequest) async throws -> Data {
+#if DEBUG
+        if let rawForTesting { return try await rawForTesting(request) }
+#endif
+        return try await model!.api.raw(request, session: Self.session)
+    }
+
     func request(_ op: Op) -> URLRequest {
         var r = model!.api.request(op.path, op.query, method: op.method)
+        // The same id every time this change goes: the Mac does it once, however often a weak
+        // link makes the phone send it again (PhoneOnce on the Mac, 2026-11-02).
+        r.setValue(op.id.uuidString, forHTTPHeaderField: "X-Takes-Op")
         if let b = op.body {
             r.httpBody = b
             r.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -167,9 +265,10 @@ final class Outbox: ObservableObject {
 
     /// Sends what waits, oldest first. Stops at the first change the Mac can't be reached for.
     func flush() async {
-        guard let model, ready, !flushing, !ops.isEmpty, model.phase == .open, model.api.token != nil else { return }
-        flushing = true
-        defer { flushing = false }
+        let active = OutboxDeliveryState.Active.flush
+        guard let model, ready, !ops.isEmpty, model.phase == .open, model.api.token != nil,
+              delivery.begin(active) else { return }
+        defer { delivery.finish(active) }
         var sent = false
         for id in ops.map(\.id) {
             // Read it again: making a video earlier in the loop changes the session of the rest.
@@ -177,29 +276,48 @@ final class Outbox: ObservableObject {
             if op.kind == .take {
                 if !op.session.hasPrefix("phone/"), !uploading.contains(op.id), let file = op.file {
                     uploading.insert(op.id)
-                    model.uploads.start(op, file: Self.files.appending(path: file))
+                    model.uploads.start(op, file: files.appending(path: file))
                 }
                 continue
             }
             if op.session.hasPrefix("phone/") && op.kind != .newSession { continue }
             do {
-                let data = try await model.api.raw(request(op), session: Self.session)
+                let data = try await raw(request(op))
                 if op.kind == .newSession {
                     let s = try API.decoder.decode(Session.self, from: data)
-                    rename(op.session, to: s.id)
+                    do {
+                        try change { queued in
+                            Self.rename(&queued, op.session, to: s.id)
+                            queued.removeAll { $0.id == op.id }
+                        }
+                    } catch {
+                        throw StorageError.cannotSave
+                    }
                     model.adopt(op.session, as: s)
+                } else {
+                    do {
+                        try change { $0.removeAll { $0.id == op.id } }
+                    } catch {
+                        throw StorageError.cannotSave
+                    }
                 }
-                ops.removeAll { $0.id == op.id }
                 sent = true
             } catch let e as APIError {
                 if e.status == 401 { break }
-                mark(op.id, refused: e.message)
+                do {
+                    try change { Self.mark(&$0, op.id, refused: e.message) }
+                } catch {
+                    storageFailed()
+                    break
+                }
+            } catch is StorageError {
+                storageFailed()
+                break
             } catch {
                 model.connected = false
                 break
             }
         }
-        save()
         if sent {
             model.connected = true
             delivered += 1
@@ -207,7 +325,7 @@ final class Outbox: ObservableObject {
     }
 
     /// Points every waiting change of a phone-made video at the session the Mac made.
-    private func rename(_ local: String, to real: String) {
+    private static func rename(_ ops: inout [Op], _ local: String, to real: String) {
         for i in ops.indices where ops[i].session == local && ops[i].kind != .newSession {
             ops[i].session = real
             for k in ["id", "session"] where ops[i].query[k] == local { ops[i].query[k] = real }
@@ -218,16 +336,25 @@ final class Outbox: ObservableObject {
     func uploaded(_ id: UUID, status: Int, error: String?) {
         uploading.remove(id)
         if status == 200 {
-            if let op = ops.first(where: { $0.id == id }), let f = op.file {
-                try? FileManager.default.removeItem(at: Self.files.appending(path: f))
+            let file = ops.first(where: { $0.id == id })?.file
+            do {
+                try change { $0.removeAll { $0.id == id } }
+            } catch {
+                storageFailed()
+                return
             }
-            ops.removeAll { $0.id == id }
+            if let f = file {
+                try? FileManager.default.removeItem(at: files.appending(path: f))
+            }
             delivered += 1
         } else if status >= 400 && status != 401 {
-            mark(id, refused: error ?? "The Mac answered \(status)")
+            do {
+                try change { Self.mark(&$0, id, refused: error ?? "The Mac answered \(status)") }
+            } catch {
+                storageFailed()
+            }
         }
         // No answer at all: the take stays and goes again with the next flush.
-        save()
     }
 
     /// Takes the background session still sends after a relaunch.
@@ -237,7 +364,7 @@ final class Outbox: ObservableObject {
         Task { await flush() }
     }
 
-    private func mark(_ id: UUID, refused: String) {
+    private static func mark(_ ops: inout [Op], _ id: UUID, refused: String) {
         guard let i = ops.firstIndex(where: { $0.id == id }) else { return }
         ops[i].refused = refused
     }
@@ -260,20 +387,34 @@ final class Outbox: ObservableObject {
             o.body = try? JSONSerialization.data(withJSONObject: j)
         }
         o.refused = nil
-        ops[i] = o
-        save()
+        do {
+            try change { $0[i] = o }
+        } catch {
+            storageFailed()
+            return
+        }
         await flush()
     }
 
     func drop(_ op: Op) {
-        if let f = op.file { try? FileManager.default.removeItem(at: Self.files.appending(path: f)) }
-        ops.removeAll { $0.id == op.id }
-        save()
+        do {
+            try change { $0.removeAll { $0.id == op.id } }
+        } catch {
+            storageFailed()
+            return
+        }
+        if let f = op.file { try? FileManager.default.removeItem(at: files.appending(path: f)) }
     }
 
     func clear() {
-        try? FileManager.default.removeItem(at: Self.dir)
-        ops = []
+        do {
+            if FileManager.default.fileExists(atPath: dir.path) {
+                try FileManager.default.removeItem(at: dir)
+            }
+            ops = []
+        } catch {
+            storageFailed("Takes could not clear the changes kept on the phone.")
+        }
     }
 }
 

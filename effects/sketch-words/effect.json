@@ -1,0 +1,15 @@
+{
+  "name": "Sketch words",
+  "description": "Cut to warm paper with pencil guide lines. A small word writes itself by hand, then a big serif word is sketched letter by letter: pencil outlines first, then red hatching fills it. A pencil underline swipes under it. It all boils a little, like stop motion. The speaker stays in front.",
+  "when": "When one word is the point: a name, a claim, a topic you want to land in a crafted way.",
+  "needs": [
+    "the small handwritten word",
+    "the big word (short reads best)",
+    "the cut time where it starts",
+    "a cutout of the speaker (made in the steps)"
+  ],
+  "kind": "Cut-out",
+  "length_s": 3,
+  "shape": "any",
+  "shipped": true
+}

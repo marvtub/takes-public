@@ -65,8 +65,8 @@ mkdir -p "$APP/Contents/Resources/Onboarding" && cp assets/onboarding/creator.jp
 mkdir -p "$APP/Contents/Resources/Onboarding/styles" && cp assets/onboarding/styles/*.jpg "$APP/Contents/Resources/Onboarding/styles/"
 mkdir -p "$APP/Contents/Resources/Article"
 mkdir -p "$APP/Contents/Resources/Agents" && cp assets/agents/*.svg assets/agents/*.png "$APP/Contents/Resources/Agents/"
-# Sound FX: six sounds the page plays before earshot is installed (assets/sfx/README.md).
-mkdir -p "$APP/Contents/Resources/SFX" && cp assets/sfx/*.m4a "$APP/Contents/Resources/SFX/"
+# Sound FX: six sounds the page plays before earshot is installed, and the real recordings (assets/sfx/README.md).
+mkdir -p "$APP/Contents/Resources/SFX" && cp assets/sfx/*.m4a assets/sfx/takes-bank.json assets/sfx/recordings.json "$APP/Contents/Resources/SFX/" && cp -R assets/sfx/rec "$APP/Contents/Resources/SFX/"
 mkdir -p "$APP/Contents/Resources/Brand" && cp assets/brand/mascot-512.png "$APP/Contents/Resources/Brand/mascot.png" && cp assets/brand/mascot-body-512.png "$APP/Contents/Resources/Brand/mascot-body.png"
 cp Info.plist "$APP/Contents/Info.plist"
 # The search helper (embed/, ⌘K by meaning). MLX needs Xcode and its Metal toolchain, which
@@ -78,7 +78,7 @@ if [[ -d embed && -d "$XCODE" ]] && DEVELOPER_DIR="$XCODE" xcrun metal --version
   # helper per commit of embed/ in one cache all worktrees share; a changed embed/ builds again.
   E="$HOME/Library/Caches/Takes/embed/$(git rev-parse HEAD:embed)"
   if [[ -n "$(git status --porcelain embed)" || ! -x "$E/takes-embed" ]]; then
-    (cd embed && DEVELOPER_DIR="$XCODE" "${LOW[@]}" xcodebuild -quiet -scheme TakesEmbed -configuration Release \
+    (cd embed && DEVELOPER_DIR="$XCODE" "${LOW[@]}" ../ios/xcodebuild.sh -quiet -scheme TakesEmbed -configuration Release \
       -destination 'platform=macOS,arch=arm64' -derivedDataPath .build-xcode build > .build-xcode.log 2>&1) \
       || { tail -30 embed/.build-xcode.log; echo "The search helper did not build (embed/.build-xcode.log)." >&2; exit 1; }
     took "search helper build"
@@ -113,6 +113,12 @@ fi
 if [[ -d effects ]]; then
   mkdir -p "$APP/Contents/Resources/effects"
   rsync -a --delete --exclude 'renders/' --exclude 'node_modules/' effects/ "$APP/Contents/Resources/effects/"
+fi
+# Takes's own mods (2026-11-08, admin): the sidebar, the rail and any default made from a mod. The app
+# writes them to mods/_shipped/ (ModsShipped.swift); the admin build reads the checkout's copy live.
+if [[ -d mods-shipped ]]; then
+  mkdir -p "$APP/Contents/Resources/mods-shipped"
+  rsync -a --delete --exclude '*.shot.png' --exclude '*.error' --exclude '.*' mods-shipped/ "$APP/Contents/Resources/mods-shipped/"
 fi
 # The skills the Skills plugin lists: Takes' own (scripts/public/skills, or skills/ in the public copy).
 mkdir -p "$APP/Contents/Resources/plugin-skills"

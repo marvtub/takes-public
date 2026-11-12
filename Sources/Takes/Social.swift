@@ -4,8 +4,8 @@ import SwiftUI
 // writes <library>/_library/social.json (about 20 KB) with the numbers of every chart; this file
 // reads it once and draws each chart with Path and plain views. No web view, no chart library.
 
-struct SocialData: Decodable, Equatable {
-    struct Hero: Decodable, Equatable {
+struct SocialData: Codable, Equatable {
+    struct Hero: Codable, Equatable {
         var followers: Int
         var followers_gain_8d: Int
         var followers_spark: [Int]
@@ -21,41 +21,41 @@ struct SocialData: Decodable, Equatable {
         var peak_month: String
         var peak_impressions: Int
     }
-    struct Momentum: Decodable, Equatable {
-        struct Note: Decodable, Equatable { var date: String; var label: String }
+    struct Momentum: Codable, Equatable {
+        struct Note: Codable, Equatable { var date: String; var label: String }
         var dates: [String]
         var linkedin: [Int]
         /// null after the last day the X data covers.
         var x: [Int?]
         var annotations: [Note]
     }
-    struct Cadence: Decodable, Equatable {
+    struct Cadence: Codable, Equatable {
         var posts: Int; var target: Int; var week: Int; var li_drafts: Int; var x_drafts: Int
     }
-    struct Heat: Decodable, Equatable {
+    struct Heat: Codable, Equatable {
         /// null = no data for that day yet (after the source's last day), not zero.
         var dates: [String]; var impressions: [Int?]; var li_posts: [Int]; var x_posts: [Int?]
     }
-    struct Entry: Decodable, Equatable, Identifiable {
+    struct Entry: Codable, Equatable, Identifiable {
         var title: String; var url: String; var date: String; var reach: Int; var engagements: Int; var rate: Double
         /// Only on posts ScrapeCreators read (the recent LinkedIn ones).
         var comments: Int? = nil; var reposts: Int? = nil
         var id: String { url + date + title }
     }
-    struct Board: Decodable, Equatable { var label: String; var avg: Int; var count: Int }
-    struct Window: Decodable, Equatable {
+    struct Board: Codable, Equatable { var label: String; var avg: Int; var count: Int }
+    struct Window: Codable, Equatable {
         var posts: Int; var impressions: Int; var avg: Int; var analyzed: Int
         var top: [Entry]
         var by_day: [Board]; var by_hook: [Board]; var by_length: [Board]; var by_topic: [Board]
     }
-    struct Point: Decodable, Equatable { var month: String; var value: Int }
-    struct Day: Decodable, Equatable { var date: String; var value: Int }
-    struct Cross: Decodable, Equatable { var months: [String]; var linkedin: [Int]; var x: [Int] }
-    struct Share: Decodable, Equatable { var label: String; var pct: Double }
-    struct Group: Decodable, Equatable { var title: String; var items: [Share] }
-    struct XTotals: Decodable, Equatable { var posts: Int; var views: Int }
+    struct Point: Codable, Equatable { var month: String; var value: Int }
+    struct Day: Codable, Equatable { var date: String; var value: Int }
+    struct Cross: Codable, Equatable { var months: [String]; var linkedin: [Int]; var x: [Int] }
+    struct Share: Codable, Equatable { var label: String; var pct: Double }
+    struct Group: Codable, Equatable { var title: String; var items: [Share] }
+    struct XTotals: Codable, Equatable { var posts: Int; var views: Int }
     /// Last day each source covers (YYYY-MM-DD), and when the refresh last loaded anything.
-    struct Sources: Decodable, Equatable {
+    struct Sources: Codable, Equatable {
         var linkedin: String; var followers: String; var x: String; var refreshed: String
     }
 
@@ -73,6 +73,18 @@ struct SocialData: Decodable, Equatable {
     var monthly_x: [Point]
     var cross: Cross
     var followers: [Day]
+    /// One X follower count per day, pinned to the real counts (generate_dashboard.py). nil in older files.
+    var x_followers: [Day]? = nil
+    /// The YouTube channel (YouTube Data API + Studio, youtube_stats.py). nil in older files.
+    var youtube: YouTube? = nil
+
+    struct YouTube: Codable, Equatable {
+        var subscribers: Int; var views: Int; var videos: Int
+        /// Last day Studio's daily numbers cover.
+        var through: String
+        var subscriber_days: [Day]; var daily_views: [Day]
+        var monthly: [Point]; var top: [Entry]; var recent: [Entry]
+    }
     var audience: [Group]
     var top_linkedin: [Entry]
     var top_x: [Entry]
@@ -214,6 +226,36 @@ struct SignalHero: View {
     }
 }
 
+/// The YouTube channel at a glance, in the X hero's cards.
+struct YouTubeHero: View {
+    let yt: SocialData.YouTube
+
+    var body: some View {
+        let days = yt.daily_views.map(\.value)
+        let subs = yt.subscriber_days.map(\.value)
+        let gain = (subs.last ?? 0) - (subs.first ?? 0)
+        HStack(spacing: 12) {
+            metric("subscribers", Signal.comma(yt.subscribers),
+                   "\(gain >= 0 ? "+" : "−")\(abs(gain)) in \(subs.count) days", spark: subs)
+            metric("views · 30 days", Num.short(days.suffix(30).reduce(0, +)),
+                   "through \(Signal.day(yt.through))", spark: Array(days.suffix(30)))
+            metric("videos", "\(yt.videos)", yt.recent.first.map { "newest \(Signal.day($0.date))" } ?? "", spark: [])
+            metric("all time", Num.short(yt.views), "views", spark: [])
+        }
+    }
+
+    private func metric(_ label: String, _ value: String, _ note: String, spark: [Int]) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 5) { PlatformLogo(platform: "YouTube", size: 11); SectionLabel(text: label) }
+            Text(value).font(Theme.display(32)).foregroundStyle(Theme.ink)
+            Text(note).font(Theme.sans(11.5)).foregroundStyle(Theme.muted).lineLimit(1)
+            KitSpark(values: spark, key: false).frame(height: 26)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .card(padding: 14)
+    }
+}
+
 /// The top tiles when the board shows only X.
 struct XHero: View {
     let data: SocialData
@@ -224,12 +266,14 @@ struct XHero: View {
         let last30 = views.suffix(30).reduce(0, +)
         let peak = views.max() ?? 0
         let peakDay = views.firstIndex(of: peak).map { Signal.day(m.dates[$0]) } ?? ""
-        let recent = data.monthly_x.last
+        let f = (data.x_followers ?? []).map(\.value)
+        let gain = (f.last ?? 0) - (f.first ?? 0)
         HStack(spacing: 12) {
+            if let now = f.last {
+                metric("followers", Signal.comma(now), "\(gain >= 0 ? "+" : "−")\(abs(gain)) in \(f.count) days", spark: f)
+            }
             metric("views · 30 days", Num.short(last30), "through \(Signal.day(data.x_through))", spark: Array(views.suffix(30)))
             metric("best day · \(m.dates.count) days", Signal.comma(peak), peakDay, spark: [])
-            metric("views · \(recent.map { Signal.month($0.month) } ?? "this month")", Num.short(recent?.value ?? 0),
-                   "month to date", spark: data.monthly_x.map(\.value))
             metric("all time", Num.short(data.x_totals.views), "\(Signal.comma(data.x_totals.posts)) posts", spark: [])
         }
     }
@@ -326,7 +370,10 @@ struct AreaChart: View {
                 let x = { (i: Int) in n > 1 ? w * Double(i) / Double(n - 1) : 0 }
                 let y = { (val: Double) in top + h - h * (val - lo) / (hi - lo) }
                 ZStack(alignment: .topLeading) {
-                    KitGrid(ticks: ticks, top: top)
+                    // Short labels repeat on a narrow range ("2.5k" four times on subscribers): full numbers then.
+                    KitGrid(ticks: ticks,
+                            label: Set(ticks.map(Kit.short)).count < ticks.count ? { Signal.comma(Int($0)) } : Kit.short,
+                            top: top)
                     Group {
                         if was.count > 1 {
                             Kit.line(was, in: size, lo: lo, hi: hi, slots: n)
@@ -535,107 +582,6 @@ struct DualBars: View {
     }
 }
 
-/// 13 weeks × 7 days, Monday on top. Darker is more; a dot marks a day with a post; a day with
-/// no reading yet is a dashed outline, never a quiet day.
-struct HeatGrid: View {
-    let dates: [String]
-    /// nil: no data for that day yet. Drawn as an outline, never as a quiet day.
-    let values: [Int?]
-    let color: Color
-    let unit: String
-    /// Posts per day, same order as dates: a dot on each day with one.
-    var posts: [Int]? = nil
-    /// The cell under the pointer. One readout for the grid: a tooltip on each of the 91 cells
-    /// made every scroll past the grid slow (2026-10-03).
-    @State private var hover: Int?
-
-    var body: some View {
-        let hi = max(values.compactMap { $0 }.max() ?? 1, 1)
-        // Pad the front so the first column starts on a Monday.
-        let lead = weekdayIndex(dates.first ?? "")
-        let cells: [Int??] = Array(repeating: nil, count: lead) + values.map { Optional($0) }
-        let weeks = Int((Double(cells.count) / 7).rounded(.up))
-        let cell: Double = 15, step: Double = 18
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(alignment: .top, spacing: 8) {
-                VStack(alignment: .trailing, spacing: step - 14) {
-                    ForEach(0..<7, id: \.self) { r in
-                        Text(["Mon", "", "Wed", "", "Fri", "", "Sun"][r]).font(Theme.sans(10)).foregroundStyle(Theme.faint)
-                            .frame(height: 14)
-                    }
-                }
-                .padding(.top, 1)
-                // One drawing, not 91 views: each cell as its own view made the board a thousand
-                // layers for Core Animation to move on every scroll frame (2026-10-03).
-                Canvas { ctx, _ in
-                    for i in cells.indices {
-                        let r = CGRect(x: Double(i / 7) * step, y: Double(i % 7) * step, width: cell, height: cell)
-                        guard let c = cells[i] else { continue }
-                        let shape = Path(roundedRect: r, cornerRadius: 3.5)
-                        if let v = c {
-                            ctx.fill(shape, with: .color(v == 0 ? Kit.rest.opacity(0.6) : color.opacity(0.16 + 0.84 * Double(v) / Double(hi))))
-                        } else {
-                            ctx.stroke(Path(roundedRect: r.insetBy(dx: 0.5, dy: 0.5), cornerRadius: 3.5), with: .color(Kit.grid),
-                                       style: StrokeStyle(lineWidth: 1, dash: [2, 2]))
-                        }
-                        let day = i - lead
-                        if let posts, day >= 0, day < posts.count, posts[day] > 0 {
-                            ctx.fill(Path(ellipseIn: CGRect(x: r.midX - 2, y: r.midY - 2, width: 4, height: 4)), with: .color(Theme.paper))
-                        }
-                        if day == hover {
-                            ctx.stroke(Path(roundedRect: r.insetBy(dx: -1.5, dy: -1.5), cornerRadius: 4.5), with: .color(Theme.ink), lineWidth: 1.5)
-                        }
-                    }
-                }
-                .frame(width: Double(weeks) * step - (step - cell), height: 7 * step - (step - cell))
-                .contentShape(Rectangle())
-                .onContinuousHover { phase in
-                    guard case .active(let p) = phase else { if hover != nil { hover = nil }; return }
-                    let i = Int(p.x / step) * 7 + Int(p.y / step) - lead
-                    let next = i >= 0 && i < dates.count ? i : nil
-                    if next != hover { hover = next }
-                }
-            }
-            HStack(spacing: 14) {
-                if let i = hover {
-                    readout(i)
-                } else {
-                    HStack(spacing: 3) {
-                        Text("Less").font(Theme.sans(10.5)).foregroundStyle(Theme.faint)
-                        ForEach([0.16, 0.37, 0.58, 0.79, 1.0], id: \.self) { o in
-                            RoundedRectangle(cornerRadius: 2.5).fill(color.opacity(o)).frame(width: 10, height: 10)
-                        }
-                        Text("More").font(Theme.sans(10.5)).foregroundStyle(Theme.faint)
-                    }
-                    KitKey(items: [(.dashed, "No reading yet")])
-                    if posts != nil {
-                        HStack(spacing: 5) {
-                            Circle().fill(Theme.paper).frame(width: 4, height: 4).padding(3).background(RoundedRectangle(cornerRadius: 2.5).fill(color))
-                            Text("You posted").font(Theme.sans(11)).foregroundStyle(Theme.muted)
-                        }
-                    }
-                }
-            }
-            .frame(height: 18)
-        }
-    }
-
-    private func readout(_ i: Int) -> some View {
-        let p = posts.flatMap { i < $0.count ? $0[i] : nil } ?? 0
-        return HStack(spacing: 6) {
-            Text(Signal.weekday(dates[i]).capitalized + ", " + Signal.day(dates[i])).font(Theme.sans(11.5, .semibold)).foregroundStyle(Theme.ink)
-            Text(values[i].map { "\(Signal.comma($0)) \(unit)" } ?? "no reading yet").font(Theme.sans(11.5)).foregroundStyle(Theme.muted)
-                .monospacedDigit()
-            if p > 0 { Text(p == 1 ? "· 1 post" : "· \(p) posts").font(Theme.sans(11.5)).foregroundStyle(Theme.muted) }
-        }
-    }
-
-    private func weekdayIndex(_ s: String) -> Int {
-        guard let d = Signal.ymd.date(from: s) else { return 0 }
-        return (Calendar(identifier: .gregorian).component(.weekday, from: d) + 5) % 7  // Mon = 0
-    }
-}
-
 /// Label, a bar and a number, for leaderboards and the audience. Gray; the top row in the accent.
 struct BarRow: View {
     let label: String
@@ -763,6 +709,7 @@ struct SignalPostRow: View {
     @State private var hover = false
 
     var body: some View {
+        let _ = Perf.body("SignalPostRow")
         HStack(spacing: 12) {
             if let rank {
                 Text(String(format: "#%02d", rank)).font(Theme.mono(11, .medium)).foregroundStyle(Theme.accentInk).frame(width: 30, alignment: .leading)
@@ -804,9 +751,14 @@ struct SignalPostRow: View {
 
 // MARK: - The page
 
-/// Every section of the Signal dashboard, in its order. A plain VStack: as a LazyVStack it froze
-/// Takes for seconds on 2026-10-02 (the sample showed SwiftUI measuring its rows again and
-/// again, with lazy grids inside). The page has about ten sections, cheap to draw at once.
+/// How SignalPage stacks its sections. The bench sets false to time the old eager stack.
+enum SignalLayout { @MainActor static var lazy = true }
+
+/// Every section of the Signal dashboard, in its order, in a LazyVStack (2026-11-08). As a plain
+/// VStack, opening the board built and laid out all ~6500 pt for the 900 in view: ~100 ms on the
+/// main thread (PerfBoardBench). A LazyVStack froze Takes for seconds on 2026-10-02: SwiftUI
+/// measured its rows again and again, with lazy grids inside. Keep lazy grids out of the
+/// sections (AdaptiveColumns does the audience grid).
 /// No `.help` tooltips on its bars and rows: AppKit moves each tooltip area on every scroll
 /// frame, and 70 of them made scrolling lag (2026-10-03). Hover readouts show the numbers.
 struct SignalPage<Extra: View>: View {
@@ -814,6 +766,7 @@ struct SignalPage<Extra: View>: View {
     /// Shown after the weekly cadence: the posts from Takes sessions.
     /// "LinkedIn" or "X" shows only that platform's sections. Empty shows all.
     var platform = ""
+    var extraData: () -> [String: Any] = { [:] }
     @ViewBuilder var extra: Extra
     @AppStorage("signalWindow") private var window = "30"
     @AppStorage("momentumWindow") private var momentumWindow = "30"
@@ -822,54 +775,102 @@ struct SignalPage<Extra: View>: View {
 
     var body: some View {
         let _ = Perf.body("SignalPage")
-        VStack(alignment: .leading, spacing: 26) {
-            if on("LinkedIn") { SignalHero(hero: data.hero) } else { XHero(data: data) }
-            if on("LinkedIn") { WeekCard(data: data, showX: on("X")) }
-            momentum
-            extra
-            if on("LinkedIn") {
-                heat
-                patterns
-                recent
-                monthly("Impressions by month", "LinkedIn, the last \(data.monthly_linkedin.count) months", data.monthly_linkedin,
-                        Signal.linkedin, "impressions")
-                followers
-                audience
-            }
-            if platform.isEmpty, !data.cross.months.isEmpty {
-                VStack(alignment: .leading, spacing: 14) {
-                    ChartHeader(icon: "arrow.left.arrow.right", title: "LinkedIn vs X", subtitle: "Reach per month, on one scale")
-                    DualBars(cross: data.cross)
-                }
-                .card(padding: 18)
-            }
-            if on("X") {
-                if !data.monthly_x.isEmpty {
-                    monthly("Views by month", "X · \(Signal.comma(data.x_totals.posts)) posts, \(Num.short(data.x_totals.views)) views all time",
-                            data.monthly_x, Signal.x, "views")
-                }
-                SignalSection(label: "posting calendar", title: "13 weeks of X posts", platform: "X") {
-                    HeatGrid(dates: data.heat.dates, values: data.heat.x_posts, color: Signal.x, unit: "posts")
-                }
-                top("All-time top posts", "Five biggest hits by views", "X", data.top_x, unit: "views")
-            }
-            if on("LinkedIn") {
-                top("All-time top posts", "Five biggest hits by impressions", "LinkedIn", data.top_linkedin, unit: "impr")
-            }
+        if SignalLayout.lazy {
+            LazyVStack(alignment: .leading, spacing: 26) { sections }
+        } else {
+            VStack(alignment: .leading, spacing: 26) { sections }
         }
     }
 
-    /// Daily reach as one card per platform: the last 30 or 90 days, the 30 before dashed.
-    private var momentum: some View {
-        let m = data.momentum
-        return VStack(alignment: .leading, spacing: 14) {
-            if on("LinkedIn") {
-                chartRow("LinkedIn", "Impressions", "impressions", m.linkedin, Signal.linkedin, notes: m.annotations)
+    private var sections: some View {
+        BoardSections(board: "performance", available: sectionIDs, snapshots: sectionSnapshots) { id in
+            nativeSection(id)
+        }
+    }
+
+    /// Stable places follow the same platform gates as the native dashboard.
+    var sectionIDs: [String] {
+        var ids = ["hero"]
+        if on("LinkedIn") { ids.append("week") }
+        ids.append("momentum")
+        ids.append("posts")
+        if on("LinkedIn") {
+            ids += ["patterns", "recent"]
+            if !platform.isEmpty { ids.append("linkedin_monthly") }
+            ids += ["linkedin_followers", "audience"]
+        }
+        if platform.isEmpty, !data.cross.months.isEmpty { ids.append("cross") }
+        if on("X") {
+            if !platform.isEmpty, !data.monthly_x.isEmpty { ids.append("x_monthly") }
+            if let f = data.x_followers, f.count > 1 { ids.append("x_followers") }
+            ids.append("x_top")
+        }
+        if on("LinkedIn") { ids.append("linkedin_top") }
+        if on("YouTube"), data.youtube != nil {
+            ids += ["youtube_views", "youtube_subscribers", "youtube_monthly", "youtube_recent", "youtube_top"]
+        }
+        return ids.map { "performance." + $0 }
+    }
+
+    func sectionSnapshots() -> [String: [String: Any]] {
+        let all = BoardSectionData.json(data)
+        let fields: [String: [String]] = [
+            "hero": ["hero", "x_totals", "youtube"], "week": ["cadence", "heat"],
+            "momentum": ["momentum", "heat"],
+            "patterns": ["patterns"], "recent": ["recent"], "linkedin_monthly": ["monthly_linkedin"],
+            "linkedin_followers": ["followers"], "audience": ["audience", "exported"], "cross": ["cross"],
+            "x_monthly": ["monthly_x"], "x_followers": ["x_followers"], "x_top": ["top_x"],
+            "linkedin_top": ["top_linkedin"], "youtube_views": ["youtube"], "youtube_subscribers": ["youtube"],
+            "youtube_monthly": ["youtube"], "youtube_recent": ["youtube"], "youtube_top": ["youtube"]]
+        var snapshots = Dictionary(uniqueKeysWithValues: sectionIDs.filter { $0 != "performance.posts" }.map { id in
+            let key = String(id.dropFirst("performance.".count))
+            var out = all.filter { fields[key, default: []].contains($0.key) }
+            out["platform"] = platform; out["window"] = window; out["momentum_window"] = momentumWindow
+            out["generated"] = data.generated
+            return (id, out)
+        })
+        snapshots["performance.posts"] = extraData()
+        return snapshots
+    }
+
+    @ViewBuilder private func nativeSection(_ id: String) -> some View {
+        switch id {
+        case "performance.hero":
+            if on("LinkedIn") { SignalHero(hero: data.hero) }
+            else if platform == "YouTube" { if let yt = data.youtube { YouTubeHero(yt: yt) } }
+            else { XHero(data: data) }
+        case "performance.week": WeekCard(data: data, showX: on("X"))
+        case "performance.momentum":
+            VStack(alignment: .leading, spacing: 14) {
+                if on("LinkedIn") { chartRow("LinkedIn", "Impressions", "impressions", data.momentum.linkedin, Signal.linkedin, notes: data.momentum.annotations) }
+                if on("X"), data.momentum.x.contains(where: { ($0 ?? 0) > 0 }) {
+                    chartRow("X", "Views", "views", Array(data.momentum.x.prefix { $0 != nil }.compactMap { $0 }), Signal.x, notes: [])
+                }
             }
-            if on("X"), m.x.contains(where: { ($0 ?? 0) > 0 }) {
-                // The line stops on the last day the X data covers.
-                chartRow("X", "Views", "views", Array(m.x.prefix { $0 != nil }.compactMap { $0 }), Signal.x, notes: [])
+        case "performance.posts": extra
+        case "performance.patterns": patterns
+        case "performance.recent": recent
+        case "performance.linkedin_monthly": monthly("Impressions by month", "LinkedIn", data.monthly_linkedin, Signal.linkedin, "impressions")
+        case "performance.linkedin_followers": followers(data.followers, "LinkedIn")
+        case "performance.audience": audience
+        case "performance.cross":
+            VStack(alignment: .leading, spacing: 14) {
+                ChartHeader(icon: "arrow.left.arrow.right", title: "LinkedIn vs X", subtitle: "Reach per month, on one scale")
+                DualBars(cross: data.cross)
+            }.card(padding: 18)
+        case "performance.x_monthly": monthly("Views by month", "X", data.monthly_x, Signal.x, "views")
+        case "performance.x_followers": if let f = data.x_followers { followers(f, "X") }
+        case "performance.x_top": top("All-time top posts", "Five biggest hits by views", "X", data.top_x, unit: "views")
+        case "performance.linkedin_top": top("All-time top posts", "Five biggest hits by impressions", "LinkedIn", data.top_linkedin, unit: "impr")
+        case "performance.youtube_views": if let yt = data.youtube { youtubeViews(yt) }
+        case "performance.youtube_subscribers": if let yt = data.youtube { followers(yt.subscriber_days, "YouTube", title: "Subscribers", unit: "subscribers") }
+        case "performance.youtube_monthly": if let yt = data.youtube { monthly("Views by month", "YouTube", yt.monthly, Theme.accent, "views") }
+        case "performance.youtube_recent":
+            if let yt = data.youtube {
+                SignalSection(label: "newest videos", title: "The last five uploads", platform: "YouTube") { postList(yt.recent, ranked: false, unit: "views") }
             }
+        case "performance.youtube_top": if let yt = data.youtube { top("All-time top videos", "Five biggest by views", "YouTube", yt.top, unit: "views") }
+        default: EmptyView()
         }
     }
 
@@ -882,14 +883,17 @@ struct SignalPage<Extra: View>: View {
         let cur = Array(v[min(start, v.count)..<v.count])
         let prior = start >= days && v.count >= start ? Array(v[(start - days)..<start]) : nil
         let total = cur.reduce(0, +), before = prior?.reduce(0, +)
+        let counts: [Int?] = platform == "LinkedIn" ? data.heat.li_posts.map { $0 } : data.heat.x_posts
         let posted = Set(data.heat.dates.indices.compactMap { i -> Int? in
-            guard i < data.heat.li_posts.count, data.heat.li_posts[i] > 0, platform == "LinkedIn",
+            guard i < counts.count, (counts[i] ?? 0) > 0,
                   let at = dates.firstIndex(of: data.heat.dates[i]), at >= start else { return nil }
             return at - start
         })
         return VStack(alignment: .leading, spacing: 14) {
             ChartHeader(icon: "chart.xyaxis.line", title: title,
-                        subtitle: "\(platform), every day" + (prior == nil ? "" : ", against the \(days) days before")) {
+                        subtitle: "\(platform), every day" + (prior == nil ? "" : ", against the \(days) days before")
+                                  + (posted.isEmpty ? "" : ". A tick marks each day you posted"),
+                        platform: platform) {
                 HStack(spacing: 4) {
                     ForEach(["30", "90"], id: \.self) { d in
                         Button("\(d) days") { momentumWindow = d }.buttonStyle(BracketButtonStyle(active: momentumWindow == d))
@@ -914,37 +918,15 @@ struct SignalPage<Extra: View>: View {
         .card(padding: 18)
     }
 
-    private func stat(_ n: String, _ label: String) -> some View {
-        VStack(alignment: .trailing, spacing: 1) {
-            Text(n).font(Theme.display(22))
-            Text(label.uppercased()).font(Theme.mono(9.5)).foregroundStyle(Theme.muted)
-        }
-    }
-
-    /// One grid for 13 weeks: impressions per day, a dot on each day with a post.
-    private var heat: some View {
-        let h = data.heat
-        let active = h.impressions.filter { ($0 ?? 0) > 0 }.count
-        let posts = h.li_posts.reduce(0, +)
-        return VStack(alignment: .leading, spacing: 14) {
-            ChartHeader(icon: "square.grid.3x3.fill", title: "13 weeks",
-                        subtitle: "Impressions per day: \(active) active days, \(posts) posts on \(h.li_posts.filter { $0 > 0 }.count) days")
-            HeatGrid(dates: h.dates, values: h.impressions, color: Signal.linkedin, unit: "impressions", posts: h.li_posts)
-        }
-        .card(padding: 18)
-    }
-
-    /// Numbers on top, then the posts that worked beside the best day, then three short boards.
+    /// One line of numbers, then the posts that worked beside the best day, then three short boards.
     /// Fixed rows, so the cards line up and keep the same height in a row (2026-10-03).
+    /// Header cut to one line and the footnote removed: the four-stat row felt messy (2026-11-07).
     private var patterns: some View {
-        SignalSection(label: "what's working", title: "Patterns from recent posts: what to do more of", platform: "LinkedIn") {
+        SignalSection(label: "what's working", title: "What to do more of", platform: "LinkedIn") {
             if let w = data.patterns[window] {
                 VStack(alignment: .leading, spacing: 14) {
-                    HStack(spacing: 26) {
-                        stat("\(w.posts)", "posts"); stat(Num.short(w.impressions), "total impr")
-                        stat(Signal.comma(w.avg), "avg / post"); stat("\(w.analyzed)", "with a draft")
-                        Spacer()
-                    }
+                    Text("\(w.posts) posts, \(Signal.comma(w.avg)) impressions each on average")
+                        .font(Theme.sans(12)).foregroundStyle(Theme.muted)
                     HStack(alignment: .top, spacing: 14) {
                         card("Top performers") { performers(w.top) }
                             .layoutPriority(1)
@@ -958,8 +940,6 @@ struct SignalPage<Extra: View>: View {
                         board("Topic", w.by_topic, avg: w.avg)
                     }
                     .fixedSize(horizontal: false, vertical: true)
-                    Text("Only posts with a matching draft count for hook, length and topic. Small samples: directional, not statistical.")
-                        .font(Theme.sans(11)).foregroundStyle(Theme.muted)
                 }
             } else { none }
         } trailing: {
@@ -1061,10 +1041,10 @@ struct SignalPage<Extra: View>: View {
     }
 
     /// Monthly bars in a card: the total, the best month, and the bars.
-    private func monthly(_ title: String, _ sub: String, _ points: [SocialData.Point], _ c: Color, _ unit: String) -> some View {
+    private func monthly(_ title: String, _ platform: String, _ points: [SocialData.Point], _ c: Color, _ unit: String) -> some View {
         let best = points.max { $0.value < $1.value }
         return VStack(alignment: .leading, spacing: 14) {
-            ChartHeader(icon: "chart.bar.fill", title: title, subtitle: sub)
+            ChartHeader(icon: "chart.bar.fill", title: title, subtitle: "\(platform), the last \(points.count) months", platform: platform)
             HStack(alignment: .bottom, spacing: 30) {
                 KitNumber(label: points.first.map { "\(Signal.month($0.month, year: true)) – \(Signal.month(points.last!.month, year: true))" } ?? "",
                           value: Signal.comma(points.map(\.value).reduce(0, +)))
@@ -1079,23 +1059,42 @@ struct SignalPage<Extra: View>: View {
         .card(padding: 18)
     }
 
-    private var followers: some View {
-        let f = data.followers
+    /// The YouTube channel: views per day, subscribers, months, the newest and the biggest videos.
+    @ViewBuilder private func youtubeViews(_ yt: SocialData.YouTube) -> some View {
+        let v = yt.daily_views
+        let last30 = v.suffix(30).map(\.value).reduce(0, +)
+        let before = v.dropLast(30).suffix(30).map(\.value).reduce(0, +)
+        VStack(alignment: .leading, spacing: 14) {
+            ChartHeader(icon: "chart.xyaxis.line", title: "Views", subtitle: "YouTube, every day, the last \(v.count) days", platform: "YouTube")
+            KitNumber(label: v.suffix(30).first.map { "\(Signal.day($0.date)) – \(Signal.day(yt.through))" } ?? "",
+                      value: Signal.comma(last30),
+                      pill: before > 0 ? DeltaPill("\(last30 >= before ? "↑" : "↓") \(abs(100 * (last30 - before) / before))%",
+                                                   tone: last30 > before ? .up : last30 < before ? .down : .flat) : nil,
+                      note: before > 0 ? "against \(Signal.comma(before)) the 30 days before" : nil)
+            AreaChart(dates: v.map(\.date), values: v.map(\.value), color: Theme.accent, unit: "views", height: 150)
+        }
+        .card(padding: 18)
+
+    }
+
+    private func followers(_ f: [SocialData.Day], _ platform: String, title: String = "Followers",
+                           unit: String = "followers") -> some View {
         let first = f.first?.value ?? 0, last = f.last?.value ?? 0
         return VStack(alignment: .leading, spacing: 14) {
-            ChartHeader(icon: "person.2.fill", title: "Followers", subtitle: "LinkedIn, the last \(f.count) days")
+            ChartHeader(icon: "person.2.fill", title: title, subtitle: "\(platform), the last \(f.count) days", platform: platform)
             KitNumber(label: f.last.map { Signal.day($0.date) } ?? "", value: Signal.comma(last),
                       pill: DeltaPill("\(last >= first ? "+" : "−")\(Signal.comma(abs(last - first)))", tone: last > first ? .up : last < first ? .down : .flat),
                       note: f.first.map { "since \(Signal.day($0.date))" })
             AreaChart(dates: f.map(\.date), values: f.map(\.value), color: Theme.accent,
-                      unit: "followers", height: 150, zeroBase: false)
+                      unit: unit, height: 150, zeroBase: false)
         }
         .card(padding: 18)
     }
 
     private var audience: some View {
         SignalSection(label: "audience", title: "Who shows up for the content", platform: "LinkedIn") {
-            LazyVGrid(columns: [GridItem(.adaptive(minimum: 260), spacing: 24, alignment: .top)], alignment: .leading, spacing: 18) {
+            // Not a LazyVGrid: a lazy grid inside the page's lazy stack is what froze the board on 2026-10-02.
+            AdaptiveColumns(minimum: 260, spacing: 24, rowSpacing: 18) {
                 ForEach(data.audience, id: \.title) { g in
                     VStack(alignment: .leading, spacing: 6) {
                         Text(g.title).font(Theme.sans(12.5, .semibold))
@@ -1108,6 +1107,49 @@ struct SignalPage<Extra: View>: View {
             }
         } trailing: {
             Text("LINKEDIN EXPORT \(data.exported)").font(Theme.mono(10)).foregroundStyle(Theme.muted)
+        }
+    }
+}
+
+/// Columns at least `minimum` wide, as many as fit, rows as tall as their tallest item: what
+/// LazyVGrid(.adaptive) draws, laid out at once. The page's sections are lazy, and a lazy grid
+/// inside them measured its rows again and again (2026-10-02).
+struct AdaptiveColumns: Layout {
+    var minimum: CGFloat
+    var spacing: CGFloat
+    var rowSpacing: CGFloat
+
+    private func columns(_ width: CGFloat) -> (count: Int, width: CGFloat) {
+        guard width.isFinite, width > minimum else { return (1, max(0, width.isFinite ? width : minimum)) }
+        let n = max(1, Int((width + spacing) / (minimum + spacing)))
+        return (n, (width - spacing * CGFloat(n - 1)) / CGFloat(n))
+    }
+
+    private func rows(_ subviews: Subviews, _ width: CGFloat) -> [CGFloat] {
+        let (n, w) = columns(width)
+        return stride(from: 0, to: subviews.count, by: n).map { start in
+            subviews[start..<min(start + n, subviews.count)]
+                .map { $0.sizeThatFits(ProposedViewSize(width: w, height: nil)).height }.max() ?? 0
+        }
+    }
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        // An unbounded or open width (an ideal-size question): one column at the minimum width.
+        let width = proposal.width.flatMap { $0.isFinite ? $0 : nil } ?? minimum
+        let heights = rows(subviews, width)
+        return CGSize(width: width, height: heights.reduce(0, +) + rowSpacing * CGFloat(max(0, heights.count - 1)))
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        let (n, w) = columns(bounds.width)
+        var y = bounds.minY
+        for (r, height) in rows(subviews, bounds.width).enumerated() {
+            for c in 0..<n where r * n + c < subviews.count {
+                // Top of the cell, centred across it: GridItem(alignment: .top).
+                subviews[r * n + c].place(at: CGPoint(x: bounds.minX + CGFloat(c) * (w + spacing) + w / 2, y: y),
+                                          anchor: .top, proposal: ProposedViewSize(width: w, height: nil))
+            }
+            y += height + rowSpacing
         }
     }
 }

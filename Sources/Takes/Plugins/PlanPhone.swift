@@ -93,6 +93,15 @@ struct PhonePlan: Codable, Equatable {
     var minWeeks: Int
     var maxWeeks: Int
     var ready: [String]
+    /// What the empty Plan chat says and offers (Consistency.intro, 2026-10-30).
+    var intro: Intro? = nil
+
+    struct Intro: Codable, Equatable {
+        struct Ask: Codable, Equatable { var label: String; var ask: String }
+        var title: String
+        var line: String
+        var asks: [Ask]
+    }
 }
 
 /// A session the phone can put on a day (a day's +).
@@ -224,7 +233,9 @@ enum PlanPhone {
             stripTitle: count == 2 ? "Next two weeks" : "Next \(count) weeks",
             summary: n == 0 ? slots : "\(n) video\(n == 1 ? "" : "s") planned · " + slots,
             days: days, weekCount: count, minWeeks: PostingPlan.weekRange.lowerBound, maxWeeks: PostingPlan.weekRange.upperBound,
-            ready: stats.readyWithoutTime)
+            ready: stats.readyWithoutTime,
+            intro: PhonePlan.Intro(title: Consistency.intro.title, line: Consistency.intro.line,
+                                   asks: Consistency.intro.asks.map { PhonePlan.Intro.Ask(label: $0.0, ask: $0.1) }))
     }
 
     static func card(_ c: ConsistencyStats.Card, day: Date, cal: Calendar) -> PhonePlan.Card {

@@ -55,7 +55,9 @@ struct SettingsView: View {
                     .padding(.horizontal, 10).padding(.bottom, 12)
                 ForEach(SettingsPage.shown) { p in
                     Button { withAnimation(Theme.motion) { page = p.rawValue } } label: {
-                        Label(p.name, systemImage: p.icon)
+                        // A fixed column for the icon: their widths differ, and the names started
+                        // anywhere from 83 to 99 pt in (2026-11-07).
+                        Label { Text(p.name) } icon: { Image(systemName: p.icon).frame(width: 18) }
                             .font(Theme.sans(13, p == current ? .semibold : .regular))
                             .foregroundStyle(p == current ? Theme.ink : Theme.muted)
                             .frame(maxWidth: .infinity, alignment: .leading)
@@ -100,12 +102,14 @@ private struct ArchivedPage: View {
             (library.grouped[p.url] ?? []).filter(\.archived).map { (project: p.name, session: $0) }
         }
         VStack(alignment: .leading, spacing: 0) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Archived sessions").font(Theme.display(17)).foregroundStyle(Theme.ink)
+            // The same large title as Appearance, Agents, Search and Gemini (2026-11-08).
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Archived").font(Theme.display(26)).foregroundStyle(Theme.ink)
                 Text("Out of the sidebar, still on disk. Unarchive one to bring it back.")
-                    .font(Theme.sans(12)).foregroundStyle(Theme.muted)
+                    .font(Theme.sans(12.5)).foregroundStyle(Theme.muted)
             }
-            .padding(20)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 32).padding(.top, 28).padding(.bottom, 20)
             Rule()
             if archived.isEmpty {
                 Text("Nothing archived.").font(Theme.sans(12.5)).foregroundStyle(Theme.faint)
@@ -121,7 +125,7 @@ private struct ArchivedPage: View {
                             }
                         }
                     }
-                    .padding(10)
+                    .padding(.horizontal, 20).padding(.vertical, 10)
                 }
             }
         }
@@ -170,12 +174,13 @@ struct PrivatePage: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Private and public").font(Theme.display(17)).foregroundStyle(Theme.ink)
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Private and public").font(Theme.display(26)).foregroundStyle(Theme.ink)
                 Text("This build has everything. The public copy on GitHub has only what is public.")
-                    .font(Theme.sans(12)).foregroundStyle(Theme.muted)
+                    .font(Theme.sans(12.5)).foregroundStyle(Theme.muted)
             }
-            .padding(20)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 32).padding(.top, 28).padding(.bottom, 20)
             Rule()
             publicViewRow
             Rule()
@@ -196,7 +201,7 @@ struct PrivatePage: View {
             Spacer(minLength: 8)
             TakesSwitch(selection: PublicView.binding(app), options: [(false, "Off"), (true, "On")])
         }
-        .padding(.horizontal, 20).padding(.vertical, 14)
+        .padding(.horizontal, 32).padding(.vertical, 14)
     }
 
     private var list: some View {
@@ -207,7 +212,7 @@ struct PrivatePage: View {
                         if !rows.isEmpty { group(kind, rows) }
                     }
                 }
-                .padding(20)
+                .padding(.horizontal, 32).padding(.vertical, 20)
             }
     }
 
@@ -238,8 +243,14 @@ struct PrivatePage: View {
             }
             Spacer(minLength: 12)
             if !f.code.isEmpty {
-                Text(f.code.filter { !$0.hasPrefix("plugin ") }.joined(separator: "\n"))
-                    .font(Theme.mono(10.5)).foregroundStyle(Theme.faint).multilineTextAlignment(.trailing)
+                // One path a line, its folders cut from the front: "ios/TakesPhone/Private/" broke away
+                // from its file name (2026-11-07). The hover has the whole path.
+                VStack(alignment: .trailing, spacing: 1) {
+                    ForEach(f.code.filter { !$0.hasPrefix("plugin ") }, id: \.self) { path in
+                        Text(path).lineLimit(1).truncationMode(.head).help(path)
+                    }
+                }
+                .font(Theme.mono(10.5)).foregroundStyle(Theme.faint).frame(maxWidth: 240, alignment: .trailing)
             }
         }
         .padding(.horizontal, 12).padding(.vertical, 9)

@@ -24,6 +24,11 @@ final class Camera: NSObject, ObservableObject {
     let voice = VoiceFollow()
     @Published var recording = false
     @Published private(set) var paused = false
+    /// A take stopped and is being written: no new take until it is on screen (2026-11-06: a tap
+    /// in that gap started take 2, and take 1 then stopped the camera and was lost).
+    @Published private(set) var saving = false
+    /// Cancel: the take being saved is deleted when the writer hands it back.
+    private var discard = false
     @Published var file: URL?
     @Published var problem: String?
     @Published var front = true
@@ -37,6 +42,19 @@ final class Camera: NSObject, ObservableObject {
     private var watch: NSKeyValueObservation?
     private var portrait = true
     weak var preview: AVCaptureVideoPreviewLayer? { didSet { follow() } }
+
+    override init() {
+        super.init()
+        // A call, Home or a camera error ends the take: save what is there, so it is not lost.
+        let c = NotificationCenter.default
+        c.addObserver(self, selector: #selector(interrupted), name: AVCaptureSession.wasInterruptedNotification, object: session)
+        c.addObserver(self, selector: #selector(interrupted), name: AVCaptureSession.runtimeErrorNotification, object: session)
+        c.addObserver(self, selector: #selector(interrupted), name: UIApplication.didEnterBackgroundNotification, object: nil)
+    }
+
+    @objc nonisolated private func interrupted() {
+        Task { @MainActor in if self.recording { self.finish() } }
+    }
 
     /// The take's length so far, without the pauses.
     func elapsed(_ now: Date) -> TimeInterval { before + (since.map { now.timeIntervalSince($0) } ?? 0) }
@@ -108,6 +126,7 @@ final class Camera: NSObject, ObservableObject {
 
     func toggle() {
         if recording { finish(); return }
+        guard !saving else { return }
         let angle = rotation?.videoRotationAngleForHorizonLevelCapture ?? 90
         portrait = Int(angle.rounded()) % 180 == 90
         // The data output turns the pixels themselves, so the file needs no rotation flag.
@@ -145,9 +164,16 @@ final class Camera: NSObject, ObservableObject {
         }
     }
 
+    /// Stops the take and deletes it, also one still being saved.
+    func cancel() {
+        discard = true
+        if recording { finish() }
+    }
+
     private func finish() {
         voice.stop()
         recording = false
+        saving = true
         paused = false
         since = nil
         UIApplication.shared.isIdleTimerDisabled = false
@@ -157,15 +183,29 @@ final class Camera: NSObject, ObservableObject {
         if let fake = ProcessInfo.processInfo.environment["TAKES_FAKE_TAKE"] {
             let url = FileManager.default.temporaryDirectory.appending(path: "outbox/take-\(UUID().uuidString).mov")
             try? FileManager.default.copyItem(at: URL(filePath: fake), to: url)
-            file = url
+            if discard { try? FileManager.default.removeItem(at: url) } else { file = url }
+            saving = false
             return
         }
         #endif
+        // Home or a call can end the take: iOS gives the save a little time in the background.
+        // When that time runs out the app is only suspended: the save goes on when it comes back.
+        var task = UIBackgroundTaskIdentifier.invalid
+        task = UIApplication.shared.beginBackgroundTask { UIApplication.shared.endBackgroundTask(task) }
+        let background = task
         writer.finish { [weak self] url, error in
             Task { @MainActor in
-                guard let self else { return }
-                guard let url else { self.problem = error ?? "The take could not be saved."; return }
-                self.file = await Orientation.fix(url, portrait: portrait)
+                defer { UIApplication.shared.endBackgroundTask(background) }
+                // No recorder shows this take any more (Cancel, or it closed): delete it.
+                guard let self, !self.discard else {
+                    if let url { try? FileManager.default.removeItem(at: url) }
+                    return
+                }
+                guard let url else { self.problem = error ?? "The take could not be saved."; self.saving = false; return }
+                let fixed = await Orientation.fix(url, portrait: portrait)
+                if self.discard { try? FileManager.default.removeItem(at: fixed); return }
+                self.file = fixed
+                self.saving = false
             }
         }
     }
@@ -243,6 +283,13 @@ final class TakeWriter: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate,
             self.url = nil
             self.writer = nil
             guard let w, w.status == .writing else {
+                // A writer that failed mid take (the app went to the background) left its fragments: keep them.
+                if let w, w.status == .failed, let n = try? w.outputURL.resourceValues(forKeys: [.fileSizeKey]).fileSize,
+                   n > 0 {
+                    done(w.outputURL, nil)
+                    return
+                }
+                if let w { try? FileManager.default.removeItem(at: w.outputURL) }
                 done(nil, w?.error?.localizedDescription ?? "Nothing was recorded.")
                 return
             }
@@ -280,6 +327,9 @@ final class TakeWriter: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate,
     private func start(_ url: URL, _ buffer: CMSampleBuffer, _ pts: CMTime) -> Bool {
         guard let format = CMSampleBufferGetFormatDescription(buffer),
               let w = try? AVAssetWriter(outputURL: url, fileType: .mov) else { return false }
+        // Fragments every second: when iOS takes the encoder (Home during a take), the file up to the
+        // last fragment still plays, so the take is kept (2026-11-06).
+        w.movieFragmentInterval = CMTime(seconds: 1, preferredTimescale: 600)
         let size = CMVideoFormatDescriptionGetDimensions(format)
         var vs = videoSettings ?? [AVVideoCodecKey: AVVideoCodecType.hevc]
         vs[AVVideoWidthKey] = Int(size.width)
@@ -319,7 +369,15 @@ final class TakeWriter: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate,
 /// Makes sure a take plays the way it was held. The camera has written upright pixels together
 /// with a rotation flag, which then played the take sideways on the Mac.
 enum Orientation {
-    static func fix(_ url: URL, portrait: Bool) async -> URL {
+    typealias InsertTrack = (AVMutableCompositionTrack, CMTimeRange, AVAssetTrack) throws -> Void
+
+    static func fix(
+        _ url: URL,
+        portrait: Bool,
+        insertTrack: InsertTrack = { copy, range, source in
+            try copy.insertTimeRange(range, of: source, at: .zero)
+        }
+    ) async -> URL {
         let asset = AVURLAsset(url: url)
         guard let video = try? await asset.loadTracks(withMediaType: .video).first,
               let (size, transform) = try? await video.load(.naturalSize, .preferredTransform) else { return url }
@@ -335,16 +393,54 @@ enum Orientation {
         }
         guard let duration = try? await asset.load(.duration),
               let tracks = try? await asset.load(.tracks) else { return url }
+        let mediaTracks = tracks.filter { $0.mediaType == .video || $0.mediaType == .audio }
+        var expected = OrientationTrackCounts()
+        for track in mediaTracks {
+            if track.mediaType == .video { expected.video += 1 } else { expected.audio += 1 }
+        }
         let comp = AVMutableComposition()
-        for t in tracks where t.mediaType == .video || t.mediaType == .audio {
-            guard let c = comp.addMutableTrack(withMediaType: t.mediaType, preferredTrackID: kCMPersistentTrackID_Invalid) else { continue }
-            try? c.insertTimeRange(CMTimeRange(start: .zero, duration: duration), of: t, at: .zero)
-            if t.mediaType == .video { c.preferredTransform = upright }
+        var inserted = OrientationTrackCounts()
+        do {
+            for track in mediaTracks {
+                guard let copy = comp.addMutableTrack(withMediaType: track.mediaType,
+                                                      preferredTrackID: kCMPersistentTrackID_Invalid) else { return url }
+                try insertTrack(copy, CMTimeRange(start: .zero, duration: duration), track)
+                if track.mediaType == .video {
+                    copy.preferredTransform = upright
+                    inserted.video += 1
+                } else {
+                    inserted.audio += 1
+                }
+            }
+        } catch {
+            return url
         }
         let out = url.deletingLastPathComponent().appending(path: "upright-" + url.lastPathComponent)
         guard let export = AVAssetExportSession(asset: comp, presetName: AVAssetExportPresetPassthrough) else { return url }
-        do { try await export.export(to: out, as: .mov) } catch { return url }
-        try? FileManager.default.removeItem(at: url)
+        do {
+            try await export.export(to: out, as: .mov)
+        } catch {
+            try? FileManager.default.removeItem(at: out)
+            return url
+        }
+        guard let outputTracks = try? await AVURLAsset(url: out).load(.tracks) else {
+            try? FileManager.default.removeItem(at: out)
+            return url
+        }
+        var exported = OrientationTrackCounts()
+        for track in outputTracks where track.mediaType == .video || track.mediaType == .audio {
+            if track.mediaType == .video { exported.video += 1 } else { exported.audio += 1 }
+        }
+        guard OrientationTrackCounts.canReplaceOriginal(expected: expected, inserted: inserted, exported: exported) else {
+            try? FileManager.default.removeItem(at: out)
+            return url
+        }
+        do {
+            try FileManager.default.removeItem(at: url)
+        } catch {
+            try? FileManager.default.removeItem(at: out)
+            return url
+        }
         return out
     }
 }
@@ -636,7 +732,7 @@ struct PrompterRecorder: View {
     /// Prompts about a take go to this session's chat.
     let sessionID: String
     /// Sends a take to the Mac as the session's next take.
-    let send: (URL) -> Void
+    let send: (URL) -> Bool
     let close: () -> Void
     /// Closes the recorder and opens the chat.
     let toChat: () -> Void
@@ -797,7 +893,7 @@ struct PrompterRecorder: View {
                 }
             }
             HStack {
-                Button("Cancel") { if camera.recording { camera.toggle() }; close() }
+                Button("Cancel") { camera.cancel(); close() }
                     .font(.inter(.callout, .semibold)).foregroundStyle(.white).frame(width: 80)
                     .buttonStyle(.press)
                 Spacer()
@@ -810,6 +906,7 @@ struct PrompterRecorder: View {
                     .animation(Brand.spring, value: camera.recording)
                 }
                 .buttonStyle(Pressable(scale: 0.92, haptic: false))
+                .disabled(camera.saving)
                 .accessibilityLabel(camera.recording ? "Stop" : "Record")
                 Spacer()
                 Group {
@@ -854,7 +951,7 @@ struct PrompterRecorder: View {
                         .accessibilityLabel("Delete this take")
                     }
                     Spacer()
-                    Button { keep(file); close() } label: {
+                    Button { if keep(file) { close() } } label: {
                         Label(sent ? "Done" : "Send to Mac", systemImage: sent ? "checkmark" : "arrow.up")
                             .font(.inter(.footnote, .semibold))
                             .padding(.horizontal, 14).frame(height: 36)
@@ -866,9 +963,9 @@ struct PrompterRecorder: View {
                 Spacer()
                 QuickSay(sessionID: sessionID, toChat: toChat, from: "Record", placeholder: "Ask Takes about this take…",
                          wrap: { "About the take I just recorded on my phone (the newest take in this session; it may still be uploading): " + $0 },
-                         before: { keep(file) })
+                         before: { _ = keep(file) })
                     .environment(\.colorScheme, .dark)
-                Button { Brand.tap(.medium); keep(file); next(file) } label: {
+                Button { Brand.tap(.medium); if keep(file) { next(file) } } label: {
                     ZStack {
                         Circle().stroke(.white, lineWidth: 3).frame(width: 58, height: 58)
                         Circle().fill(Palette.danger).frame(width: 46, height: 46)
@@ -883,11 +980,13 @@ struct PrompterRecorder: View {
 
     /// Sends the take on screen to the Mac, once. A copy goes (a clone, no extra space): the
     /// outbox moves its file, and this one keeps playing.
-    private func keep(_ file: URL) {
-        guard !sent else { return }
+    private func keep(_ file: URL) -> Bool {
+        guard !sent else { return true }
         let copy = file.deletingLastPathComponent().appending(path: "send-" + file.lastPathComponent)
-        send((try? FileManager.default.copyItem(at: file, to: copy)) != nil ? copy : file)
-        sent = true
+        try? FileManager.default.removeItem(at: copy)
+        sent = send((try? FileManager.default.copyItem(at: file, to: copy)) != nil ? copy : file)
+        if !sent { try? FileManager.default.removeItem(at: copy) }
+        return sent
     }
 
     /// Back to the camera for the next take. A take not sent is deleted.

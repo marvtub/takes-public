@@ -4,7 +4,7 @@ import SwiftUI
 /// Skills for Claude Code, installed from inside Takes (2026-10-08). The chat is Claude Code, so a
 /// skill in ~/.claude/skills works in every chat. Takes brings its own (video edit, storyboard,
 /// image prompts) in Resources/plugin-skills, offers packs from their own GitHub repos
-/// (HyperFrames), and adds others from a GitHub link or a folder.
+/// (HyperFrames, Raea), and adds others from a GitHub link or a folder.
 ///
 /// Public since 2026-10-13, with the HyperFrames pack: The user wants both in the public Takes.
 enum SkillsPlugin {
@@ -21,7 +21,8 @@ enum SkillsPlugin {
 }
 
 /// A set of skills Takes offers from its own GitHub repo (2026-10-13). Takes downloads it when it
-/// is switched on, so the app never carries a copy and the user gets the newest one.
+/// is switched on and again each day at launch, so the app never carries a copy and the user
+/// gets the newest one (2026-11-04).
 struct SkillPack: Identifiable, Equatable {
     let id: String
     let title: String
@@ -32,6 +33,12 @@ struct SkillPack: Identifiable, Equatable {
     let path: String
     /// A tool the skills run, said under the switch when this Mac does not have it.
     var needs: (tool: String, label: String)? = nil
+    /// Off until the user switches it on: launch does not download it (Raea, 2026-11-05).
+    var startsOff = false
+    /// Runs before the skills download when the pack is switched on or updated (Raea's engine).
+    var setup: (@Sendable () async throws -> Void)? = nil
+    /// Runs when the pack is switched off.
+    var teardown: (@Sendable () throws -> Void)? = nil
 
     var link: String { path.isEmpty ? repo : "\(repo)/tree/main/\(path)" }
 
@@ -42,7 +49,18 @@ struct SkillPack: Identifiable, Equatable {
         what: "Motion graphics, title cards and captions, made in HTML. By HeyGen.",
         repo: "https://github.com/heygen-com/hyperframes", path: "skills",
         needs: ("node", "Needs Node.js (nodejs.org) to render"))
-    static let all: [SkillPack] = [hyperframes]
+    /// Raea (Shane Murphy, FSL-1.1): React compositions rendered on the GPU without a browser. Much
+    /// faster than HyperFrames on footage, and real 3D; no transparent layers. Early (canary), so it
+    /// starts off. Switching it on also downloads the engine (`RaeaEngine`).
+    static let raea = SkillPack(
+        id: "raea", title: "Raea",
+        what: "Fast GPU renders of footage with graphics, and 3D. Early.",
+        repo: "https://github.com/shinyobjectz/raea", path: "sdk/skills",
+        needs: ("raea", "The raea engine is missing: switch Raea off and on"),
+        startsOff: true,
+        setup: { try await RaeaEngine.install() },
+        teardown: { try RaeaEngine.remove() })
+    static let all: [SkillPack] = [hyperframes, raea]
 
     static func == (a: SkillPack, b: SkillPack) -> Bool { a.id == b.id }
 }
@@ -212,18 +230,37 @@ enum SkillShelf {
     }
 
     /// Downloads the pack and installs its skills in `home`, then copies them to `also` (the other
-    /// agents' folder). Skills the user has under the same name stay theirs.
+    /// agents' folder). Skills the user has under the same name stay theirs. A skill Takes installed
+    /// from the pack that the repo no longer has goes to the Trash (HyperFrames had dropped
+    /// hyperframes-core and five more by 2026-11-04; the old copies kept steering the chats).
     @discardableResult
     static func install(_ pack: SkillPack, to home: URL = home, also: [URL] = []) async throws -> [String] {
+        try await pack.setup?()
         let names = try await add(gitHub: pack.link, to: home)
         for dir in also {
             for n in names { if let s = read(home.appending(path: n)) { _ = try? install(s, source: pack.repo, to: dir) } }
         }
+        prune(pack, keeping: names, in: [home] + also)
+        UserDefaults.standard.set(Date(), forKey: fetchedKey(pack))
         return names
     }
 
+    /// The pack's skills Takes installed that are not in `names` go to the Trash.
+    static func prune(_ pack: SkillPack, keeping names: [String], in dirs: [URL]) {
+        for dir in dirs {
+            let items = (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? []
+            for f in items where source(of: f) == pack.repo && !names.contains(f.lastPathComponent) {
+                try? FileManager.default.trashItem(at: f, resultingItemURL: nil)
+            }
+        }
+    }
+
+    /// When Takes last downloaded the pack.
+    static func fetchedKey(_ pack: SkillPack) -> String { "skillPackFetched.\(pack.id)" }
+
     /// Every skill of the pack that Takes installed goes to the Trash, in each folder.
     static func remove(_ pack: SkillPack, from homes: [URL] = [home]) throws {
+        try pack.teardown?()
         for home in homes {
             let items = (try? FileManager.default.contentsOfDirectory(at: home, includingPropertiesForKeys: nil)) ?? []
             for f in items where source(of: f) == pack.repo { try FileManager.default.trashItem(at: f, resultingItemURL: nil) }
@@ -378,9 +415,14 @@ struct SkillsSettings: View {
         }
         .task {
             reload()
-            let needs = packs.compactMap { p in p.needs.map { (p.id, $0.tool) } }
-            lacking = await Task.detached { Set(needs.filter { !SkillShelf.has($0.1) }.map(\.0)) }.value
+            await checkTools()
         }
+    }
+
+    /// Packs whose tool this Mac lacks, again after a switch (Raea's switch installs its engine).
+    private func checkTools() async {
+        let needs = packs.compactMap { p in p.needs.map { (p.id, $0.tool) } }
+        lacking = await Task.detached { Set(needs.filter { !SkillShelf.has($0.1) }.map(\.0)) }.value
     }
 
     private func reload() {
@@ -455,6 +497,7 @@ struct SkillsSettings: View {
             } catch { note = (error.localizedDescription, false) }
             fetching = nil
             reload()
+            await checkTools()
         }
     }
 

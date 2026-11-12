@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <!-- Rack focus: a fake lens pull. The room behind the speaker slides out of focus and darkens a little while
+         the speaker stays sharp, with a slow push in, as if a fast lens racked to the face. Then it racks back.
+         Inputs next to this file: footage.mp4 (the moment, at the frame size), person.webm (its cutout) and
+         plate.png (the room without the speaker; the soft room is made from it, so no dark halo round the body).
+         Full frame: render it as mp4 and lay it over the cut. The frame size is data-width / data-height on #root.
+         Edit LOOK and AT below. -->
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+    <style>
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
+      #root { position: relative; width: 100%; height: 100%; overflow: hidden; background: #000; }
+      #cam, #root video, #vig { position: absolute; inset: 0; width: 100%; height: 100%; }
+      #root video { object-fit: cover; }
+      #vig { background: radial-gradient(ellipse at 50% 35%, rgba(0,0,0,0) 35%, rgba(0,0,0,.55) 100%); opacity: 0; }
+    </style>
+  </head>
+  <body>
+    <div id="root" data-composition-id="main" data-start="0" data-duration="3.2" data-width="1080" data-height="1920">
+      <div id="cam">
+        <video id="footage" class="clip" src="footage.mp4" muted playsinline data-start="0" data-track-index="0"></video>
+        <div id="bgwrap" style="position:absolute;inset:0;opacity:0"><img src="plate.png" style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover" /></div>
+        <div id="vig"></div>
+        <video id="person" class="clip" src="person.webm" muted playsinline data-start="0" data-track-index="1"></video>
+      </div>
+    </div>
+    <script>
+      // Look: how soft the room gets (px at a 1080 px short side), how dark, the push in, and where it pushes to.
+      const LOOK = { blur: 18, dark: 0.82, push: 1.07, at: { x: 0.5, y: 0.3 } };
+      // When (seconds): the pull starts, how long it takes, the pull back.
+      const AT = { pull: 0.3, pullFor: 0.7, back: 2.3, backFor: 0.4 };
+      const root = document.getElementById("root");
+      const FRAME = { w: Number(root.dataset.width), h: Number(root.dataset.height) };
+      const U = Math.min(FRAME.w, FRAME.h) / 1080;
+      const cam = document.getElementById("cam"), bg = document.getElementById("bgwrap");
+      cam.style.transformOrigin = `${LOOK.at.x * 100}% ${LOOK.at.y * 100}%`;
+      // The blurred room is scaled a hair so its soft edge never shows at the frame border.
+      const S = { k: 0 };
+      function draw() {
+        bg.style.filter = S.k > 0.002 ? `blur(${LOOK.blur * U * S.k}px) brightness(${1 - (1 - LOOK.dark) * S.k})` : "none";
+        bg.style.transform = `scale(${1 + 0.04 * S.k})`;
+        bg.style.opacity = Math.min(1, S.k * 6);
+        document.getElementById("vig").style.opacity = S.k;
+        cam.style.transform = `scale(${1 + (LOOK.push - 1) * S.k})`;
+      }
+      window.__timelines = window.__timelines || {};
+      const tl = gsap.timeline({ paused: true, onUpdate: draw });
+      tl.to(S, { k: 1, duration: AT.pullFor, ease: "power2.inOut" }, AT.pull);
+      tl.to(S, { k: 0, duration: AT.backFor, ease: "power2.inOut" }, AT.back);
+      tl.set({}, {}, Number(root.dataset.duration));
+      window.__timelines["main"] = tl;
+      draw(); tl.seek(0);
+    </script>
+  </body>
+</html>

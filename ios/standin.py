@@ -15,6 +15,9 @@ NOW = "2026-10-03T10:00:00Z"
 SID = "Tests/offline-video"
 state = {"script": "The first line of the script.\n\nThe second paragraph.", "comments": [], "log": [], "up": True,
          "chat": {"running": False, "messages": []}, "chat_revision": 0}
+idea_save_lock = threading.Lock()
+
+
 
 
 def message(index, text, role="claude"):
@@ -51,6 +54,8 @@ def wav(seconds=2, rate=8000):
     n = seconds * rate
     return (b"RIFF" + struct.pack("<I", 36 + n * 2) + b"WAVEfmt " + struct.pack("<IHHIIHH", 16, 1, 1, rate, rate * 2, 2, 16)
             + b"data" + struct.pack("<I", n * 2) + b"\0" * (n * 2))
+
+
 
 
 
@@ -114,6 +119,12 @@ def copilot():
                    stats=[{"at": NOW, "impressions": 900, "likes": 12, "replies": 2}])]}
 
 
+def copilot_load(author):
+    """One visible draft for the reordered-response UI test."""
+    return {"finding": False, "posting": False, "redrafting": False, "items": [
+        suggestion(90, "review", author, "The response order must not change this draft.")]}
+
+
 STYLES = {"styles": [
     {"name": "Bold", "description": "Big type", "isNew": True, "usedBy": [], "openComments": 0},
     {"name": "Magazine", "description": "Paper pages", "isNew": False, "poster": "/tmp/styles/Magazine/preview.png",
@@ -136,6 +147,59 @@ STYLE = {"id": "_library/styles/Magazine", "name": "Magazine", "folder": "/tmp/_
              {"path": "/tmp/_library/styles/Magazine/assets/motion/title-card-v1.mp4", "name": "title-card-v1.mp4", "version": 1,
               "kind": "video", "size": 100, "modified": NOW, "note": "Opens each video", "openComments": 0}]}]}],
          "openComments": 1}
+
+
+def site_numbers_extra():
+    """Numbers (2026-10-30): the sites behind the answers, the site checks with OpenSEO's crawl, Google rankings."""
+    return {"sites": [{"host": "alternativeto.net", "tag": "Claim", "answers": 3, "top": "alternativeto.net/software/teleprompter"},
+                      {"host": "reddit.com", "tag": "Earn", "answers": 2, "top": "reddit.com/r/macapps"},
+                      {"host": "descript.com", "tag": "Rival", "answers": 2, "top": "descript.com/teleprompter"}],
+            "skips": 4, "checked": NOW,
+            "checks": [{"id": "robots.txt", "ok": True, "detail": "AI crawlers allowed"},
+                       {"id": "llms.txt", "ok": False, "detail": "Not found (404)"},
+                       {"id": "Every page (OpenSEO crawl)", "ok": True, "detail": "21 pages, 18 small notes: 15 titles too long"}],
+            "ranks": {"checked": NOW, "checking": False, "top10": 1, "top100": 3, "cap": "at most $1.00",
+                      "rows": [{"keyword": "teleprompter app mac", "position": 7, "volume": 880, "change": 2},
+                               {"keyword": "mac video recorder", "position": 41, "volume": 1300, "change": -3},
+                               {"keyword": "free teleprompter mac", "position": 14, "volume": 140, "rivals": ["Textream", "VoicePrompter", "QPrompt"]},
+                               {"keyword": "linkedin video tool", "position": 88, "volume": 210},
+                               {"keyword": "screen studio alternative", "volume": 590}]}}
+
+
+EFFECTS = [
+    {"slug": "checklist", "name": "Checklist", "description": "A dark card with a title and 3 to 5 lines that tick as you say them.",
+     "when": "When you list steps, rules or reasons: '3 things before you post'.", "kind": "Overlay",
+     "needs": ["the title", "the lines, each with the time you say it", "the cut time where it starts"],
+     "seconds": 6, "shape": "any", "video": False, "poster": True, "readme": True},
+    {"slug": "text-behind", "name": "Text behind", "description": "A big word stands behind your head.",
+     "when": "For the one word the video is about.", "kind": "Cut-out", "needs": ["the word"],
+     "seconds": 4, "shape": "any", "video": False, "poster": True, "readme": True},
+    {"slug": "color-grade", "name": "Colour grade", "description": "A warm film grade on the whole video.",
+     "when": "When the footage looks flat.", "kind": "Full frame", "needs": [], "shape": "any",
+     "video": False, "poster": False, "readme": False}]
+
+
+def mentions():
+    """The Mac's @ list: styles, effects and skills (PhoneMention)."""
+    return ([{"kind": "Styles", "name": "Magazine", "detail": "In use", "id": "Styles:/tmp/_library/styles/Magazine"},
+             {"kind": "Styles", "name": "Bold", "id": "Styles:/tmp/_library/styles/Bold"}]
+            + [{"kind": "Effects", "name": e["name"], "detail": e["kind"], "id": "Effects:/fx/" + e["slug"], "effect": e["slug"]}
+               for e in EFFECTS]
+            + [{"kind": "Skills", "name": "Takes video edit", "id": "Skills:/skills/takes-video-edit"}])
+
+
+def poster(w=90, h=160):
+    """A plain 9:16 picture for an effect's preview: a dark gradient."""
+    import struct
+    import zlib
+    raw = b"".join(b"\x00" + bytes(c for x in range(w) for c in (30 + y * 60 // h, 30 + x * 40 // w, 70 + y * 90 // h)) for y in range(h))
+    def chunk(t, d):
+        return struct.pack(">I", len(d)) + t + d + struct.pack(">I", zlib.crc32(t + d) & 0xffffffff)
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b""))
+
+
+README = "# Checklist\n\nA dark card with a title and **3 to 5 lines**.\n\n## What you can change\n\n- The title\n- The lines\n\n```\n<div id=\"root\"></div>\n```\n"
 
 
 def detail():
@@ -234,14 +298,43 @@ class H(BaseHTTPRequestHandler):
             return
         if p == "/test/log":
             return self.send(state["log"])
+        if p == "/test/ideas/slow":
+            # Longer than the old editor's five-second polling limit: leaving the editor while
+            # this save runs used to start a second add before the first one answered.
+            state["slow_idea_save"] = True
+            state["idea_save_stats"] = {"started": 0, "active": 0, "maximumActive": 0}
+            return self.send({"ok": True})
+        if p == "/test/ideas/save-stats":
+            with idea_save_lock:
+                stats = dict(state.get("idea_save_stats", {}))
+            return self.send(stats)
         if p == "/test/reset":
             # Each UI test starts here: the whole suite shares one stand-in, and the last test's
             # fixtures, changes and log broke the next one (2026-10-28).
+            if state.get("copilot_test"):
+                state["copilot_test"]["gate"].set()
             state.clear()
             state.update(json.loads(json.dumps(FRESH)))
             session.clear()
             session.update(FRESH_SESSION)
             return self.send({"ok": True})
+        if p == "/test/copilot/reorder":
+            state["copilot_test"] = {"mode": "reorder", "gate": threading.Event(), "requests": 0,
+                                     "waiting": False, "olderFinished": False}
+            return self.send({"ok": True})
+        if p == "/test/copilot/hold":
+            if state.get("copilot_test"):
+                state["copilot_test"]["gate"].set()
+            state["copilot_test"] = {"mode": "hold", "gate": threading.Event(), "requests": 0,
+                                     "waiting": False, "olderFinished": False}
+            return self.send({"ok": True})
+        if p == "/test/copilot/release":
+            if state.get("copilot_test"):
+                state["copilot_test"]["gate"].set()
+            return self.send({"ok": True})
+        if p == "/test/copilot/status":
+            t = state.get("copilot_test") or {}
+            return self.send({k: t.get(k) for k in ("mode", "requests", "waiting", "olderFinished")})
         if p == "/test/screens":
             state["screens"] = True
             state["copilot"] = copilot()
@@ -289,6 +382,10 @@ class H(BaseHTTPRequestHandler):
             chat["messages"][-1]["done"] = True
             state["chat"] = chat
             state["chat_revision"] += 1
+            return self.send({"ok": True})
+        if p == "/test/climb-calm":
+            # The Climb page with the quick asks done and no step results yet (ClimbPhoneTests.writeStandIn "calm").
+            state["climbCalm"] = True
             return self.send({"ok": True})
         if p == "/test/carousel":
             carousel()
@@ -397,6 +494,22 @@ class H(BaseHTTPRequestHandler):
                               "file": FOLDER + "/voice/take-01-camera.wav" if state.get("voice") else None})
         if p == "/api/styles":
             return self.send(STYLES)
+        if p == "/api/effects":
+            if method == "POST":
+                state["log"].append({"effect": json.loads(self.body())})
+                return self.send({"ok": True})
+            return self.send(EFFECTS)
+        if p == "/api/effects/file":
+            readme = q.get("file") == "README.md"
+            b = README.encode() if readme else poster()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/markdown" if readme else "image/png")
+            self.send_header("Content-Length", str(len(b)))
+            self.end_headers()
+            self.wfile.write(b)
+            return
+        if p == "/api/mentions":
+            return self.send(mentions())
         if p == "/api/style":
             if method == "POST":
                 j = json.loads(self.body())
@@ -414,16 +527,24 @@ class H(BaseHTTPRequestHandler):
             return self.send(vs)
         if p == "/api/plugins" and state.get("parity"):
             return self.send([{"id": "consistency", "title": "Plan", "icon": "calendar"}])
+        if p == "/test/plan-first":
+            state["plan_first"] = True
+            state["chat"] = {"running": False, "messages": []}  # the Plan chat shows its intro
+            return self.send({"ok": True})
         if p == "/api/plan":
             # Plan (2026-10-25): the Mac's own answers for its test library (PlanPhoneTests.writeStandIn).
             if method == "POST":
-                state["log"].append({p: json.loads(self.body() or b"{}")})
+                j = json.loads(self.body() or b"{}")
+                state["log"].append({p: j})
+                if j.get("action") == "save":
+                    state.pop("plan_first", None)
                 return self.send({"ok": True})
             with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "TakesPhoneUITests/plan-standin.json")) as f:
                 c = json.load(f)
             if "choices" in q:
                 return self.send(c["choices"])
-            return self.send(c["plan"])
+            # The calm first open (2026-10-30): no plan yet, until I'm in saves one.
+            return self.send(c["first"] if state.get("plan_first") and "days" not in q else c["plan"])
         if p == "/api/carousel" and method == "POST":
             j = json.loads(self.body())
             c = state.get("carousel") or {"slides": [], "on": {}, "docTitle": ""}
@@ -519,8 +640,9 @@ class H(BaseHTTPRequestHandler):
             return self.send(detail())
         if p == "/api/chat":
             if method == "POST":
-                text = json.loads(self.body())["text"]
-                state["log"].append({"say": text, "id": q.get("id")})
+                j = json.loads(self.body())
+                text = j["text"]
+                state["log"].append(dict({"say": text, "id": q.get("id")}, **({"mentions": j["mentions"]} if j.get("mentions") else {})))
                 if state["chat"].get("running") and "queued" in state["chat"]:
                     chat = json.loads(json.dumps(state["chat"]))
                     chat["queued"].append(text)
@@ -560,12 +682,28 @@ class H(BaseHTTPRequestHandler):
                 j = json.loads(self.body())
                 c = {"id": "c%d" % (len(state["comments"]) + 1), "file": j["file"], "quote": j.get("quote"),
                      "text": j["text"], "status": "open", "by": "user", "at": NOW}
+                for k in ("slide", "rect", "start", "end", "shot"):
+                    if k in j:
+                        c[k] = j[k]
                 state["comments"].append(c)
-                state["log"].append({"comment": j["text"]})
+                state["log"].append({"comment": j["text"], **({"slide": j["slide"], "place": j.get("place")} if "slide" in j else {})})
                 return self.send(c)
             return self.send(state["comments"])
         if p == "/api/copilot":
             c = state.get("copilot") or {"items": [], "finding": False, "posting": False, "redrafting": False}
+            t = state.get("copilot_test")
+            if method == "GET" and t:
+                t["requests"] += 1
+                if t["mode"] == "hold" or t["requests"] == 1:
+                    t["waiting"] = True
+                    t["gate"].wait(timeout=30)
+                    t["waiting"] = False
+                    answer = copilot_load("Newer response" if t["mode"] == "hold" else "Older response")
+                    self.send(answer)
+                    if t["mode"] == "reorder":
+                        t["olderFinished"] = True
+                    return
+                return self.send(copilot_load("Newer response"))
             if method == "POST":
                 j = json.loads(self.body() or b"{}")
                 state["log"].append({p: j})

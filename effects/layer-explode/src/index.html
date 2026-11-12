@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <!-- Layer explode: the shot shrinks into a card, turns in 3D on a dark ground, and comes apart into the layers
+         it is made of, like glass panes in a row: the room, the title, the speaker, the sound. Each pane gets a
+         thin frame and a small label. The waveform on the sound pane plays along. Then the panes slide back
+         together and the card fills the frame again.
+         Inputs next to this file: footage.mp4 (the moment, at the frame size), person.webm (its cutout), plate.png
+         (the room without the speaker) and wave.js (from `python3 wave.py <audio> <start> <length> wave.js`).
+         Full frame: render it as mp4 and lay it over the cut. The frame size is data-width / data-height on #root.
+         Edit TITLE, LAYERS, LOOK and AT below. -->
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+    <script src="wave.js"></script>
+    <style>
+      @font-face { font-family: "Old Standard"; src: url("fonts/OldStandard-Regular.ttf"); font-weight: 400; }
+      @font-face { font-family: "Plex Mono"; src: url("fonts/IBMPlexMono-Medium.ttf"); font-weight: 500; }
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
+      #root { position: relative; width: 100%; height: 100%; overflow: hidden; background: var(--ground); }
+      #view { position: absolute; inset: 0; perspective: var(--persp); }
+      #group { position: absolute; inset: 0; transform-style: preserve-3d; }
+      .pane { position: absolute; inset: 0; transform-style: preserve-3d; }
+      .pane video, .pane img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+      .frame { position: absolute; inset: 0; border: var(--line) solid rgba(240, 236, 226, .85); opacity: 0; }
+      .label { position: absolute; left: 0; bottom: 100%; margin-bottom: calc(var(--u) * 14px); font-family: "Plex Mono", monospace;
+               color: #efeadf; letter-spacing: .14em; font-size: calc(var(--u) * 44px); opacity: 0; white-space: nowrap; }
+      #title { position: absolute; font-family: "Old Standard", serif; color: #f6f2e9; line-height: 0.9; letter-spacing: -0.02em; white-space: pre; }
+      #title span { opacity: 0; }
+      #wave { position: absolute; display: flex; align-items: center; }
+      #wave i { display: block; border-radius: 99px; }
+      #head { position: absolute; top: 0; bottom: 0; background: #f6f2e9; }
+    </style>
+  </head>
+  <body>
+    <div id="root" data-composition-id="main" data-start="0" data-duration="3.6" data-width="1080" data-height="1920">
+      <div id="fwrap" style="position:absolute;inset:0"><video id="footage" class="clip" src="footage.mp4" muted playsinline data-start="0" data-track-index="0"></video></div>
+      <div id="view"><div id="group">
+        <div class="pane" id="p-room"><img id="plate" src="plate.png" /><div class="frame"></div><div class="label"></div></div>
+        <div class="pane" id="p-type"><div id="title"></div><div class="frame"></div><div class="label"></div></div>
+        <div class="pane" id="p-me"><video id="person" class="clip" src="person.webm" muted playsinline data-start="0" data-track-index="1"></video><div class="frame"></div><div class="label"></div></div>
+        <div class="pane" id="p-sound"><div id="wave"></div><div class="frame"></div><div class="label"></div></div>
+      </div></div>
+    </div>
+    <script>
+      // The title on the TYPE pane: first line types on as the card turns, the second when it explodes.
+      const TITLE = { lines: ["layer", "explode"], x: 0.07, y: 0.12, size: 230 };
+      // The panes, back to front, with their labels. ROOM shows the plate once the panes split.
+      const LAYERS = ["ROOM", "TYPE", "ME", "SOUND"];
+      // Look. card = how small the card gets (1 = full frame). turn / tilt = the 3D angle (degrees). gap = space
+      // between panes (px at a 1080 px short side). played / left = waveform colours.
+      const LOOK = { ground: "#0e1913", card: 0.7, turn: 30, tilt: 9, gap: 330, played: "#efe8da", left: "#c9566a", persp: 2600 };
+      // When (seconds): shrink and turn, explode, start to close, back to full frame.
+      const AT = { turn: 0.25, explode: 0.85, close: 2.6, full: 3.0 };
+
+      const root = document.getElementById("root");
+      const FRAME = { w: Number(root.dataset.width), h: Number(root.dataset.height) };
+      const U = Math.min(FRAME.w, FRAME.h) / 1080;
+      Object.entries({ "--u": U, "--line": Math.max(1.5, 2.5 * U) + "px", "--ground": LOOK.ground, "--persp": LOOK.persp * U + "px" }).forEach(([k, v]) => root.style.setProperty(k, v));
+      const panes = [...document.querySelectorAll(".pane")];
+      panes.forEach((p, i) => (p.querySelector(".label").textContent = LAYERS[i] || ""));
+      // Labels step up a little from back to front.
+      panes.forEach((p, i) => (p.querySelector(".label").style.left = i * 8 * U + "px"));
+      // Title.
+      const title = document.getElementById("title");
+      Object.assign(title.style, { left: TITLE.x * FRAME.w + "px", top: TITLE.y * FRAME.h + "px", fontSize: TITLE.size * U + "px" });
+      const lines = TITLE.lines.map((ln) => { const d = document.createElement("div"); title.appendChild(d); return [...ln].map((c) => { const s = document.createElement("span"); s.textContent = c; d.appendChild(s); return s; }); });
+      // Waveform near the bottom.
+      const wave = document.getElementById("wave"), bars = window.WAVE || [];
+      const ww = FRAME.w * 0.62, wh = FRAME.h * 0.075, bw = ww / bars.length;
+      Object.assign(wave.style, { left: FRAME.w * 0.3 + "px", top: FRAME.h * 0.8 + "px", width: ww + "px", height: wh + "px", gap: bw * 0.35 + "px" });
+      const barEls = bars.map((v) => { const b = document.createElement("i"); Object.assign(b.style, { width: bw * 0.65 + "px", height: Math.max(0.06, v) * wh + "px" }); wave.appendChild(b); return b; });
+      const headEl = document.createElement("div"); headEl.id = "head"; headEl.style.width = Math.max(2, 3 * U) + "px"; wave.appendChild(headEl);
+      wave.style.position = "absolute";
+
+      const group = document.getElementById("group");
+      group.style.transformOrigin = "50% 50%";
+      const S = { s: 1, ry: 0, rx: 0, gap: 0, frames: 0 };
+      function draw() {
+        const t = tl.time();
+        group.style.transform = `scale(${S.s}) rotateX(${S.rx}deg) rotateY(${S.ry}deg)`;
+        panes.forEach((p, i) => {
+          p.style.transform = `translateZ(${(i - (panes.length - 1) / 2) * S.gap * U}px)`;
+          p.querySelector(".frame").style.opacity = S.frames;
+          p.querySelector(".label").style.opacity = S.frames;
+        });
+        // Typing: line 1 as the card turns, line 2 on the explode.
+        const typeAt = [AT.turn + 0.1, AT.explode];
+        lines.forEach((ln, j) => ln.forEach((s, i) => (s.style.opacity = t >= typeAt[j] + i * 0.05 ? 1 : 0)));
+        // Waveform: played part light, the rest red; the head moves across while the panes are apart.
+        const prog = Math.max(0, Math.min(1, (t - AT.explode) / (AT.close - AT.explode)));
+        barEls.forEach((b, i) => (b.style.background = i / bars.length < prog ? LOOK.played : LOOK.left));
+        headEl.style.left = prog * ww + "px"; headEl.style.position = "absolute";
+        wave.style.opacity = t >= AT.explode - 0.05 && t < AT.full ? 1 : 0;
+        // The real shot shows while the card is flat; in 3D the card is the plate + the cutout.
+        const flat = t < AT.turn + 0.02 || t >= AT.full;
+        document.getElementById("fwrap").style.opacity = flat ? 1 : 0;
+        document.getElementById("view").style.opacity = flat ? 0 : 1;
+      }
+      window.__timelines = window.__timelines || {};
+      const tl = gsap.timeline({ paused: true, onUpdate: draw });
+      // Shrink to a card and turn.
+      tl.to(S, { s: LOOK.card, ry: LOOK.turn * 0.55, rx: LOOK.tilt * 0.5, duration: 0.5, ease: "power3.inOut" }, AT.turn);
+      // Explode: the panes slide apart, frames and labels come on, the room shows its plate.
+      tl.to(S, { gap: LOOK.gap, ry: LOOK.turn, rx: LOOK.tilt, s: LOOK.card * 0.92, duration: 0.45, ease: "power3.out" }, AT.explode);
+      tl.to(S, { frames: 1, duration: 0.2 }, AT.explode + 0.05);
+      // Drift while open.
+      tl.to(S, { ry: LOOK.turn * 0.82, duration: AT.close - AT.explode - 0.45, ease: "sine.inOut" }, AT.explode + 0.45);
+      // Close and fill the frame again.
+      tl.to(S, { gap: 0, frames: 0, duration: 0.35, ease: "power3.in" }, AT.close);
+      tl.to(S, { s: 1, ry: 0, rx: 0, duration: AT.full - AT.close, ease: "power3.inOut" }, AT.close + 0.1);
+      tl.set([title, wave], { opacity: 0 }, AT.full + 0.05);
+      tl.set({}, {}, Number(root.dataset.duration));
+      window.__timelines["main"] = tl;
+      draw(); tl.seek(0);
+    </script>
+  </body>
+</html>

@@ -1,0 +1,15 @@
+{
+  "name": "Voice note",
+  "description": "A chat voice message pops in beside the speaker's round photo. Its waveform records in, bar by bar, from the speaker's real voice, with a gold line at the edge. A label types in, Send is pressed with a ripple, 'Delivered' ticks on, and it flies off.",
+  "when": "When you talk about sending a voice note, a message to someone, or 'I just tell it what to do'.",
+  "needs": [
+    "the label under the message",
+    "a round photo of the speaker (avatar.png)",
+    "the waveform (wave.js, made in the steps)",
+    "the cut time where it starts"
+  ],
+  "kind": "Full frame",
+  "length_s": 3,
+  "shape": "any",
+  "shipped": true
+}
