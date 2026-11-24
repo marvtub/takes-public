@@ -18,6 +18,10 @@ Takes shows each post the way LinkedIn, X, YouTube or Shorts will show it, so yo
 
 ## Install
 
+**[Download Takes for Mac (.dmg)](https://github.com/marvtub/takes-public/releases/latest/download/Takes.dmg)** · Apple silicon · macOS 15 or later
+
+Drag Takes to Applications. Takes is not notarized yet, so open System Settings > Privacy & Security and click **Open Anyway** once ([pictures of each step](https://gettakes.app/download)). Then click **Finish setup** in the sidebar.
+
 Paste this in Terminal:
 
 ```sh
@@ -29,7 +33,6 @@ It installs Takes, ffmpeg and Apple's developer tools, then opens Takes. Takes w
 <details>
 <summary>Other ways to install</summary>
 
-- **Download:** get `Takes.dmg` from [Releases](https://github.com/marvtub/takes-public/releases/latest) and drag Takes to Applications. Takes is not notarized yet, so open System Settings > Privacy & Security and click **Open Anyway** once ([pictures of each step](https://gettakes.app/download)). Then click **Finish setup** in the sidebar.
 - **From source:** clone this repo, `brew install ffmpeg`, then `./build.sh install`.
 
 </details>
