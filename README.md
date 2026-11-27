@@ -65,6 +65,12 @@ To install it you need Xcode and an Apple ID: `TAKES_TEAM=<team id> ios/install.
 
 ## How it works
 
+On an Apple-silicon Mac (macOS 15 or later), Claude Code can use the [`takes-video-edit` skill](https://github.com/marvtub/takes-public/blob/main/skills/takes-video-edit/SKILL.md) and the [MCP server bundled with Takes](https://gettakes.app/mcp) to turn your starred recording into a rough cut for review.
+
+With the skill enabled and the MCP server connected, star a take in a Takes session named “My first video.” In a new Claude Code chat where you can approve Takes tool requests, ask:
+
+> Use the takes-video-edit skill to make a rough cut of the starred take in my Takes session “My first video.” Trim the long pauses and give me the path to the draft so I can review it. Leave the original recording unchanged.
+
 Your library is plain folders in `~/Movies/Takes`. The app records into them, your agent reads and writes them through the `takes` MCP server, and the app updates when a file changes. The chat panel in the app runs on Claude Code, Codex or pi, on your own plan: the line under "Takes" in the chat picks the agent and the model, and Settings › Agents shows which agents can open your library.
 
 The server works with any MCP agent. On its first launch Takes adds it to each one on your Mac: Claude Code, Codex, Cursor, Gemini CLI, opencode, pi (with pi-mcp-adapter) and Claude Desktop. It also adds its skills (`takes-storyboard`, `takes-video-edit`, `takes-image-prompt`, `takes-ai-video`) to `~/.claude/skills` and `~/.agents/skills`, and downloads the [HyperFrames](https://github.com/heygen-com/hyperframes) skills (HeyGen) for motion graphics. So you can ask from any of them too. Plugins › Skills turns each skill on or off and adds any skill from GitHub. Another agent, or one you installed later: Settings › Agents › Connect, or `python3 /Applications/Takes.app/Contents/Resources/takes_mcp.py --setup`.
